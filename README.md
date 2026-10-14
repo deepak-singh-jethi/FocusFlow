@@ -46,14 +46,22 @@ FocusFlow is an elegant, native macOS productivity application crafted in Swift 
 - Xcode 15+ / Command Line Tools (`swiftc`)
 - Apple Silicon (arm64) or Universal
 
-### Compiling from Source
+### Building with Swift Package Manager (Recommended)
 ```bash
-# Compile native binary
+# Build with SPM
+swift build -c release
+
+# Run directly
+swift run FocusFlow
+```
+
+### Compiling with `swiftc`
+```bash
 swiftc -O -target arm64-apple-macos14.0 \
   -framework SwiftUI -framework AppKit -framework Combine -framework AVFoundation \
-  FocusFlowApp.swift -o FocusFlow
+  $(find Sources/FocusFlow -name "*.swift") \
+  -o FocusFlow
 
-# Run
 ./FocusFlow
 ```
 
