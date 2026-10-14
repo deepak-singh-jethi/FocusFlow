@@ -165,18 +165,20 @@ public struct DashboardTimerView: View {
                             .overlay(Capsule().stroke(Color.cyan.opacity(0.32), lineWidth: 1))
                         } else {
                             Menu {
-                                Section("Timer sessions") {
+                                Section("Timer presets") {
                                     ForEach([("Focus", 25), ("Short Break", 5), ("Long Break", 15), ("Exam Run", 50)], id: \.0) { preset in
-                                        Button { viewModel.requestPresetChange(name: preset.0, minutes: preset.1) } label: {
+                                        Button {
+                                            viewModel.requestPresetChange(name: preset.0, minutes: preset.1)
+                                        } label: {
                                             Label("\(preset.0) · \(preset.1) min", systemImage: viewModel.activeMode == "Pomodoro" && viewModel.activePreset == preset.0 ? "checkmark" : "timer")
                                         }
                                     }
-                                    Button {
-                                        viewModel.changeMode(to: "Custom Timer")
-                                        showingCustomPicker = true
-                                    } label: {
-                                        Label("Custom duration...", systemImage: "slider.horizontal.3")
-                                    }
+                                }
+                                Divider()
+                                Button {
+                                    showingCustomPicker = true
+                                } label: {
+                                    Label("Custom duration...", systemImage: "slider.horizontal.3")
                                 }
                             } label: {
                                 HStack(spacing: 8) {
@@ -192,7 +194,7 @@ public struct DashboardTimerView: View {
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundColor(.white)
                                 .padding(.horizontal, 16)
-                                .frame(minHeight: 38)
+                                .frame(height: 38)
                                 .background(
                                     Color.orange.opacity(isPresetHovered ? 0.20 : 0.12),
                                     in: Capsule()
@@ -204,6 +206,7 @@ public struct DashboardTimerView: View {
                                 .contentShape(Capsule())
                             }
                             .menuStyle(.borderlessButton)
+                            .fixedSize()
                             .contentShape(Capsule())
                             .onHover { hovering in
                                 withAnimation(.easeInOut(duration: 0.15)) {
@@ -226,7 +229,7 @@ public struct DashboardTimerView: View {
                                         }
                                         .foregroundColor(.white)
                                         .padding(.horizontal, 14)
-                                        .frame(minHeight: 38)
+                                        .frame(height: 38)
                                         .background(
                                             Color.white.opacity(isCustomPillHovered ? 0.16 : 0.08),
                                             in: Capsule()
@@ -237,13 +240,11 @@ public struct DashboardTimerView: View {
                                         .contentShape(Capsule())
                                     }
                                     .buttonStyle(.plain)
+                                    .fixedSize()
                                     .contentShape(Capsule())
                                     .onHover { hovering in
                                         isCustomPillHovered = hovering
                                         if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
-                                    }
-                                    .popover(isPresented: $showingCustomPicker, arrowEdge: .bottom) {
-                                        CustomDurationPopover(viewModel: viewModel, isPresented: $showingCustomPicker)
                                     }
 
                                     Button { viewModel.adjustCustomDuration(by: -1) } label: {
@@ -266,6 +267,7 @@ public struct DashboardTimerView: View {
                                     .buttonStyle(DashboardButtonStyle())
                                     .help("Increase by 1 minute")
                                 }
+                                .fixedSize()
                             }
                         }
 
@@ -517,6 +519,9 @@ public struct DashboardTimerView: View {
             }
             .padding(24)
             .frame(width: 400)
+        }
+        .sheet(isPresented: $showingCustomPicker) {
+            CustomDurationModalView(viewModel: viewModel, isPresented: $showingCustomPicker)
         }
     }
 }

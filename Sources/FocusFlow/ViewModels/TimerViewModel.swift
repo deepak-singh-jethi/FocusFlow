@@ -20,7 +20,7 @@ public class TimerViewModel: ObservableObject {
     // Custom Duration States
     @Published public var customMinutes: Int = 25
     @Published public var customSeconds: Int = 0
-    private var customDurationSeconds: Int = 25 * 60
+    public private(set) var customDurationSeconds: Int = 25 * 60
 
     // Preset & Modes
     @Published public var activePreset: String = "Focus" {
@@ -131,6 +131,7 @@ public class TimerViewModel: ObservableObject {
     // MARK: Mode Switching within Timer Sessions
     public func changeMode(to newMode: String) {
         if isTimerRunning { stopTimer() }
+        activeMode = newMode
         if newMode == "Pomodoro" {
             activePreset = "Focus"
             totalTime = 25 * 60
@@ -138,12 +139,13 @@ public class TimerViewModel: ObservableObject {
             preciseProgress = 1.0
         } else if newMode == "Custom Timer" {
             activePreset = "Custom"
-            totalTime = customDurationSeconds
+            totalTime = max(5, customDurationSeconds)
             timeRemaining = totalTime
             customMinutes = totalTime / 60
             customSeconds = totalTime % 60
             preciseProgress = 1.0
         }
+        persistData()
     }
 
     // MARK: Master Engine
