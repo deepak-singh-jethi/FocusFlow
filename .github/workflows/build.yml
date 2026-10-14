@@ -1,0 +1,27 @@
+name: FocusFlow CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    runs-on: macos-14
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Select Xcode
+      run: sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode.app
+
+    - name: Swift Version
+      run: swift --version
+
+    - name: Run Test Suite
+      run: swift test --scratch-path /tmp/focusflow-build
+
+    - name: Build Release Binary
+      run: swift build -c release --scratch-path /tmp/focusflow-build

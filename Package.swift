@@ -16,6 +16,11 @@ let package = Package(
         .executableTarget(
             name: "FocusFlow",
             path: "Sources/FocusFlow"
+        ),
+        .testTarget(
+            name: "FocusFlowTests",
+            dependencies: ["FocusFlow"],
+            path: "Tests/FocusFlowTests"
         )
     ]
 )

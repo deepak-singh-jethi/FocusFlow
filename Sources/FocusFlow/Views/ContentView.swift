@@ -1,10 +1,10 @@
 import SwiftUI
 
-// MARK: - Main Content View
+// MARK: - Main Content View (Type-Safe Navigation Coordinator)
 public struct ContentView: View {
     @StateObject private var viewModel = TimerViewModel()
     @StateObject private var audioPlayer = AmbientAudioPlayer()
-    @State private var sidebarSelection: String = "Focus Timer"
+    @State private var sidebarSelection: NavigationTab = .focusTimer
     @State private var isFocusState = false
     @State private var showingWorkspace = false
     @AppStorage("clockStyle") private var clockStyle = "Digital"
@@ -21,7 +21,7 @@ public struct ContentView: View {
                 sidebar
 
                 ZStack {
-                    if sidebarSelection == "Focus Timer" {
+                    if sidebarSelection == .focusTimer {
                         DashboardTimerView(
                             viewModel: viewModel,
                             gradient: accentGradient,
@@ -31,7 +31,7 @@ public struct ContentView: View {
                             isStopwatchMode: false,
                             onSwitchToStopwatch: {
                                 withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
-                                    sidebarSelection = "Stopwatch & Laps"
+                                    sidebarSelection = .stopwatch
                                 }
                             }
                         )
@@ -39,7 +39,7 @@ public struct ContentView: View {
                             insertion: .opacity.combined(with: .scale(scale: 0.985)),
                             removal: .opacity
                         ))
-                    } else if sidebarSelection == "Stopwatch & Laps" {
+                    } else if sidebarSelection == .stopwatch {
                         DashboardTimerView(
                             viewModel: viewModel,
                             gradient: accentGradient,
@@ -49,7 +49,7 @@ public struct ContentView: View {
                             isStopwatchMode: true,
                             onSwitchToTimer: {
                                 withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
-                                    sidebarSelection = "Focus Timer"
+                                    sidebarSelection = .focusTimer
                                 }
                             }
                         )
@@ -63,7 +63,7 @@ public struct ContentView: View {
                             if viewModel.isTimerRunning || viewModel.timeRemaining < viewModel.totalTime {
                                 PersistentCrossModeMiniBar(viewModel: viewModel, type: .focusTimer) {
                                     withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
-                                        sidebarSelection = "Focus Timer"
+                                        sidebarSelection = .focusTimer
                                     }
                                 }
                                 .padding(.horizontal, 24)
@@ -76,7 +76,7 @@ public struct ContentView: View {
                             if viewModel.isStopwatchRunning || viewModel.stopwatchTime > 0 {
                                 PersistentCrossModeMiniBar(viewModel: viewModel, type: .stopwatch) {
                                     withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
-                                        sidebarSelection = "Stopwatch & Laps"
+                                        sidebarSelection = .stopwatch
                                     }
                                 }
                                 .padding(.horizontal, 24)
@@ -100,7 +100,7 @@ public struct ContentView: View {
             .animation(.spring(response: 0.38, dampingFraction: 0.82), value: sidebarSelection)
 
             if isFocusState {
-                FocusStateView(viewModel: viewModel, clockStyle: $clockStyle, isPresented: $isFocusState, isStopwatch: sidebarSelection == "Stopwatch & Laps")
+                FocusStateView(viewModel: viewModel, clockStyle: $clockStyle, isPresented: $isFocusState, isStopwatch: sidebarSelection == .stopwatch)
                     .transition(.asymmetric(
                         insertion: .scale(scale: 0.96).combined(with: .opacity),
                         removal: .scale(scale: 0.96).combined(with: .opacity)
@@ -112,7 +112,7 @@ public struct ContentView: View {
         .background(bgMain)
         .ignoresSafeArea(.container, edges: .top)
         .sheet(isPresented: $showingWorkspace) {
-            RightPanelView(viewModel: viewModel, showLaps: sidebarSelection == "Stopwatch & Laps")
+            RightPanelView(viewModel: viewModel, showLaps: sidebarSelection == .stopwatch)
                 .frame(minWidth: 390, idealWidth: 430, minHeight: 520)
                 .background(bgMain)
         }
@@ -127,9 +127,9 @@ public struct ContentView: View {
     @ViewBuilder
     private var selectedPage: some View {
         switch sidebarSelection {
-        case "Tasks", "Study Tasks": TasksView(viewModel: viewModel)
-        case "Focus Soundscapes": SoundscapesView(audioPlayer: audioPlayer)
-        case "Insights & Stats": InsightsView(viewModel: viewModel)
+        case .tasks: TasksView(viewModel: viewModel)
+        case .soundscapes: SoundscapesView(audioPlayer: audioPlayer)
+        case .insights: InsightsView(viewModel: viewModel)
         default: SettingsView(viewModel: viewModel)
         }
     }

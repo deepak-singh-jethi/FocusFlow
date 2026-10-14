@@ -117,7 +117,7 @@ public struct DigitalClockView: View {
                                 .fill(LinearGradient(colors: [.orange, .pink], startPoint: .leading, endPoint: .trailing))
                                 .frame(width: bar.size.width * max(0.001, viewModel.preciseProgress))
                                 .shadow(color: .orange.opacity(0.4), radius: 4)
-                                .animation(.linear(duration: 0.025), value: viewModel.preciseProgress)
+                                .animation(.linear(duration: 0.1), value: viewModel.preciseProgress)
                         }
                     }
                     .frame(width: min(size * 1.30, 720), height: max(6, min(10, size * 0.018)))
@@ -141,7 +141,7 @@ public struct DigitalClockView: View {
     }
 }
 
-// MARK: - Ring Clock Face with Smooth Scaling for Fullscreen
+// MARK: - Ring Clock Face with Smooth Continuous Sweep
 public struct RingClockView: View {
     @ObservedObject public var viewModel: TimerViewModel
     public let size: CGFloat
@@ -182,7 +182,7 @@ public struct RingClockView: View {
                 .stroke(Color.white.opacity(0.06), lineWidth: strokeWidth)
                 .frame(width: ringDiameter, height: ringDiameter)
 
-            // Dynamic progress ring with continuous 60fps flowing sweep
+            // Dynamic progress ring with continuous flowing sweep
             Circle()
                 .trim(from: 0, to: max(0.0008, progress))
                 .stroke(
@@ -196,7 +196,7 @@ public struct RingClockView: View {
                 .rotationEffect(.degrees(-90))
                 .frame(width: ringDiameter, height: ringDiameter)
                 .shadow(color: (isStopwatch ? Color.cyan : Color.orange).opacity(isRunning ? 0.45 : 0.2), radius: 8)
-                .animation(.linear(duration: 0.025), value: progress)
+                .animation(.linear(duration: 0.1), value: progress)
 
             // Center Content
             VStack(spacing: max(6, size * 0.022)) {
@@ -243,7 +243,7 @@ public struct RingClockView: View {
     }
 }
 
-// MARK: - Precision Horology Analog Dial with Smooth Scaling for Fullscreen
+// MARK: - Precision Horology Analog Dial with Continuous Sweep
 public struct AnalogDialView: View {
     @ObservedObject public var viewModel: TimerViewModel
     public let size: CGFloat
@@ -330,7 +330,7 @@ public struct AnalogDialView: View {
                     .rotationEffect(.degrees(-90))
                     .frame(width: dialDiameter * 0.84, height: dialDiameter * 0.84)
                     .shadow(color: (isStopwatch ? Color.cyan : Color.orange).opacity(0.45), radius: 6)
-                    .animation(.linear(duration: 0.025), value: progress)
+                    .animation(.linear(duration: 0.1), value: progress)
 
                 // 60-Minute Precision Tick Marks
                 ForEach(0..<60, id: \.self) { mark in
@@ -389,7 +389,7 @@ public struct AnalogDialView: View {
                         .shadow(color: (isStopwatch ? Color.cyan : Color.orange).opacity(0.6), radius: 4)
                 }
                 .rotationEffect(.degrees(progress * 360))
-                .animation(.linear(duration: 0.025), value: progress)
+                .animation(.linear(duration: 0.1), value: progress)
 
                 // Precision Dual-Ring Center Hub
                 Circle()

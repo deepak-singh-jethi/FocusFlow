@@ -1,13 +1,13 @@
 import SwiftUI
 import AppKit
 
-// MARK: - Sidebar View
+// MARK: - Sidebar View (Type-Safe Navigation)
 public struct SidebarView: View {
     public let gradient: LinearGradient
-    @Binding public var selection: String
+    @Binding public var selection: NavigationTab
     @ObservedObject public var viewModel: TimerViewModel
 
-    public init(gradient: LinearGradient, selection: Binding<String>, viewModel: TimerViewModel) {
+    public init(gradient: LinearGradient, selection: Binding<NavigationTab>, viewModel: TimerViewModel) {
         self.gradient = gradient
         self._selection = selection
         self.viewModel = viewModel
@@ -44,53 +44,69 @@ public struct SidebarView: View {
                         .foregroundColor(.gray.opacity(0.7))
                         .padding(.horizontal, 12)
                         .padding(.bottom, 6)
+
                     SidebarItem(
-                        icon: "hourglass",
-                        title: "Focus Timer",
+                        icon: NavigationTab.focusTimer.icon,
+                        title: NavigationTab.focusTimer.title,
                         badge: (viewModel.isTimerRunning || viewModel.timeRemaining < viewModel.totalTime) ? viewModel.timerTimeString : nil,
-                        isSelected: selection == "Focus Timer",
+                        isSelected: selection == .focusTimer,
                         gradient: gradient
                     ) {
                         withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
-                            selection = "Focus Timer"
+                            selection = .focusTimer
                         }
                     }
 
                     SidebarItem(
-                        icon: "stopwatch",
-                        title: "Stopwatch & Laps",
+                        icon: NavigationTab.stopwatch.icon,
+                        title: NavigationTab.stopwatch.title,
                         badge: (viewModel.isStopwatchRunning || viewModel.stopwatchTime > 0) ? viewModel.stopwatchTimeString : nil,
-                        isSelected: selection == "Stopwatch & Laps",
+                        isSelected: selection == .stopwatch,
                         gradient: gradient
                     ) {
                         withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
-                            selection = "Stopwatch & Laps"
+                            selection = .stopwatch
                         }
                     }
 
                     SidebarItem(
-                        icon: "checklist",
-                        title: "Tasks",
+                        icon: NavigationTab.tasks.icon,
+                        title: NavigationTab.tasks.title,
                         badge: viewModel.tasks.isEmpty ? nil : "\(viewModel.tasks.filter(\.isCompleted).count)/\(viewModel.tasks.count)",
-                        isSelected: selection == "Tasks" || selection == "Study Tasks"
+                        isSelected: selection == .tasks
                     ) {
                         withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
-                            selection = "Tasks"
+                            selection = .tasks
                         }
                     }
-                    SidebarItem(icon: "headphones", title: "Focus Soundscapes", isSelected: selection == "Focus Soundscapes") {
+
+                    SidebarItem(
+                        icon: NavigationTab.soundscapes.icon,
+                        title: NavigationTab.soundscapes.title,
+                        isSelected: selection == .soundscapes
+                    ) {
                         withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
-                            selection = "Focus Soundscapes"
+                            selection = .soundscapes
                         }
                     }
-                    SidebarItem(icon: "chart.bar", title: "Insights & Stats", isSelected: selection == "Insights & Stats") {
+
+                    SidebarItem(
+                        icon: NavigationTab.insights.icon,
+                        title: NavigationTab.insights.title,
+                        isSelected: selection == .insights
+                    ) {
                         withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
-                            selection = "Insights & Stats"
+                            selection = .insights
                         }
                     }
-                    SidebarItem(icon: "gearshape", title: "Settings", isSelected: selection == "Settings") {
+
+                    SidebarItem(
+                        icon: NavigationTab.settings.icon,
+                        title: NavigationTab.settings.title,
+                        isSelected: selection == .settings
+                    ) {
                         withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
-                            selection = "Settings"
+                            selection = .settings
                         }
                     }
                 }

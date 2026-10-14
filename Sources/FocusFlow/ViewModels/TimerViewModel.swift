@@ -2,14 +2,16 @@ import SwiftUI
 import Combine
 import AppKit
 
-// MARK: - Timer & App State ViewModel
+// MARK: - Timer & App State ViewModel (Persistent & Power-Efficient)
 @MainActor
 public class TimerViewModel: ObservableObject {
     // MARK: Focus Timer States
     @Published public var timeRemaining: Int = 25 * 60
     @Published public var totalTime: Int = 25 * 60
     @Published public var currentSession: Int = 1
-    @Published public var totalSessions: Int = 4
+    @Published public var totalSessions: Int = 4 {
+        didSet { persistData() }
+    }
     @Published public var preciseProgress: Double = 1.0
     @Published public var isTimerRunning: Bool = false
     public var targetEndDate: Date?
@@ -21,7 +23,9 @@ public class TimerViewModel: ObservableObject {
     private var customDurationSeconds: Int = 25 * 60
 
     // Preset & Modes
-    @Published public var activePreset: String = "Focus"
+    @Published public var activePreset: String = "Focus" {
+        didSet { persistData() }
+    }
     public var isBreakPreset: Bool { activePreset == "Short Break" || activePreset == "Long Break" }
     public var isFocusPreset: Bool { !isBreakPreset }
 
@@ -33,7 +37,7 @@ public class TimerViewModel: ObservableObject {
     private var stopwatchStartDate: Date?
     private var stopwatchFractional: TimeInterval?
 
-    // Task States
+    // Task States (Persistent)
     @Published public var tasks: [FocusTask] = [
         FocusTask(title: "Deep Work Session", estimatedMinutes: 25, timeSpentSeconds: 0, icon: "star.fill", iconColor: .orange),
         FocusTask(title: "Project Review & Planning", estimatedMinutes: 30, timeSpentSeconds: 0, icon: "doc.text.fill", iconColor: .blue),
@@ -44,7 +48,9 @@ public class TimerViewModel: ObservableObject {
     @Published public var completedSessions: Int = 0
     @Published public var focusedSeconds: Int = 0
     @Published public var notes: [String] = []
-    @Published public var dailyGoalHours: Int = 4
+    @Published public var dailyGoalHours: Int = 4 {
+        didSet { persistData() }
+    }
 
     // Alerts & Modals
     @Published public var showPresetAlert: Bool = false
@@ -52,16 +58,75 @@ public class TimerViewModel: ObservableObject {
     @Published public var showNoteEditor: Bool = false
     @Published public var noteDraft: String = ""
     public var pendingPreset: (name: String, minutes: Int)? = nil
-    @Published public var autoStartNextSession: Bool = false
+    @Published public var autoStartNextSession: Bool = false {
+        didSet { persistData() }
+    }
 
-    // Master 50Hz Timer Engine
+    // Master Power-Efficient Timer Engine (10Hz / 100ms interval for 80% lower CPU wakeups)
     private var timerSubscription: AnyCancellable?
+    private let storage = FocusStorageService.shared
 
     // Active Timer Mode: "Pomodoro" or "Custom Timer"
     @Published public var activeMode: String = "Pomodoro"
     public var isRunning: Bool { isTimerRunning || isStopwatchRunning }
 
-    public init() {}
+    public init() {
+        loadPersistedData()
+        NotificationService.shared.requestAuthorization()
+        setupTerminationObserver()
+    }
+
+    private func setupTerminationObserver() {
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.handleAppTermination()
+            }
+        }
+    }
+
+    private func handleAppTermination() {
+        if isTimerRunning {
+            stopTimer()
+        }
+        if isStopwatchRunning {
+            stopStopwatch()
+        }
+        persistData()
+    }
+
+    // MARK: - Persistence Integration
+    public func loadPersistedData() {
+        if let saved = storage.load() {
+            if !saved.tasks.isEmpty {
+                self.tasks = saved.tasks
+            }
+            self.focusedSeconds = saved.focusedSeconds
+            self.completedSessions = saved.completedSessions
+            self.notes = saved.notes
+            self.dailyGoalHours = saved.dailyGoalHours
+            self.totalSessions = saved.totalSessions
+            self.autoStartNextSession = saved.autoStartNextSession
+            self.activePreset = saved.activePreset
+        }
+    }
+
+    public func persistData() {
+        let payload = FocusAppData(
+            tasks: tasks,
+            focusedSeconds: focusedSeconds,
+            completedSessions: completedSessions,
+            notes: notes,
+            dailyGoalHours: dailyGoalHours,
+            totalSessions: totalSessions,
+            autoStartNextSession: autoStartNextSession,
+            activePreset: activePreset
+        )
+        storage.save(payload)
+    }
 
     // MARK: Mode Switching within Timer Sessions
     public func changeMode(to newMode: String) {
@@ -85,7 +150,8 @@ public class TimerViewModel: ObservableObject {
     private func updateMasterEngine() {
         if isTimerRunning || isStopwatchRunning {
             if timerSubscription == nil {
-                timerSubscription = Timer.publish(every: 0.02, on: .main, in: .common)
+                // Relaxed 100ms interval (10Hz) dramatically reduces CPU wakeups while keeping animations completely liquid
+                timerSubscription = Timer.publish(every: 0.1, on: .main, in: .common)
                     .autoconnect()
                     .sink { [weak self] _ in
                         self?.tick()
@@ -177,6 +243,7 @@ public class TimerViewModel: ObservableObject {
         isTimerRunning = false
         targetEndDate = nil
         updateMasterEngine()
+        persistData()
     }
 
     public func toggleTimer() {
@@ -192,6 +259,7 @@ public class TimerViewModel: ObservableObject {
         fractionalRemaining = nil
         timeRemaining = totalTime
         preciseProgress = 1.0
+        persistData()
     }
 
     public func resetTimer() {
@@ -227,6 +295,7 @@ public class TimerViewModel: ObservableObject {
         isStopwatchRunning = false
         stopwatchStartDate = nil
         updateMasterEngine()
+        persistData()
     }
 
     public func toggleStopwatch() {
@@ -243,6 +312,7 @@ public class TimerViewModel: ObservableObject {
         stopwatchTime = 0
         lapTimes.removeAll()
         preciseStopwatchProgress = 0.0
+        persistData()
     }
 
     public func recordLap() {
@@ -280,6 +350,7 @@ public class TimerViewModel: ObservableObject {
         if tasks.count == 1 || !tasks.indices.contains(activeTaskIndex) || tasks[activeTaskIndex].isCompleted {
             activeTaskIndex = tasks.count - 1
         }
+        persistData()
     }
 
     public func selectTask(at index: Int) {
@@ -293,6 +364,7 @@ public class TimerViewModel: ObservableObject {
         if activeTaskIndex == index && tasks[index].isCompleted {
             advanceToNextAvailableTask(after: index)
         }
+        persistData()
     }
 
     public func removeTask(at index: Int) {
@@ -305,11 +377,13 @@ public class TimerViewModel: ObservableObject {
         } else if activeTaskIndex >= tasks.count {
             activeTaskIndex = tasks.count - 1
         }
+        persistData()
     }
 
     public func resetTaskTime(at index: Int) {
         guard tasks.indices.contains(index) else { return }
         tasks[index].timeSpentSeconds = 0
+        persistData()
     }
 
     public func saveNote() {
@@ -318,6 +392,13 @@ public class TimerViewModel: ObservableObject {
         notes.insert(trimmed, at: 0)
         noteDraft = ""
         showNoteEditor = false
+        persistData()
+    }
+
+    public func deleteNote(at index: Int) {
+        guard notes.indices.contains(index) else { return }
+        notes.remove(at: index)
+        persistData()
     }
 
     public func removeLap(at index: Int) {
@@ -351,6 +432,7 @@ public class TimerViewModel: ObservableObject {
         totalTime = total
         timeRemaining = total
         preciseProgress = 1.0
+        persistData()
     }
 
     public func adjustCustomDuration(by minutes: Int) {
@@ -365,6 +447,7 @@ public class TimerViewModel: ObservableObject {
         totalTime = newTotal
         timeRemaining = newTotal
         preciseProgress = 1.0
+        persistData()
     }
 
     public func applyPendingPreset() {
@@ -386,6 +469,7 @@ public class TimerViewModel: ObservableObject {
         totalTime = minutes * 60
         timeRemaining = totalTime
         preciseProgress = 1.0
+        persistData()
     }
 
     // MARK: Session Flow
@@ -402,6 +486,9 @@ public class TimerViewModel: ObservableObject {
     private func handleSessionComplete() {
         stopTimer()
         fractionalRemaining = nil
+
+        // Native macOS User Notification
+        NotificationService.shared.sendSessionCompleteNotification(presetName: activePreset, isBreak: isBreakPreset)
 
         // Completion chime (native macOS alert sound)
         if let chime = NSSound(named: NSSound.Name("Glass")) {
@@ -423,6 +510,7 @@ public class TimerViewModel: ObservableObject {
             let nextBreakMinutes = isFinalSession ? 15 : 5
 
             applyPreset(name: nextBreakPreset, minutes: nextBreakMinutes)
+            persistData()
             if autoStartNextSession {
                 startTimer()
             }
@@ -432,6 +520,7 @@ public class TimerViewModel: ObservableObject {
                 currentSession = 1
             }
             applyPreset(name: "Focus", minutes: 25)
+            persistData()
             if autoStartNextSession {
                 startTimer()
             }
@@ -451,6 +540,7 @@ public class TimerViewModel: ObservableObject {
 
         timeRemaining = totalTime
         preciseProgress = 1.0
+        persistData()
     }
 
     private func advanceToNextAvailableTask(after index: Int) {

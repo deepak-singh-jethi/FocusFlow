@@ -1,7 +1,7 @@
 import SwiftUI
 import AVFoundation
 
-// MARK: - Ambient Audio Service
+// MARK: - Ambient Audio Service (Multi-Environment Resource Locator)
 @MainActor
 public final class AmbientAudioPlayer: ObservableObject {
     @Published public private(set) var selectedSound = "Rain"
@@ -14,6 +14,36 @@ public final class AmbientAudioPlayer: ObservableObject {
 
     public init() {}
 
+    private func resolveSoundURL(named sound: String) -> URL? {
+        let fileManager = FileManager.default
+
+        // 1. App Bundle Resource Subdirectory
+        if let url = Bundle.main.url(forResource: sound, withExtension: "mp3", subdirectory: "Soundscapes"),
+           fileManager.fileExists(atPath: url.path) {
+            return url
+        }
+
+        // 2. Direct App Bundle Resource
+        if let url = Bundle.main.url(forResource: sound, withExtension: "mp3"),
+           fileManager.fileExists(atPath: url.path) {
+            return url
+        }
+
+        // 3. Contents/Resources/Soundscapes path
+        let appBundleSoundscapes = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/Soundscapes/\(sound).mp3")
+        if fileManager.fileExists(atPath: appBundleSoundscapes.path) {
+            return appBundleSoundscapes
+        }
+
+        // 4. Working Directory Assets fallback (for `swift run` or SPM development)
+        let cwdSoundscapes = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Assets/Soundscapes/\(sound).mp3")
+        if fileManager.fileExists(atPath: cwdSoundscapes.path) {
+            return cwdSoundscapes
+        }
+
+        return nil
+    }
+
     public func toggle(_ sound: String) {
         if isPlaying && selectedSound == sound {
             stop()
@@ -21,8 +51,8 @@ public final class AmbientAudioPlayer: ObservableObject {
         }
         guard ["Rain", "Ocean", "Forest"].contains(sound) else { return }
         playbackError = nil
-        guard let url = Bundle.main.url(forResource: sound, withExtension: "mp3", subdirectory: "Soundscapes") else {
-            playbackError = "The \(sound) recording is missing from this app build."
+        guard let url = resolveSoundURL(named: sound) else {
+            playbackError = "The \(sound) recording could not be located in the application bundle."
             return
         }
         do {
@@ -44,7 +74,7 @@ public final class AmbientAudioPlayer: ObservableObject {
             }
             isPlaying = true
         } catch {
-            playbackError = "Could not open the \(sound) recording."
+            playbackError = "Could not open the \(sound) recording: \(error.localizedDescription)"
         }
     }
 
