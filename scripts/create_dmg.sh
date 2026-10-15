@@ -16,6 +16,19 @@ if [ ! -f "$BG_IMAGE" ]; then
     swift "$PROJECT_ROOT/scripts/make_dmg_background.swift"
 fi
 
+# 1.5. Compile latest release binary and update app bundle
+echo "Compiling latest release binary..."
+swift build -c release --scratch-path /tmp/focusflow-build
+
+echo "Updating FocusFlow.app bundle with latest release binary..."
+mkdir -p "$APP_PATH/Contents/MacOS"
+cp /tmp/focusflow-build/release/FocusFlow "$APP_PATH/Contents/MacOS/FocusFlow"
+chmod +x "$APP_PATH/Contents/MacOS/FocusFlow"
+
+if [ -f "$PROJECT_ROOT/FocusFlow.entitlements" ]; then
+    codesign --force --deep --sign - --entitlements "$PROJECT_ROOT/FocusFlow.entitlements" "$APP_PATH" 2>/dev/null || true
+fi
+
 # 2. Cleanup previous runs
 rm -f "$TEMP_DMG" "$DMG_OUTPUT"
 hdiutil info | grep '/Volumes/FocusFlow' | awk '{print $1}' | while read -r dev; do
