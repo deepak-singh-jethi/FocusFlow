@@ -25,7 +25,7 @@ public struct PersistentCrossModeMiniBar: View {
     private var barColor: Color {
         switch type {
         case .focusTimer:
-            return viewModel.activePreset.contains("Break") ? .teal : .orange
+            return viewModel.displayedTimerPreset.contains("Break") ? .teal : .orange
         case .stopwatch:
             return .cyan
         }
@@ -34,7 +34,7 @@ public struct PersistentCrossModeMiniBar: View {
     private var icon: String {
         switch type {
         case .focusTimer:
-            return viewModel.activePreset.contains("Break") ? "cup.and.saucer.fill" : "flame.fill"
+            return viewModel.displayedTimerPreset.contains("Break") ? "cup.and.saucer.fill" : "flame.fill"
         case .stopwatch:
             return "stopwatch.fill"
         }
@@ -43,16 +43,17 @@ public struct PersistentCrossModeMiniBar: View {
     private var label: String {
         switch type {
         case .focusTimer:
-            return "\(viewModel.activePreset.uppercased()) SESSION ACTIVE"
+            let status = isRunning ? "ACTIVE" : "PAUSED"
+            return "\(viewModel.displayedTimerPreset.uppercased()) SESSION \(status)"
         case .stopwatch:
-            return "STOPWATCH ACTIVE"
+            return viewModel.isStopwatchRunning ? "STOPWATCH ACTIVE" : "STOPWATCH PAUSED"
         }
     }
 
     private var timeText: String {
         switch type {
         case .focusTimer:
-            return viewModel.timerTimeString
+            return viewModel.displayedTimerTimeString
         case .stopwatch:
             return viewModel.stopwatchTimeString
         }
@@ -61,7 +62,7 @@ public struct PersistentCrossModeMiniBar: View {
     private var isRunning: Bool {
         switch type {
         case .focusTimer:
-            return viewModel.isTimerRunning
+            return viewModel.isDisplayedTimerRunning
         case .stopwatch:
             return viewModel.isStopwatchRunning
         }
@@ -70,7 +71,7 @@ public struct PersistentCrossModeMiniBar: View {
     private var switchButtonText: String {
         switch type {
         case .focusTimer:
-            return "Open Focus Timer"
+            return viewModel.hasPreservedSession ? "Return to \(viewModel.displayedTimerPreset)" : "Open Focus Timer"
         case .stopwatch:
             return "Open Stopwatch"
         }
@@ -78,6 +79,7 @@ public struct PersistentCrossModeMiniBar: View {
 
     private func triggerSwitch() {
         withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
+            viewModel.restorePreservedSessionIfNeeded()
             onSwitch()
         }
     }
@@ -121,8 +123,8 @@ public struct PersistentCrossModeMiniBar: View {
                             Capsule().fill(Color.white.opacity(0.08))
                             Capsule()
                                 .fill(LinearGradient(colors: [barColor, .pink], startPoint: .leading, endPoint: .trailing))
-                                .frame(width: geo.size.width * max(0.001, viewModel.preciseProgress))
-                                .animation(.linear(duration: 0.025), value: viewModel.preciseProgress)
+                                .frame(width: geo.size.width * max(0.001, viewModel.displayedTimerProgress))
+                                .animation(.linear(duration: 0.025), value: viewModel.displayedTimerProgress)
                         }
                     }
                     .frame(width: 70, height: 5)
@@ -134,7 +136,12 @@ public struct PersistentCrossModeMiniBar: View {
             // Play / Pause Toggle
             Button {
                 if type == .focusTimer {
-                    viewModel.toggleTimer()
+                    if !viewModel.isTimerActive && viewModel.hasPreservedSession {
+                        viewModel.restorePreservedSession()
+                        viewModel.startTimer()
+                    } else {
+                        viewModel.toggleTimer()
+                    }
                 } else {
                     viewModel.toggleStopwatch()
                 }

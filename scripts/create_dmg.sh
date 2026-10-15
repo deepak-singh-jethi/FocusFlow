@@ -13,7 +13,7 @@ echo "=== Building Professional macOS DMG for FocusFlow ==="
 # 1. Generate DMG background if needed
 if [ ! -f "$BG_IMAGE" ]; then
     echo "Rendering high-res background graphic..."
-    swift "$PROJECT_ROOT/scratch/make_dmg_background.swift"
+    swift "$PROJECT_ROOT/scripts/make_dmg_background.swift"
 fi
 
 # 2. Cleanup previous runs

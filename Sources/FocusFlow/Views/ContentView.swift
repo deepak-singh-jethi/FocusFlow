@@ -2,8 +2,8 @@ import SwiftUI
 
 // MARK: - Main Content View (Type-Safe Navigation Coordinator)
 public struct ContentView: View {
-    @StateObject private var viewModel = TimerViewModel()
-    @StateObject private var audioPlayer = AmbientAudioPlayer()
+    @ObservedObject public var viewModel: TimerViewModel
+    @ObservedObject public var audioPlayer: AmbientAudioPlayer
     @State private var sidebarSelection: NavigationTab = .focusTimer
     @State private var isFocusState = false
     @State private var showingWorkspace = false
@@ -13,7 +13,10 @@ public struct ContentView: View {
     let bgSidebar = Color(red: 0.11, green: 0.12, blue: 0.16)
     let accentGradient = LinearGradient(colors: [Color.orange, Color.pink], startPoint: .topLeading, endPoint: .bottomTrailing)
 
-    public init() {}
+    public init(viewModel: TimerViewModel? = nil, audioPlayer: AmbientAudioPlayer? = nil) {
+        self.viewModel = viewModel ?? TimerViewModel()
+        self.audioPlayer = audioPlayer ?? AmbientAudioPlayer()
+    }
 
     public var body: some View {
         ZStack {
@@ -60,9 +63,10 @@ public struct ContentView: View {
                     } else {
                         VStack(spacing: 0) {
                             // Persistent Mini Bar if Focus Timer is running or active
-                            if viewModel.isTimerRunning || viewModel.timeRemaining < viewModel.totalTime {
+                            if viewModel.isTimerRunning || viewModel.timeRemaining < viewModel.totalTime || viewModel.hasPreservedSession {
                                 PersistentCrossModeMiniBar(viewModel: viewModel, type: .focusTimer) {
                                     withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
+                                        viewModel.restorePreservedSessionIfNeeded()
                                         sidebarSelection = .focusTimer
                                     }
                                 }
@@ -80,7 +84,7 @@ public struct ContentView: View {
                                     }
                                 }
                                 .padding(.horizontal, 24)
-                                .padding(.top, (viewModel.isTimerRunning || viewModel.timeRemaining < viewModel.totalTime) ? 4 : 14)
+                                .padding(.top, (viewModel.isTimerRunning || viewModel.timeRemaining < viewModel.totalTime || viewModel.hasPreservedSession) ? 4 : 14)
                                 .padding(.bottom, 6)
                                 .transition(.move(edge: .top).combined(with: .opacity))
                             }
@@ -96,6 +100,7 @@ public struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(bgMain)
+                .clipped()
             }
             .animation(.spring(response: 0.38, dampingFraction: 0.82), value: sidebarSelection)
 

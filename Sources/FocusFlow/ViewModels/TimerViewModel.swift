@@ -2,7 +2,7 @@ import SwiftUI
 import Combine
 import AppKit
 
-// MARK: - Timer & App State ViewModel (Persistent & Power-Efficient)
+// MARK: - Timer & App State ViewModel (Persistent, Date-Aware & Power-Efficient)
 @MainActor
 public class TimerViewModel: ObservableObject {
     // MARK: Focus Timer States
@@ -26,14 +26,35 @@ public class TimerViewModel: ObservableObject {
     @Published public var activePreset: String = "Focus" {
         didSet { persistData() }
     }
-    public var isBreakPreset: Bool { activePreset == "Short Break" || activePreset == "Long Break" }
+    @Published public var isBreakSession: Bool = false {
+        didSet { persistData() }
+    }
+    public var isBreakPreset: Bool { isBreakSession || activePreset == "Short Break" || activePreset == "Long Break" || activePreset == "Break" }
     public var isFocusPreset: Bool { !isBreakPreset }
 
-    // MARK: Stopwatch States
+    // MARK: Date-Aware Analytics & Session Records (Priority 2)
+    @Published public var sessionRecords: [FocusSessionRecord] = []
+    public var legacyLifetimeFocusedSeconds: Int? = nil
+    @Published public var todayFocusedSeconds: Int = 0
+    @Published public var weeklyFocusedSeconds: Int = 0
+    @Published public var lifetimeFocusedSeconds: Int = 0
+    @Published public var focusedSeconds: Int = 0 // Maintained for backward compatibility with existing views
+
+    // Wall-clock segment tracking (prevents duplicate counting on pause/resume/tick)
+    private var sessionSegmentStartDate: Date?
+
+    // MARK: Stopwatch States (Priority 5)
     @Published public var stopwatchTime: Int = 0
     @Published public var preciseStopwatchProgress: Double = 0.0
     @Published public var isStopwatchRunning: Bool = false
-    @Published public var lapTimes: [String] = []
+    @Published public var laps: [StopwatchLap] = []
+    public var lapTimes: [String] {
+        laps.map { lap in
+            let m = Int(lap.totalTime) / 60
+            let s = Int(lap.totalTime) % 60
+            return String(format: "%02d:%02d", m, s)
+        }
+    }
     private var stopwatchStartDate: Date?
     private var stopwatchFractional: TimeInterval?
 
@@ -46,7 +67,6 @@ public class TimerViewModel: ObservableObject {
     ]
     @Published public var activeTaskIndex: Int = 0
     @Published public var completedSessions: Int = 0
-    @Published public var focusedSeconds: Int = 0
     @Published public var notes: [String] = []
     @Published public var dailyGoalHours: Int = 4 {
         didSet { persistData() }
@@ -62,15 +82,63 @@ public class TimerViewModel: ObservableObject {
         didSet { persistData() }
     }
 
+    // MARK: - Preserved Background Session & Mode Conflict States
+    @Published public var preservedSession: PreservedTimerSession?
+    @Published public var showConflictModal: Bool = false
+    public var pendingTimerRequest: (name: String, minutes: Int, seconds: Int, mode: String, isBreak: Bool)? = nil
+
+    public var hasPreservedSession: Bool {
+        preservedSession != nil
+    }
+
+    public var isTimerActive: Bool {
+        isTimerRunning || (timeRemaining < totalTime && timeRemaining > 0)
+    }
+
+    // Dynamic helpers for mini-bar to accurately reflect active or preserved timer
+    public var displayedTimerPreset: String {
+        if isTimerActive {
+            return activePreset
+        } else if let preserved = preservedSession {
+            return preserved.activePreset
+        }
+        return activePreset
+    }
+
+    public var displayedTimerTimeString: String {
+        if isTimerActive {
+            return timerTimeString
+        } else if let preserved = preservedSession {
+            return preserved.timeString
+        }
+        return timerTimeString
+    }
+
+    public var isDisplayedTimerRunning: Bool {
+        isTimerRunning
+    }
+
+    public var displayedTimerProgress: Double {
+        if isTimerActive {
+            return preciseProgress
+        } else if let preserved = preservedSession {
+            return preserved.preciseProgress
+        }
+        return preciseProgress
+    }
+
     // Master Power-Efficient Timer Engine (10Hz / 100ms interval for 80% lower CPU wakeups)
     private var timerSubscription: AnyCancellable?
-    private let storage = FocusStorageService.shared
+    private let storage: FocusStorageService
+    private var isLoadingPersistedData = false
+    private var lastPersistTime: Date = .distantPast
 
     // Active Timer Mode: "Pomodoro" or "Custom Timer"
     @Published public var activeMode: String = "Pomodoro"
     public var isRunning: Bool { isTimerRunning || isStopwatchRunning }
 
-    public init() {
+    public init(storage: FocusStorageService = .shared) {
+        self.storage = storage
         loadPersistedData()
         NotificationService.shared.requestAuthorization()
         setupTerminationObserver()
@@ -95,57 +163,278 @@ public class TimerViewModel: ObservableObject {
         if isStopwatchRunning {
             stopStopwatch()
         }
-        persistData()
+        persistData(force: true)
     }
 
-    // MARK: - Persistence Integration
+    // MARK: - Persistence Integration (Priority 4A & 4C)
     public func loadPersistedData() {
-        if let saved = storage.load() {
-            if !saved.tasks.isEmpty {
-                self.tasks = saved.tasks
-            }
-            self.focusedSeconds = saved.focusedSeconds
-            self.completedSessions = saved.completedSessions
-            self.notes = saved.notes
-            self.dailyGoalHours = saved.dailyGoalHours
-            self.totalSessions = saved.totalSessions
-            self.autoStartNextSession = saved.autoStartNextSession
-            self.activePreset = saved.activePreset
+        isLoadingPersistedData = true
+        defer {
+            isLoadingPersistedData = false
+            recalculateFocusMetrics()
         }
+
+        guard let saved = storage.load() else {
+            // First run on a fresh machine (no storage file yet) -> Keep default initial tasks
+            recalculateFocusMetrics()
+            return
+        }
+
+        // Existing saved file -> Faithfully restore tasks, even if intentionally empty!
+        self.tasks = saved.tasks
+        self.sessionRecords = saved.sessionRecords
+        self.legacyLifetimeFocusedSeconds = saved.legacyLifetimeFocusedSeconds
+        self.completedSessions = saved.completedSessions
+        self.notes = saved.notes
+        self.dailyGoalHours = saved.dailyGoalHours
+        self.totalSessions = saved.totalSessions
+        self.autoStartNextSession = saved.autoStartNextSession
+        self.activePreset = saved.activePreset
+        self.laps = saved.laps
+        self.preservedSession = saved.preservedSession
     }
 
-    public func persistData() {
+    public func persistData(force: Bool = false) {
+        guard !isLoadingPersistedData else { return }
+
+        let now = Date()
+        // Throttle disk writes to avoid repeated writes during UI animations or high frequency changes
+        if !force && now.timeIntervalSince(lastPersistTime) < 1.0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.persistData(force: true)
+            }
+            return
+        }
+        lastPersistTime = now
+
         let payload = FocusAppData(
             tasks: tasks,
-            focusedSeconds: focusedSeconds,
+            focusedSeconds: todayFocusedSeconds,
             completedSessions: completedSessions,
             notes: notes,
             dailyGoalHours: dailyGoalHours,
             totalSessions: totalSessions,
             autoStartNextSession: autoStartNextSession,
-            activePreset: activePreset
+            activePreset: activePreset,
+            clockStyle: "Digital",
+            sessionRecords: sessionRecords,
+            legacyLifetimeFocusedSeconds: legacyLifetimeFocusedSeconds,
+            laps: laps,
+            preservedSession: preservedSession
         )
         storage.save(payload)
     }
 
+    // MARK: - Date-Aware Analytics Recalculation (Priority 2)
+    public func recalculateFocusMetrics(calendar: Calendar = .current, now: Date = Date()) {
+        let activeElapsed: Int
+        if isTimerRunning, isFocusPreset, let start = sessionSegmentStartDate {
+            activeElapsed = max(0, Int(now.timeIntervalSince(start)))
+        } else {
+            activeElapsed = 0
+        }
+
+        // 1. Today's focus time (calculated strictly from dated records overlapping today)
+        let recordsToday = sessionRecords.reduce(0) { $0 + $1.duration(on: now, calendar: calendar) }
+        self.todayFocusedSeconds = recordsToday + activeElapsed
+
+        // 2. Weekly focus time (calculated across the past 7 days)
+        let startOfToday = calendar.startOfDay(for: now)
+        let sevenDaysAgo = calendar.date(byAdding: .day, value: -6, to: startOfToday) ?? startOfToday
+        let recordsWeekly = sessionRecords.reduce(0) { total, record in
+            let effectiveStart = max(record.startTime, sevenDaysAgo)
+            let effectiveEnd = min(record.endTime, now)
+            if effectiveEnd > effectiveStart {
+                let totalSpan = max(1.0, record.endTime.timeIntervalSince(record.startTime))
+                let overlap = effectiveEnd.timeIntervalSince(effectiveStart)
+                let ratio = min(1.0, max(0.0, overlap / totalSpan))
+                return total + Int(round(Double(record.durationSeconds) * ratio))
+            }
+            return total
+        }
+        self.weeklyFocusedSeconds = recordsWeekly + activeElapsed
+
+        // 3. Lifetime focus time (all dated records + any legacy unassigned historical total)
+        let recordsLifetime = sessionRecords.reduce(0) { $0 + $1.durationSeconds }
+        let legacy = legacyLifetimeFocusedSeconds ?? 0
+        self.lifetimeFocusedSeconds = recordsLifetime + legacy + activeElapsed
+
+        // Maintain focusedSeconds for direct backward-compatible binding
+        self.focusedSeconds = self.todayFocusedSeconds
+    }
+
+    private func recordActiveSessionSegment() {
+        guard let start = sessionSegmentStartDate else { return }
+        sessionSegmentStartDate = nil
+        let now = Date()
+        let elapsed = max(0, Int(now.timeIntervalSince(start)))
+        guard elapsed > 0 else { return }
+
+        if isFocusPreset {
+            let activeTaskId = tasks.indices.contains(activeTaskIndex) ? tasks[activeTaskIndex].id : nil
+            let record = FocusSessionRecord(
+                startTime: start,
+                endTime: now,
+                durationSeconds: elapsed,
+                mode: activePreset,
+                taskId: activeTaskId
+            )
+            sessionRecords.append(record)
+            recalculateFocusMetrics(now: now)
+            persistData()
+        }
+    }
+
     // MARK: Mode Switching within Timer Sessions
     public func changeMode(to newMode: String) {
-        if isTimerRunning { stopTimer() }
-        activeMode = newMode
         if newMode == "Pomodoro" {
-            activePreset = "Focus"
-            totalTime = 25 * 60
-            timeRemaining = totalTime
-            preciseProgress = 1.0
+            switchToFocus(minutes: 25)
         } else if newMode == "Custom Timer" {
-            activePreset = "Custom"
-            totalTime = max(5, customDurationSeconds)
-            timeRemaining = totalTime
-            customMinutes = totalTime / 60
-            customSeconds = totalTime % 60
-            preciseProgress = 1.0
+            requestModeOrPresetChange(name: "Custom", minutes: customMinutes, seconds: customSeconds, mode: "Custom Timer", isBreak: false)
         }
+    }
+
+    // MARK: - Conflict-Aware Mode / Preset Requests
+    public func requestModeOrPresetChange(name: String, minutes: Int, seconds: Int = 0, mode: String = "Pomodoro", isBreak: Bool = false) {
+        let isSame = (activePreset == name && activeMode == mode && (mode != "Custom Timer" || totalTime == (minutes * 60 + seconds)))
+        if isSame { return }
+
+        // If a timer is currently active (running or paused with time elapsed):
+        if isTimerActive {
+            pendingTimerRequest = (name: name, minutes: minutes, seconds: seconds, mode: mode, isBreak: isBreak)
+            showConflictModal = true
+        } else {
+            // Idle timer -> directly switch without interruption
+            applyPresetDirectly(name: name, minutes: minutes, seconds: seconds, mode: mode, isBreak: isBreak)
+        }
+    }
+
+    public func applyPresetDirectly(name: String, minutes: Int, seconds: Int = 0, mode: String = "Pomodoro", isBreak: Bool = false) {
+        if isTimerRunning { stopTimer() }
+        fractionalRemaining = nil
+        activePreset = name
+        activeMode = mode
+        isBreakSession = isBreak
+        let total = max(5, minutes * 60 + seconds)
+        customMinutes = total / 60
+        customSeconds = total % 60
+        customDurationSeconds = total
+        totalTime = total
+        timeRemaining = total
+        preciseProgress = 1.0
         persistData()
+    }
+
+    // MARK: - 3-Option Conflict Resolution Actions
+    public func continueCurrentTimer() {
+        showConflictModal = false
+        pendingTimerRequest = nil
+    }
+
+    public func pauseAndSwitch() {
+        guard let pending = pendingTimerRequest else {
+            showConflictModal = false
+            return
+        }
+
+        // 1. Record active elapsed segment if running
+        recordActiveSessionSegment()
+
+        // 2. Pause active timer
+        if isTimerRunning {
+            isTimerRunning = false
+            targetEndDate = nil
+            fractionalRemaining = TimeInterval(timeRemaining)
+            updateMasterEngine()
+        }
+
+        // 3. Save current session into preservedSession
+        preservedSession = PreservedTimerSession(
+            activePreset: activePreset,
+            activeMode: activeMode,
+            isBreakSession: isBreakSession,
+            totalTime: totalTime,
+            timeRemaining: timeRemaining,
+            preciseProgress: preciseProgress,
+            customMinutes: customMinutes,
+            customSeconds: customSeconds,
+            currentSession: currentSession,
+            activeTaskIndex: activeTaskIndex
+        )
+
+        // 4. Apply new requested preset/mode
+        applyPresetDirectly(name: pending.name, minutes: pending.minutes, seconds: pending.seconds, mode: pending.mode, isBreak: pending.isBreak)
+
+        showConflictModal = false
+        pendingTimerRequest = nil
+        persistData()
+    }
+
+    public func endAndSwitch() {
+        guard let pending = pendingTimerRequest else {
+            showConflictModal = false
+            return
+        }
+
+        // 1. Record completed focus time into session records
+        recordActiveSessionSegment()
+
+        // 2. Stop timer and clear preserved session
+        stopTimer()
+        fractionalRemaining = nil
+        preservedSession = nil
+
+        // 3. Apply new requested preset/mode
+        applyPresetDirectly(name: pending.name, minutes: pending.minutes, seconds: pending.seconds, mode: pending.mode, isBreak: pending.isBreak)
+
+        showConflictModal = false
+        pendingTimerRequest = nil
+        persistData()
+    }
+
+    public func restorePreservedSession() {
+        guard let preserved = preservedSession else { return }
+
+        // If current timer is active, swap it into preservedSession so neither is lost!
+        let currentWasActive = isTimerRunning || (timeRemaining < totalTime && timeRemaining > 0)
+        let swapSession = currentWasActive ? PreservedTimerSession(
+            activePreset: activePreset,
+            activeMode: activeMode,
+            isBreakSession: isBreakSession,
+            totalTime: totalTime,
+            timeRemaining: timeRemaining,
+            preciseProgress: preciseProgress,
+            customMinutes: customMinutes,
+            customSeconds: customSeconds,
+            currentSession: currentSession,
+            activeTaskIndex: activeTaskIndex
+        ) : nil
+
+        if isTimerRunning {
+            stopTimer()
+        }
+
+        // Restore preserved session values
+        activePreset = preserved.activePreset
+        activeMode = preserved.activeMode
+        isBreakSession = preserved.isBreakSession
+        totalTime = preserved.totalTime
+        timeRemaining = preserved.timeRemaining
+        preciseProgress = preserved.preciseProgress
+        customMinutes = preserved.customMinutes
+        customSeconds = preserved.customSeconds
+        customDurationSeconds = preserved.totalTime
+        currentSession = preserved.currentSession
+        activeTaskIndex = preserved.activeTaskIndex
+
+        preservedSession = swapSession
+        persistData()
+    }
+
+    public func restorePreservedSessionIfNeeded() {
+        if hasPreservedSession && !isTimerRunning {
+            restorePreservedSession()
+        }
     }
 
     // MARK: Master Engine
@@ -166,6 +455,8 @@ public class TimerViewModel: ObservableObject {
     }
 
     private func tick() {
+        let now = Date()
+
         // 1. Tick Focus Timer smoothly if running
         if isTimerRunning, let target = targetEndDate {
             let remaining = target.timeIntervalSinceNow
@@ -174,11 +465,11 @@ public class TimerViewModel: ObservableObject {
                 let uncounted = timeRemaining
                 timeRemaining = 0
                 if isFocusPreset && uncounted > 0 {
-                    focusedSeconds += uncounted
                     if tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted {
                         tasks[activeTaskIndex].timeSpentSeconds += uncounted
                     }
                 }
+                recordActiveSessionSegment()
                 handleSessionComplete()
             } else {
                 if totalTime > 0 {
@@ -189,25 +480,24 @@ public class TimerViewModel: ObservableObject {
                     let delta = timeRemaining - newTime
                     timeRemaining = newTime
                     if isFocusPreset && delta > 0 {
-                        focusedSeconds += delta
                         if tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted {
                             tasks[activeTaskIndex].timeSpentSeconds += delta
                         }
                     }
+                    recalculateFocusMetrics(now: now)
                 }
             }
         }
 
         // 2. Tick Stopwatch smoothly if running
         if isStopwatchRunning, let start = stopwatchStartDate {
-            let elapsed = Date().timeIntervalSince(start)
+            let elapsed = now.timeIntervalSince(start)
             let newTime = max(Int(elapsed), 0)
             if stopwatchTime != newTime {
                 let delta = newTime - stopwatchTime
                 stopwatchTime = newTime
                 if delta > 0 && tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted {
                     tasks[activeTaskIndex].timeSpentSeconds += delta
-                    focusedSeconds += delta
                 }
             }
             preciseStopwatchProgress = (elapsed.truncatingRemainder(dividingBy: 60.0)) / 60.0
@@ -217,11 +507,13 @@ public class TimerViewModel: ObservableObject {
     // MARK: Focus Timer Core Controls
     public func startTimer() {
         guard !isTimerRunning else { return }
+        // Ensure only one countdown timer runs at a time
         isTimerRunning = true
         let remainingInterval = fractionalRemaining ?? TimeInterval(timeRemaining)
         targetEndDate = Date().addingTimeInterval(remainingInterval)
         preciseProgress = totalTime > 0 ? min(max(remainingInterval / Double(totalTime), 0.0), 1.0) : 1.0
         fractionalRemaining = nil
+        sessionSegmentStartDate = Date()
         updateMasterEngine()
     }
 
@@ -232,7 +524,6 @@ public class TimerViewModel: ObservableObject {
             let newRemaining = max(Int(ceil(remaining)), 0)
             if isFocusPreset, newRemaining < timeRemaining {
                 let delta = timeRemaining - newRemaining
-                focusedSeconds += delta
                 if tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted {
                     tasks[activeTaskIndex].timeSpentSeconds += delta
                 }
@@ -242,6 +533,7 @@ public class TimerViewModel: ObservableObject {
                 preciseProgress = min(max(remaining / Double(totalTime), 0.0), 1.0)
             }
         }
+        recordActiveSessionSegment()
         isTimerRunning = false
         targetEndDate = nil
         updateMasterEngine()
@@ -252,11 +544,17 @@ public class TimerViewModel: ObservableObject {
         if isTimerRunning {
             stopTimer()
         } else {
-            startTimer()
+            if timeRemaining == 0 && hasPreservedSession {
+                restorePreservedSession()
+                startTimer()
+            } else {
+                startTimer()
+            }
         }
     }
 
     public func resetFocusTimer() {
+        recordActiveSessionSegment()
         stopTimer()
         fractionalRemaining = nil
         timeRemaining = totalTime
@@ -268,7 +566,7 @@ public class TimerViewModel: ObservableObject {
         resetFocusTimer()
     }
 
-    // MARK: Stopwatch Core Controls
+    // MARK: Stopwatch Core Controls (Priority 5)
     public func startStopwatch() {
         guard !isStopwatchRunning else { return }
         isStopwatchRunning = true
@@ -287,7 +585,6 @@ public class TimerViewModel: ObservableObject {
                 let delta = newTime - stopwatchTime
                 if delta > 0 && tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted {
                     tasks[activeTaskIndex].timeSpentSeconds += delta
-                    focusedSeconds += delta
                 }
             }
             stopwatchFractional = elapsed
@@ -312,13 +609,64 @@ public class TimerViewModel: ObservableObject {
         stopStopwatch()
         stopwatchFractional = nil
         stopwatchTime = 0
-        lapTimes.removeAll()
+        laps.removeAll()
         preciseStopwatchProgress = 0.0
         persistData()
     }
 
     public func recordLap() {
-        lapTimes.insert(stopwatchTimeString, at: 0)
+        let currentTotal: TimeInterval
+        if isStopwatchRunning, let start = stopwatchStartDate {
+            currentTotal = max(0, Date().timeIntervalSince(start))
+        } else {
+            currentTotal = max(0, stopwatchFractional ?? TimeInterval(stopwatchTime))
+        }
+
+        // Previous cumulative total time across laps:
+        let previousTotal = laps.first?.totalTime ?? 0.0
+        let lapDuration = max(0, currentTotal - previousTotal)
+        let nextLapNumber = laps.count + 1
+
+        let newLap = StopwatchLap(
+            lapNumber: nextLapNumber,
+            lapDuration: lapDuration,
+            totalTime: currentTotal,
+            timestamp: Date()
+        )
+        laps.insert(newLap, at: 0)
+        persistData()
+    }
+
+    public func removeLap(at index: Int) {
+        guard laps.indices.contains(index) else { return }
+        laps.remove(at: index)
+        persistData()
+    }
+
+    public var fastestLapIndex: Int? {
+        guard laps.count >= 2 else { return nil }
+        var bestIndex = 0
+        var minDuration = laps[0].lapDuration
+        for (i, lap) in laps.enumerated() {
+            if lap.lapDuration < minDuration {
+                minDuration = lap.lapDuration
+                bestIndex = i
+            }
+        }
+        return bestIndex
+    }
+
+    public var slowestLapIndex: Int? {
+        guard laps.count >= 2 else { return nil }
+        var worstIndex = 0
+        var maxDuration = laps[0].lapDuration
+        for (i, lap) in laps.enumerated() {
+            if lap.lapDuration > maxDuration {
+                maxDuration = lap.lapDuration
+                worstIndex = i
+            }
+        }
+        return worstIndex
     }
 
     public func requestReset(isStopwatch: Bool = false) {
@@ -403,83 +751,47 @@ public class TimerViewModel: ObservableObject {
         persistData()
     }
 
-    public func removeLap(at index: Int) {
-        guard lapTimes.indices.contains(index) else { return }
-        lapTimes.remove(at: index)
-    }
-
     public func requestPresetChange(name: String, minutes: Int) {
         guard minutes > 0 else { return }
-        if timeRemaining < totalTime {
-            pendingPreset = (name, minutes)
-            showPresetAlert = true
-        } else {
-            applyPreset(name: name, minutes: minutes)
-        }
+        let isBreak = (name == "Short Break" || name == "Long Break" || name == "Break")
+        requestModeOrPresetChange(name: name, minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: isBreak)
     }
 
     public func setCustomDuration(minutes: Int, seconds: Int) {
         let safeM = max(0, min(minutes, 360))
         let safeS = max(0, min(seconds, 59))
-        let total = max(5, safeM * 60 + safeS)
-
-        customMinutes = total / 60
-        customSeconds = total % 60
-        customDurationSeconds = total
-
-        if isTimerRunning { stopTimer() }
-        fractionalRemaining = nil
-        activeMode = "Custom Timer"
-        activePreset = "Custom"
-        totalTime = total
-        timeRemaining = total
-        preciseProgress = 1.0
-        persistData()
+        requestModeOrPresetChange(name: "Custom", minutes: safeM, seconds: safeS, mode: "Custom Timer", isBreak: false)
     }
 
-    public func adjustCustomDuration(by minutes: Int) {
-        guard !isTimerRunning else { return }
-        let currentTotal = totalTime
-        let newTotal = min(max(currentTotal + minutes * 60, 5), 360 * 60)
-        customDurationSeconds = newTotal
-        customMinutes = newTotal / 60
-        customSeconds = newTotal % 60
-        activeMode = "Custom Timer"
-        activePreset = "Custom"
-        totalTime = newTotal
-        timeRemaining = newTotal
-        preciseProgress = 1.0
-        persistData()
+    public func switchToBreak(minutes: Int = 5) {
+        requestModeOrPresetChange(name: "Short Break", minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: true)
+    }
+
+    public func switchToFocus(minutes: Int = 25) {
+        requestModeOrPresetChange(name: "Focus", minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: false)
     }
 
     public func applyPendingPreset() {
-        if let preset = pendingPreset {
-            applyPreset(name: preset.name, minutes: preset.minutes)
-            pendingPreset = nil
-        }
+        guard let pending = pendingPreset else { return }
+        requestPresetChange(name: pending.name, minutes: pending.minutes)
+        pendingPreset = nil
     }
 
     public func cancelPendingPreset() {
         pendingPreset = nil
     }
 
-    private func applyPreset(name: String, minutes: Int) {
-        stopTimer()
-        fractionalRemaining = nil
-        activeMode = "Pomodoro"
-        activePreset = name
-        totalTime = minutes * 60
-        timeRemaining = totalTime
-        preciseProgress = 1.0
-        persistData()
+    public func applyPreset(name: String, minutes: Int) {
+        let isBreak = (name == "Short Break" || name == "Long Break" || name == "Break")
+        applyPresetDirectly(name: name, minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: isBreak)
     }
 
-    // MARK: Session Flow
     public func skipSession() {
+        recordActiveSessionSegment()
         stopTimer()
         fractionalRemaining = nil
         if isBreakPreset {
-            applyPreset(name: "Focus", minutes: 25)
+            applyPresetDirectly(name: "Focus", minutes: 25, mode: "Pomodoro", isBreak: false)
         } else {
             advanceSession()
         }
@@ -501,17 +813,16 @@ public class TimerViewModel: ObservableObject {
 
         if isFocusPreset {
             completedSessions += 1
-            if tasks.indices.contains(activeTaskIndex) {
-                tasks[activeTaskIndex].isCompleted = true
-                advanceToNextAvailableTask(after: activeTaskIndex)
-            }
+            // A task often requires multiple focus sessions.
+            // Finishing a session must NOT mark the task completed or auto-advance tasks.
+            // Tasks remain incomplete until the user explicitly toggles completion.
 
             let isFinalSession = currentSession >= totalSessions
             currentSession = isFinalSession ? (autoStartNextSession ? currentSession : 1) : currentSession + 1
             let nextBreakPreset = isFinalSession ? "Long Break" : "Short Break"
             let nextBreakMinutes = isFinalSession ? 15 : 5
 
-            applyPreset(name: nextBreakPreset, minutes: nextBreakMinutes)
+            applyPresetDirectly(name: nextBreakPreset, minutes: nextBreakMinutes, mode: "Pomodoro", isBreak: true)
             persistData()
             if autoStartNextSession {
                 startTimer()
@@ -521,72 +832,83 @@ public class TimerViewModel: ObservableObject {
             if activePreset == "Long Break" {
                 currentSession = 1
             }
-            applyPreset(name: "Focus", minutes: 25)
+            applyPresetDirectly(name: "Focus", minutes: 25, mode: "Pomodoro", isBreak: false)
             persistData()
             if autoStartNextSession {
                 startTimer()
             }
-            return
         }
     }
 
     private func advanceSession() {
-        if currentSession < totalSessions {
-            currentSession += 1
-        } else {
-            currentSession = 1
-        }
-
-        // Advance to next task if available
-        advanceToNextAvailableTask(after: activeTaskIndex)
-
-        timeRemaining = totalTime
-        preciseProgress = 1.0
+        recordActiveSessionSegment()
+        completedSessions += 1
+        let isFinalSession = currentSession >= totalSessions
+        currentSession = isFinalSession ? (autoStartNextSession ? currentSession : 1) : currentSession + 1
+        let nextBreakPreset = isFinalSession ? "Long Break" : "Short Break"
+        let nextBreakMinutes = isFinalSession ? 15 : 5
+        applyPresetDirectly(name: nextBreakPreset, minutes: nextBreakMinutes, mode: "Pomodoro", isBreak: true)
         persistData()
+        if autoStartNextSession {
+            startTimer()
+        }
     }
 
-    private func advanceToNextAvailableTask(after index: Int) {
-        guard !tasks.isEmpty else { activeTaskIndex = 0; return }
-        for offset in 1...tasks.count {
-            let candidate = (max(index, -1) + offset) % tasks.count
-            if !tasks[candidate].isCompleted {
-                activeTaskIndex = candidate
+    private func advanceToNextAvailableTask(after currentIndex: Int) {
+        guard !tasks.isEmpty else { return }
+        let count = tasks.count
+        for offset in 1..<count {
+            let nextIndex = (currentIndex + offset) % count
+            if !tasks[nextIndex].isCompleted {
+                activeTaskIndex = nextIndex
                 return
             }
         }
-        activeTaskIndex = -1
     }
 
-    // MARK: UI Helpers
+    // MARK: Computed Helpers for Display
+    public var timeString: String {
+        let m = timeRemaining / 60
+        let s = timeRemaining % 60
+        return String(format: "%02d:%02d", m, s)
+    }
+
     public var timerTimeString: String {
-        let minutes = timeRemaining / 60
-        let seconds = timeRemaining % 60
-        return String(format: "%02d:%02d", minutes, seconds)
+        timeString
     }
 
     public var stopwatchTimeString: String {
-        let minutes = stopwatchTime / 60
-        let seconds = stopwatchTime % 60
-        return String(format: "%02d:%02d", minutes, seconds)
-    }
-
-    public var timeString: String {
-        timerTimeString
+        let m = stopwatchTime / 60
+        let s = stopwatchTime % 60
+        return String(format: "%02d:%02d", m, s)
     }
 
     public var formattedCustomDuration: String {
         let m = totalTime / 60
         let s = totalTime % 60
-        if m > 0 && s > 0 {
+        if s > 0 {
             return "\(m)m \(s)s"
-        } else if m > 0 {
-            return "\(m) min"
         } else {
-            return "\(s)s"
+            return "\(m)m"
         }
     }
 
     public var fillAmount: Double {
         preciseProgress
+    }
+
+    public func adjustCustomDuration(by minutes: Int) {
+        guard !isTimerRunning else { return }
+        let currentTotal = totalTime
+        let newTotal = min(max(currentTotal + minutes * 60, 5), 360 * 60)
+        customDurationSeconds = newTotal
+        customMinutes = newTotal / 60
+        customSeconds = newTotal % 60
+        activeMode = "Custom Timer"
+        activePreset = "Custom"
+        totalTime = newTotal
+        timeRemaining = newTotal
+        preciseProgress = 1.0
+        persistData()
     }
 }

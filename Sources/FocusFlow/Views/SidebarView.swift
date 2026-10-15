@@ -113,7 +113,7 @@ public struct SidebarView: View {
                 .padding(.horizontal, 12)
             }
 
-            DailyProgressWidget(gradient: gradient, focusedSeconds: viewModel.focusedSeconds, goalHours: viewModel.dailyGoalHours)
+            DailyProgressWidget(gradient: gradient, focusedSeconds: viewModel.todayFocusedSeconds, goalHours: viewModel.dailyGoalHours)
                 .padding(.horizontal, 14)
                 .padding(.top, 14)
                 .padding(.bottom, 18)

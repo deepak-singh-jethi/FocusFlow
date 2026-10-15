@@ -127,24 +127,40 @@ public struct RightPanelView: View {
                                 .font(.system(size: 11))
                                 .foregroundColor(.gray.opacity(0.8))
                         }
-                        if viewModel.lapTimes.isEmpty {
+                        if viewModel.laps.isEmpty {
                             emptyState(icon: "flag", title: "No laps yet", detail: "Start the stopwatch and record a split.")
                         } else {
                             VStack(spacing: 7) {
-                                ForEach(Array(viewModel.lapTimes.enumerated()), id: \.offset) { index, lapTime in
+                                ForEach(Array(viewModel.laps.enumerated()), id: \.element.id) { index, lap in
+                                    let isFastest = viewModel.fastestLapIndex == index
+                                    let isSlowest = viewModel.slowestLapIndex == index
                                     HStack {
-                                        Text("Lap \(viewModel.lapTimes.count - index)")
-                                            .font(.system(size: 12, weight: .medium))
-                                            .foregroundColor(.gray)
+                                        HStack(spacing: 6) {
+                                            Text("Lap \(lap.lapNumber)")
+                                                .font(.system(size: 12, weight: .medium))
+                                                .foregroundColor(.gray)
+                                            if isFastest {
+                                                Text("FAST")
+                                                    .font(.system(size: 8, weight: .bold))
+                                                    .foregroundColor(.green)
+                                            } else if isSlowest {
+                                                Text("SLOW")
+                                                    .font(.system(size: 8, weight: .bold))
+                                                    .foregroundColor(.orange)
+                                            }
+                                        }
                                         Spacer()
-                                        Text(lapTime)
+                                        Text("+ \(lap.formattedLapDuration)")
+                                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                            .foregroundColor(isFastest ? .green : (isSlowest ? .orange : .gray))
+                                        Text(lap.formattedTotalTime)
                                             .font(.system(size: 13, weight: .semibold, design: .monospaced))
                                             .foregroundColor(.white)
                                     }
                                     .padding(.horizontal, 12)
                                     .padding(.vertical, 9)
                                     .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
-                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.08), lineWidth: 1))
+                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(isFastest ? Color.green.opacity(0.3) : (isSlowest ? Color.orange.opacity(0.3) : Color.white.opacity(0.08)), lineWidth: 1))
                                 }
                             }
                         }
@@ -190,6 +206,37 @@ public struct RightPanelView: View {
             .padding(.bottom, 22)
         }
         .scrollIndicators(.hidden)
+        .overlay {
+            if viewModel.showConflictModal, let pending = viewModel.pendingTimerRequest {
+                let targetDuration = pending.seconds > 0 ? "\(pending.minutes)m \(pending.seconds)s" : "\(pending.minutes)m"
+                TimerConflictSwitchModal(
+                    currentPresetName: viewModel.displayedTimerPreset,
+                    currentRemainingTime: viewModel.displayedTimerTimeString,
+                    targetPresetName: pending.name,
+                    targetDurationString: targetDuration,
+                    onContinue: {
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                            viewModel.continueCurrentTimer()
+                        }
+                    },
+                    onPauseAndSwitch: {
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                            viewModel.pauseAndSwitch()
+                        }
+                    },
+                    onEndAndSwitch: {
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                            viewModel.endAndSwitch()
+                        }
+                    }
+                )
+                .transition(.asymmetric(
+                    insertion: .scale(scale: 0.94).combined(with: .opacity),
+                    removal: .scale(scale: 0.94).combined(with: .opacity)
+                ))
+            }
+        }
+        .animation(.spring(response: 0.32, dampingFraction: 0.82), value: viewModel.showConflictModal)
         .sheet(isPresented: $showingAddTask) {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Create a task").font(.title2.weight(.semibold))

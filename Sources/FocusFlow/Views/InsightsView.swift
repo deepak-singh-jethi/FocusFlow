@@ -1,6 +1,6 @@
 import SwiftUI
 
-// MARK: - Insights & Stats View
+// MARK: - Insights & Stats View (Date-Aware Analytics)
 public struct InsightsView: View {
     @ObservedObject public var viewModel: TimerViewModel
 
@@ -9,8 +9,19 @@ public struct InsightsView: View {
     }
 
     private var completedTasks: Int { viewModel.tasks.filter(\.isCompleted).count }
-    private var focusLabel: String {
-        let minutes = viewModel.focusedSeconds / 60
+
+    private var todayFocusLabel: String {
+        let minutes = viewModel.todayFocusedSeconds / 60
+        return "\(minutes / 60)h \(minutes % 60)m"
+    }
+
+    private var weeklyFocusLabel: String {
+        let minutes = viewModel.weeklyFocusedSeconds / 60
+        return "\(minutes / 60)h \(minutes % 60)m"
+    }
+
+    private var lifetimeFocusLabel: String {
+        let minutes = viewModel.lifetimeFocusedSeconds / 60
         return "\(minutes / 60)h \(minutes % 60)m"
     }
 
@@ -21,39 +32,49 @@ public struct InsightsView: View {
                     Text("Insights & Stats")
                         .font(.system(size: 26, weight: .bold))
                         .foregroundColor(.white)
-                    Text("Your progress since opening FocusFlow.")
+                    Text("Track your daily, weekly, and lifetime focus analytics.")
                         .font(.system(size: 13))
                         .foregroundColor(.gray)
                 }
                 .padding(.top, 30)
 
+                // Date-Aware Analytics Metric Cards
                 HStack(spacing: 12) {
-                    insightCard(title: "FOCUS TIME", value: focusLabel, icon: "clock")
+                    insightCard(title: "TODAY FOCUS", value: todayFocusLabel, icon: "clock")
+                    insightCard(title: "PAST 7 DAYS", value: weeklyFocusLabel, icon: "calendar")
+                    insightCard(title: "LIFETIME", value: lifetimeFocusLabel, icon: "chart.bar.fill")
                     insightCard(title: "SESSIONS", value: "\(viewModel.completedSessions)", icon: "checkmark.circle")
-                    insightCard(title: "TASKS DONE", value: "\(completedTasks)/\(viewModel.tasks.count)", icon: "checklist")
                 }
 
+                // Daily Focus Goal Progress Card
                 VStack(alignment: .leading, spacing: 15) {
                     Text("Daily focus goal")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundColor(.white)
                     HStack(alignment: .firstTextBaseline, spacing: 5) {
-                        Text(focusLabel).font(.system(size: 26, weight: .bold, design: .rounded)).foregroundColor(.white)
+                        Text(todayFocusLabel).font(.system(size: 26, weight: .bold, design: .rounded)).foregroundColor(.white)
                         Text("of \(viewModel.dailyGoalHours) hours").font(.system(size: 12)).foregroundColor(.gray)
                     }
-                    ProgressView(value: min(Double(viewModel.focusedSeconds) / Double(max(viewModel.dailyGoalHours * 3600, 1)), 1))
+                    ProgressView(value: min(Double(viewModel.todayFocusedSeconds) / Double(max(viewModel.dailyGoalHours * 3600, 1)), 1))
                         .tint(.orange)
-                    Text("Focus time is counted while a focus or custom timer is active.")
+                    Text("Calculated from today's sessions. Resets naturally at midnight.")
                         .font(.system(size: 11))
                         .foregroundColor(.gray)
                 }
                 .padding(19)
                 .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
 
+                // Tasks Time Tracking
                 VStack(alignment: .leading, spacing: 14) {
-                    Text("Time logged by task")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(.white)
+                    HStack {
+                        Text("Time logged by task")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(.white)
+                        Spacer()
+                        Text("\(completedTasks)/\(viewModel.tasks.count) completed")
+                            .font(.system(size: 12))
+                            .foregroundColor(.gray)
+                    }
 
                     if viewModel.tasks.isEmpty {
                         Text("No tasks added yet.")

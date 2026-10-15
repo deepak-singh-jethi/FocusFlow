@@ -93,15 +93,19 @@ public struct CapsuleActionButton: View {
     public var title: String
     public var isPrimary: Bool = false
     public var isCyan: Bool = false
+    public var compact: Bool = false
+    public var buttonWidth: CGFloat? = nil
     public var action: () -> Void
 
     @State private var isHovered = false
 
-    public init(icon: String, title: String, isPrimary: Bool = false, isCyan: Bool = false, action: @escaping () -> Void) {
+    public init(icon: String, title: String, isPrimary: Bool = false, isCyan: Bool = false, compact: Bool = false, buttonWidth: CGFloat? = nil, action: @escaping () -> Void) {
         self.icon = icon
         self.title = title
         self.isPrimary = isPrimary
         self.isCyan = isCyan
+        self.compact = compact
+        self.buttonWidth = buttonWidth
         self.action = action
     }
 
@@ -123,16 +127,17 @@ public struct CapsuleActionButton: View {
 
     public var body: some View {
         Button(action: action) {
-            HStack(spacing: 7) {
+            HStack(spacing: compact ? 5 : 7) {
                 Image(systemName: icon)
-                    .font(.system(size: 13, weight: .bold))
+                    .font(.system(size: compact ? 11 : 13, weight: .bold))
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: compact ? 12 : 13, weight: .semibold))
                     .lineLimit(1)
             }
+            .fixedSize()
             .foregroundColor(isPrimary ? Color(red: 0.10, green: 0.05, blue: 0.05) : (isHovered ? .white : Color.white.opacity(0.92)))
-            .padding(.horizontal, isPrimary ? 24 : 18)
-            .frame(minHeight: 46)
+            .padding(.horizontal, buttonWidth != nil ? 6 : (isPrimary ? (compact ? 18 : 24) : (compact ? 13 : 18)))
+            .frame(width: buttonWidth, height: compact ? 38 : 46)
             .background(
                 Group {
                     if isPrimary {
@@ -173,49 +178,165 @@ public struct StyleSegmentButton: View {
     public let title: String
     public let icon: String
     public let isSelected: Bool
+    public var isEnabled: Bool = true
     public let action: () -> Void
 
     @State private var isHovered = false
 
-    public init(title: String, icon: String, isSelected: Bool, action: @escaping () -> Void) {
+    public init(title: String, icon: String, isSelected: Bool, isEnabled: Bool = true, action: @escaping () -> Void) {
         self.title = title
         self.icon = icon
         self.isSelected = isSelected
+        self.isEnabled = isEnabled
         self.action = action
+    }
+
+    private var textColor: Color {
+        guard isEnabled else { return Color.gray.opacity(0.35) }
+        if isSelected { return .white }
+        return isHovered ? .white : .gray
+    }
+
+    private var backgroundColor: Color {
+        guard isEnabled else { return Color.white.opacity(0.001) }
+        if isSelected { return Color.white.opacity(0.14) }
+        return isHovered ? Color.white.opacity(0.08) : Color.white.opacity(0.001)
+    }
+
+    private var strokeColor: Color {
+        guard isEnabled else { return Color.clear }
+        if isSelected { return Color.white.opacity(0.20) }
+        return isHovered ? Color.white.opacity(0.14) : Color.clear
+    }
+
+    public var body: some View {
+        Button(action: {
+            if isEnabled { action() }
+        }) {
+            HStack(spacing: title.isEmpty ? 0 : 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .semibold))
+                if !title.isEmpty {
+                    Text(title)
+                        .font(.system(size: 11, weight: isSelected ? .bold : .medium))
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+            }
+            .fixedSize()
+            .foregroundColor(textColor)
+            .padding(.horizontal, title.isEmpty ? 8 : 10)
+            .frame(width: title.isEmpty ? 32 : nil, height: 32)
+            .background(Capsule().fill(backgroundColor))
+            .overlay(Capsule().stroke(strokeColor, lineWidth: 1))
+            .shadow(color: (isSelected && isEnabled) ? Color.white.opacity(0.08) : Color.clear, radius: 4)
+            .scaleEffect((isHovered && !isSelected && isEnabled) ? 1.02 : 1.0)
+            .opacity(isEnabled ? 1.0 : 0.38)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .fixedSize()
+        .contentShape(Capsule())
+        .onHover { hovering in
+            guard isEnabled else { return }
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
+            if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+        }
+    }
+}
+
+// MARK: - Session Segment Button
+public struct SessionSegmentButton: View {
+    public let title: String
+    public let subtitle: String
+    public let icon: String
+    public let isSelected: Bool
+    public let accentColor: Color
+    public var isCustom: Bool = false
+    public let action: () -> Void
+
+    @State private var isHovered = false
+
+    public init(
+        title: String,
+        subtitle: String,
+        icon: String,
+        isSelected: Bool,
+        accentColor: Color = .orange,
+        isCustom: Bool = false,
+        action: @escaping () -> Void
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.icon = icon
+        self.isSelected = isSelected
+        self.accentColor = accentColor
+        self.isCustom = isCustom
+        self.action = action
+    }
+
+    private var textColor: Color {
+        if isSelected { return .white }
+        return isHovered ? .white : .gray
+    }
+
+    private var backgroundColor: Color {
+        if isSelected { return accentColor.opacity(0.15) }
+        return isHovered ? Color.white.opacity(0.06) : Color.white.opacity(0.001)
+    }
+
+    private var strokeColor: Color {
+        if isSelected { return accentColor.opacity(0.40) }
+        return isHovered ? Color.white.opacity(0.12) : Color.clear
     }
 
     public var body: some View {
         Button(action: action) {
-            HStack(spacing: 6) {
+            HStack(spacing: title.isEmpty ? 4 : 5) {
                 Image(systemName: icon)
                     .font(.system(size: 11, weight: .semibold))
-                Text(title)
-                    .font(.system(size: 12, weight: isSelected ? .bold : .medium))
+                    .foregroundColor(isSelected ? accentColor : (isHovered ? .white : .gray))
+
+                if title.isEmpty {
+                    Text(subtitle)
+                        .font(.system(size: 11, weight: isSelected ? .bold : .semibold, design: .rounded))
+                        .foregroundColor(isSelected ? .white : (isHovered ? .white : .gray.opacity(0.9)))
+                        .lineLimit(1)
+                        .fixedSize()
+                } else {
+                    Text(title)
+                        .font(.system(size: 11, weight: isSelected ? .bold : .medium))
+                        .foregroundColor(textColor)
+                        .lineLimit(1)
+                        .fixedSize()
+
+                    Text(subtitle)
+                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                        .foregroundColor(isSelected ? accentColor : .gray.opacity(0.85))
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(
+                            Capsule()
+                                .fill(isSelected ? accentColor.opacity(0.18) : Color.white.opacity(0.06))
+                        )
+                }
             }
-            .foregroundColor(isSelected ? .white : (isHovered ? .white : .gray))
-            .padding(.horizontal, 13)
-            .frame(minHeight: 34)
-            .background(
-                Capsule()
-                    .fill(
-                        isSelected ?
-                        Color.white.opacity(0.14) :
-                        (isHovered ? Color.white.opacity(0.08) : Color.white.opacity(0.001))
-                    )
-            )
-            .overlay(
-                Capsule()
-                    .stroke(
-                        isSelected ? Color.white.opacity(0.20) :
-                        (isHovered ? Color.white.opacity(0.14) : Color.clear),
-                        lineWidth: 1
-                    )
-            )
-            .shadow(color: isSelected ? Color.white.opacity(0.08) : Color.clear, radius: 4)
-            .scaleEffect(isHovered && !isSelected ? 1.03 : 1.0)
+            .fixedSize()
+            .padding(.horizontal, title.isEmpty ? 8 : 9)
+            .frame(height: 32)
+            .background(Capsule().fill(backgroundColor))
+            .overlay(Capsule().stroke(strokeColor, lineWidth: 1))
+            .shadow(color: isSelected ? accentColor.opacity(0.18) : Color.clear, radius: 5)
+            .scaleEffect(isHovered && !isSelected ? 1.02 : 1.0)
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .fixedSize()
         .contentShape(Capsule())
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {

@@ -63,77 +63,96 @@ public struct DigitalClockView: View {
         isStopwatch ? viewModel.isStopwatchRunning : viewModel.isTimerRunning
     }
 
+    private var isPaused: Bool {
+        !isStopwatch && !viewModel.isTimerRunning && (viewModel.timeRemaining < viewModel.totalTime)
+    }
+
+    private var isSettingTime: Bool {
+        !minimal && !isStopwatch && !viewModel.isTimerRunning && (viewModel.timeRemaining == viewModel.totalTime)
+    }
+
     public var body: some View {
         VStack(spacing: max(10, size * 0.03)) {
             if !minimal {
                 HStack(spacing: 6) {
                     Circle()
-                        .fill(isStopwatch ? Color.cyan : Color.orange)
+                        .fill(isStopwatch ? Color.cyan : (isPaused ? Color.yellow : Color.orange))
                         .frame(width: 6, height: 6)
-                    Text(subtitle)
+                    Text(isPaused ? "PAUSED" : subtitle)
                         .font(.system(size: max(11, min(16, size * 0.032)), weight: .bold))
                         .tracking(2.2)
-                        .foregroundColor(isStopwatch ? .cyan : .orange)
+                        .foregroundColor(isStopwatch ? .cyan : (isPaused ? .yellow : .orange))
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 5)
-                .background((isStopwatch ? Color.cyan : Color.orange).opacity(0.12), in: Capsule())
+                .background((isStopwatch ? Color.cyan : (isPaused ? Color.yellow : Color.orange)).opacity(0.12), in: Capsule())
             }
 
-            Text(timeDisplay)
-                .font(.system(size: min(size * 0.38, 205), weight: .bold, design: .rounded))
-                .monospacedDigit()
-                .contentTransition(.numericText())
-                .foregroundColor(.white)
-                .lineLimit(1)
-                .minimumScaleFactor(0.65)
-                .shadow(color: (isStopwatch ? Color.cyan : Color.orange).opacity(isRunning ? 0.35 : 0.0), radius: 28)
+            if isSettingTime {
+                // Interactive In-Place Time Input & Shortcut Chips ("Click Put Time")
+                InPlaceTimeInputView(
+                    viewModel: viewModel,
+                    size: size,
+                    accentColor: viewModel.isBreakPreset ? .teal : .orange,
+                    isCompact: minimal
+                )
+            } else {
+                // Live running display / Paused display / Stopwatch display
+                Text(timeDisplay)
+                    .font(.system(size: min(size * 0.38, 205), weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
+                    .shadow(color: (isStopwatch ? Color.cyan : Color.orange).opacity(isRunning ? 0.35 : 0.0), radius: 28)
 
-            if !minimal && !isStopwatch && viewModel.tasks.indices.contains(viewModel.activeTaskIndex) {
-                let task = viewModel.tasks[viewModel.activeTaskIndex]
-                HStack(spacing: 7) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: max(11, min(14, size * 0.026))))
-                        .foregroundColor(.orange)
-                    Text(task.title)
-                        .font(.system(size: max(12, min(17, size * 0.034)), weight: .medium))
-                        .foregroundColor(.white.opacity(0.92))
-                    Text("·")
-                        .foregroundColor(.gray.opacity(0.6))
-                    Text("\(task.formattedTimeSpent) spent")
-                        .font(.system(size: max(11, min(14, size * 0.026)), weight: .semibold, design: .rounded))
-                        .foregroundColor(.orange)
+                if !minimal && !isStopwatch && viewModel.tasks.indices.contains(viewModel.activeTaskIndex) {
+                    let task = viewModel.tasks[viewModel.activeTaskIndex]
+                    HStack(spacing: 7) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: max(11, min(14, size * 0.026))))
+                            .foregroundColor(.orange)
+                        Text(task.title)
+                            .font(.system(size: max(12, min(17, size * 0.034)), weight: .medium))
+                            .foregroundColor(.white.opacity(0.92))
+                        Text("·")
+                            .foregroundColor(.gray.opacity(0.6))
+                        Text("\(task.formattedTimeSpent) spent")
+                            .font(.system(size: max(11, min(14, size * 0.026)), weight: .semibold, design: .rounded))
+                            .foregroundColor(.orange)
+                    }
+                    .lineLimit(1)
+                    .frame(maxWidth: min(size * 1.4, 720))
                 }
-                .lineLimit(1)
-                .frame(maxWidth: min(size * 1.4, 720))
-            }
 
-            if !minimal && !isStopwatch {
-                VStack(spacing: 8) {
-                    GeometryReader { bar in
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(Color.white.opacity(0.08))
-                            Capsule()
-                                .fill(LinearGradient(colors: [.orange, .pink], startPoint: .leading, endPoint: .trailing))
-                                .frame(width: bar.size.width * max(0.001, viewModel.preciseProgress))
-                                .shadow(color: .orange.opacity(0.4), radius: 4)
-                                .animation(.linear(duration: 0.1), value: viewModel.preciseProgress)
+                if !minimal && !isStopwatch {
+                    VStack(spacing: 8) {
+                        GeometryReader { bar in
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(Color.white.opacity(0.08))
+                                Capsule()
+                                    .fill(LinearGradient(colors: [.orange, .pink], startPoint: .leading, endPoint: .trailing))
+                                    .frame(width: bar.size.width * max(0.001, viewModel.preciseProgress))
+                                    .shadow(color: .orange.opacity(0.4), radius: 4)
+                                    .animation(.linear(duration: 0.1), value: viewModel.preciseProgress)
+                            }
                         }
-                    }
-                    .frame(width: min(size * 1.30, 720), height: max(6, min(10, size * 0.018)))
+                        .frame(width: min(size * 1.30, 720), height: max(6, min(10, size * 0.018)))
 
-                    HStack {
-                        Text("\(Int(viewModel.preciseProgress * 100))% completed")
-                            .font(.system(size: max(11, min(14, size * 0.026)), weight: .semibold))
-                            .foregroundColor(.gray)
-                        Spacer()
-                        Text(viewModel.timeRemaining >= 60 ? "\(viewModel.timeRemaining / 60) min remaining" : "\(viewModel.timeRemaining)s remaining")
-                            .font(.system(size: max(11, min(14, size * 0.026)), weight: .semibold))
-                            .foregroundColor(.gray)
+                        HStack {
+                            Text("\(Int(viewModel.preciseProgress * 100))% completed")
+                                .font(.system(size: max(11, min(14, size * 0.026)), weight: .semibold))
+                                .foregroundColor(.gray)
+                            Spacer()
+                            Text(viewModel.timeRemaining >= 60 ? "\(viewModel.timeRemaining / 60) min remaining" : "\(viewModel.timeRemaining)s remaining")
+                                .font(.system(size: max(11, min(14, size * 0.026)), weight: .semibold))
+                                .foregroundColor(.gray)
+                        }
+                        .frame(width: min(size * 1.30, 720))
                     }
-                    .frame(width: min(size * 1.30, 720))
+                    .padding(.top, 4)
                 }
-                .padding(.top, 4)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -172,6 +191,10 @@ public struct RingClockView: View {
         isStopwatch ? viewModel.isStopwatchRunning : viewModel.isTimerRunning
     }
 
+    private var isPaused: Bool {
+        !isStopwatch && !viewModel.isTimerRunning && (viewModel.timeRemaining < viewModel.totalTime)
+    }
+
     public var body: some View {
         let strokeWidth: CGFloat = max(12, min(28, size * 0.045))
         let ringDiameter = size * 0.85
@@ -198,21 +221,21 @@ public struct RingClockView: View {
                 .shadow(color: (isStopwatch ? Color.cyan : Color.orange).opacity(isRunning ? 0.45 : 0.2), radius: 8)
                 .animation(.linear(duration: 0.1), value: progress)
 
-            // Center Content
+            // Center Content (Always Clean & Distraction-Free)
             VStack(spacing: max(6, size * 0.022)) {
                 if !minimal {
                     HStack(spacing: 6) {
                         Circle()
-                            .fill(isStopwatch ? Color.cyan : Color.orange)
+                            .fill(isStopwatch ? Color.cyan : (isPaused ? Color.yellow : Color.orange))
                             .frame(width: 6, height: 6)
-                        Text(subtitle)
+                        Text(isPaused ? "PAUSED" : subtitle)
                             .font(.system(size: max(11, min(15, size * 0.032)), weight: .bold))
                             .tracking(2)
-                            .foregroundColor(isStopwatch ? .cyan : .orange)
+                            .foregroundColor(isStopwatch ? .cyan : (isPaused ? .yellow : .orange))
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 4)
-                    .background((isStopwatch ? Color.cyan : Color.orange).opacity(0.12), in: Capsule())
+                    .background((isStopwatch ? Color.cyan : (isPaused ? Color.yellow : Color.orange)).opacity(0.12), in: Capsule())
                 }
 
                 Text(timeDisplay)
@@ -278,6 +301,10 @@ public struct AnalogDialView: View {
 
     private var isRunning: Bool {
         isStopwatch ? viewModel.isStopwatchRunning : viewModel.isTimerRunning
+    }
+
+    private var isPaused: Bool {
+        !isStopwatch && !viewModel.isTimerRunning && (viewModel.timeRemaining < viewModel.totalTime)
     }
 
     public var body: some View {
@@ -406,16 +433,16 @@ public struct AnalogDialView: View {
             if !minimal {
                 HStack(spacing: 8) {
                     Circle()
-                        .fill(isRunning ? (isStopwatch ? Color.cyan : Color.orange) : Color.gray)
+                        .fill(isRunning ? (isStopwatch ? Color.cyan : Color.orange) : (isPaused ? Color.yellow : Color.gray))
                         .frame(width: 6, height: 6)
                     Text(timeDisplay)
                         .font(.system(size: max(18, dialDiameter * 0.055), weight: .bold, design: .rounded))
                         .monospacedDigit()
                         .foregroundColor(.white)
-                    Text(isStopwatch ? "ELAPSED" : "REMAINING")
+                    Text(isStopwatch ? "ELAPSED" : (isPaused ? "PAUSED" : "REMAINING"))
                         .font(.system(size: 10, weight: .bold))
                         .tracking(1.4)
-                        .foregroundColor(.gray)
+                        .foregroundColor(isPaused ? .yellow : .gray)
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 5)
