@@ -6,6 +6,7 @@ public struct PersistentCrossModeMiniBar: View {
     public enum BarType {
         case focusTimer
         case stopwatch
+        case preservedSession
     }
 
     @ObservedObject public var viewModel: TimerViewModel
@@ -28,6 +29,8 @@ public struct PersistentCrossModeMiniBar: View {
             return viewModel.displayedTimerPreset.contains("Break") ? .teal : .orange
         case .stopwatch:
             return .cyan
+        case .preservedSession:
+            return (viewModel.preservedSession?.isBreakSession == true) ? .teal : .orange
         }
     }
 
@@ -37,6 +40,8 @@ public struct PersistentCrossModeMiniBar: View {
             return viewModel.displayedTimerPreset.contains("Break") ? "cup.and.saucer.fill" : "flame.fill"
         case .stopwatch:
             return "stopwatch.fill"
+        case .preservedSession:
+            return (viewModel.preservedSession?.isBreakSession == true) ? "cup.and.saucer.fill" : "flame.fill"
         }
     }
 
@@ -47,6 +52,9 @@ public struct PersistentCrossModeMiniBar: View {
             return "\(viewModel.displayedTimerPreset.uppercased()) SESSION \(status)"
         case .stopwatch:
             return viewModel.isStopwatchRunning ? "STOPWATCH ACTIVE" : "STOPWATCH PAUSED"
+        case .preservedSession:
+            let name = viewModel.preservedSession?.activePreset.uppercased() ?? "FOCUS"
+            return "\(name) SESSION PAUSED"
         }
     }
 
@@ -56,6 +64,8 @@ public struct PersistentCrossModeMiniBar: View {
             return viewModel.displayedTimerTimeString
         case .stopwatch:
             return viewModel.stopwatchTimeString
+        case .preservedSession:
+            return viewModel.preservedSession?.timeString ?? "00:00"
         }
     }
 
@@ -65,6 +75,8 @@ public struct PersistentCrossModeMiniBar: View {
             return viewModel.isDisplayedTimerRunning
         case .stopwatch:
             return viewModel.isStopwatchRunning
+        case .preservedSession:
+            return false
         }
     }
 
@@ -74,12 +86,29 @@ public struct PersistentCrossModeMiniBar: View {
             return viewModel.hasPreservedSession ? "Return to \(viewModel.displayedTimerPreset)" : "Open Focus Timer"
         case .stopwatch:
             return "Open Stopwatch"
+        case .preservedSession:
+            return "Return to \(viewModel.preservedSession?.activePreset ?? "Focus")"
+        }
+    }
+
+    private var progressValue: Double {
+        switch type {
+        case .focusTimer:
+            return viewModel.displayedTimerProgress
+        case .stopwatch:
+            return 0.0
+        case .preservedSession:
+            return viewModel.preservedSession?.preciseProgress ?? 1.0
         }
     }
 
     private func triggerSwitch() {
         withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
-            viewModel.restorePreservedSessionIfNeeded()
+            if type == .preservedSession {
+                viewModel.restorePreservedSession()
+            } else {
+                viewModel.restorePreservedSessionIfNeeded()
+            }
             onSwitch()
         }
     }
@@ -117,14 +146,14 @@ public struct PersistentCrossModeMiniBar: View {
                     .monospacedDigit()
                     .foregroundColor(.white)
 
-                if type == .focusTimer {
+                if type == .focusTimer || type == .preservedSession {
                     GeometryReader { geo in
                         ZStack(alignment: .leading) {
                             Capsule().fill(Color.white.opacity(0.08))
                             Capsule()
                                 .fill(LinearGradient(colors: [barColor, .pink], startPoint: .leading, endPoint: .trailing))
-                                .frame(width: geo.size.width * max(0.001, viewModel.displayedTimerProgress))
-                                .animation(.linear(duration: 0.025), value: viewModel.displayedTimerProgress)
+                                .frame(width: geo.size.width * max(0.001, progressValue))
+                                .animation(.linear(duration: 0.025), value: progressValue)
                         }
                     }
                     .frame(width: 70, height: 5)
@@ -135,7 +164,10 @@ public struct PersistentCrossModeMiniBar: View {
 
             // Play / Pause Toggle
             Button {
-                if type == .focusTimer {
+                if type == .preservedSession {
+                    viewModel.restorePreservedSession()
+                    viewModel.startTimer()
+                } else if type == .focusTimer {
                     if !viewModel.isTimerActive && viewModel.hasPreservedSession {
                         viewModel.restorePreservedSession()
                         viewModel.startTimer()

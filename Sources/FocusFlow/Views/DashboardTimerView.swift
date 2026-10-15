@@ -122,7 +122,7 @@ public struct DashboardTimerView: View {
         } else {
             // When user is viewing a different mode/preset on stage, but has a preserved active/paused session
             if viewModel.hasPreservedSession {
-                PersistentCrossModeMiniBar(viewModel: viewModel, type: .focusTimer) {
+                PersistentCrossModeMiniBar(viewModel: viewModel, type: .preservedSession) {
                     withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
                         viewModel.restorePreservedSession()
                     }

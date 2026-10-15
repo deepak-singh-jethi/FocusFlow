@@ -753,6 +753,18 @@ public class TimerViewModel: ObservableObject {
 
     public func requestPresetChange(name: String, minutes: Int) {
         guard minutes > 0 else { return }
+        if name == "Focus" {
+            switchToFocus(minutes: minutes)
+            return
+        }
+        if name == "Short Break" || name == "Break" {
+            switchToBreak(minutes: minutes)
+            return
+        }
+        if name == "Long Break" {
+            switchToBreak(minutes: minutes)
+            return
+        }
         let isBreak = (name == "Short Break" || name == "Long Break" || name == "Break")
         requestModeOrPresetChange(name: name, minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: isBreak)
     }
@@ -764,10 +776,132 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func switchToBreak(minutes: Int = 5) {
-        requestModeOrPresetChange(name: "Short Break", minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: true)
+        // If we are already in Break, do nothing
+        if isBreakPreset && activeMode == "Pomodoro" { return }
+
+        // If we have a preserved Break session, restore it!
+        if let preserved = preservedSession, preserved.isBreakSession {
+            let focusToPreserve: PreservedTimerSession? = (isTimerRunning || (timeRemaining < totalTime && timeRemaining > 0)) ? PreservedTimerSession(
+                activePreset: activePreset,
+                activeMode: activeMode,
+                isBreakSession: isBreakSession,
+                totalTime: totalTime,
+                timeRemaining: timeRemaining,
+                preciseProgress: preciseProgress,
+                customMinutes: customMinutes,
+                customSeconds: customSeconds,
+                currentSession: currentSession,
+                activeTaskIndex: activeTaskIndex
+            ) : nil
+
+            if isTimerRunning {
+                recordActiveSessionSegment()
+                stopTimer()
+            }
+
+            activePreset = preserved.activePreset
+            activeMode = preserved.activeMode
+            isBreakSession = true
+            totalTime = preserved.totalTime
+            timeRemaining = preserved.timeRemaining
+            preciseProgress = preserved.preciseProgress
+            customMinutes = preserved.customMinutes
+            customSeconds = preserved.customSeconds
+            customDurationSeconds = preserved.totalTime
+            currentSession = preserved.currentSession
+            activeTaskIndex = preserved.activeTaskIndex
+
+            preservedSession = focusToPreserve
+            persistData()
+            return
+        }
+
+        // If Focus is currently active, preserve Focus before switching
+        if isTimerActive && !isBreakPreset {
+            recordActiveSessionSegment()
+            let focusSession = PreservedTimerSession(
+                activePreset: activePreset,
+                activeMode: activeMode,
+                isBreakSession: false,
+                totalTime: totalTime,
+                timeRemaining: timeRemaining,
+                preciseProgress: preciseProgress,
+                customMinutes: customMinutes,
+                customSeconds: customSeconds,
+                currentSession: currentSession,
+                activeTaskIndex: activeTaskIndex
+            )
+            stopTimer()
+            preservedSession = focusSession
+            let breakName = (minutes == 15) ? "Long Break" : "Short Break"
+            applyPresetDirectly(name: breakName, minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: true)
+            return
+        }
+
+        let breakName = (minutes == 15) ? "Long Break" : "Short Break"
+        requestModeOrPresetChange(name: breakName, minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: true)
     }
 
     public func switchToFocus(minutes: Int = 25) {
+        // If we are already in Focus, do nothing
+        if isFocusPreset && activeMode == "Pomodoro" { return }
+
+        // If we have a preserved Focus session, restore it!
+        if let preserved = preservedSession, !preserved.isBreakSession {
+            let breakToPreserve: PreservedTimerSession? = (isTimerRunning || (timeRemaining < totalTime && timeRemaining > 0)) ? PreservedTimerSession(
+                activePreset: activePreset,
+                activeMode: activeMode,
+                isBreakSession: isBreakSession,
+                totalTime: totalTime,
+                timeRemaining: timeRemaining,
+                preciseProgress: preciseProgress,
+                customMinutes: customMinutes,
+                customSeconds: customSeconds,
+                currentSession: currentSession,
+                activeTaskIndex: activeTaskIndex
+            ) : nil
+
+            if isTimerRunning {
+                stopTimer()
+            }
+
+            activePreset = preserved.activePreset
+            activeMode = preserved.activeMode
+            isBreakSession = false
+            totalTime = preserved.totalTime
+            timeRemaining = preserved.timeRemaining
+            preciseProgress = preserved.preciseProgress
+            customMinutes = preserved.customMinutes
+            customSeconds = preserved.customSeconds
+            customDurationSeconds = preserved.totalTime
+            currentSession = preserved.currentSession
+            activeTaskIndex = preserved.activeTaskIndex
+
+            preservedSession = breakToPreserve
+            persistData()
+            return
+        }
+
+        // If Break is currently active, preserve Break before switching
+        if isTimerActive && isBreakPreset {
+            let breakSession = PreservedTimerSession(
+                activePreset: activePreset,
+                activeMode: activeMode,
+                isBreakSession: true,
+                totalTime: totalTime,
+                timeRemaining: timeRemaining,
+                preciseProgress: preciseProgress,
+                customMinutes: customMinutes,
+                customSeconds: customSeconds,
+                currentSession: currentSession,
+                activeTaskIndex: activeTaskIndex
+            )
+            stopTimer()
+            preservedSession = breakSession
+            applyPresetDirectly(name: "Focus", minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: false)
+            return
+        }
+
         requestModeOrPresetChange(name: "Focus", minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: false)
     }
 
@@ -822,6 +956,10 @@ public class TimerViewModel: ObservableObject {
             let nextBreakPreset = isFinalSession ? "Long Break" : "Short Break"
             let nextBreakMinutes = isFinalSession ? 15 : 5
 
+            if let preserved = preservedSession, !preserved.isBreakSession {
+                preservedSession = nil
+            }
+
             applyPresetDirectly(name: nextBreakPreset, minutes: nextBreakMinutes, mode: "Pomodoro", isBreak: true)
             persistData()
             if autoStartNextSession {
@@ -832,6 +970,11 @@ public class TimerViewModel: ObservableObject {
             if activePreset == "Long Break" {
                 currentSession = 1
             }
+
+            if let preserved = preservedSession, preserved.isBreakSession {
+                preservedSession = nil
+            }
+
             applyPresetDirectly(name: "Focus", minutes: 25, mode: "Pomodoro", isBreak: false)
             persistData()
             if autoStartNextSession {
