@@ -13,6 +13,8 @@ public struct DashboardTimerView: View {
     public var onSwitchToTimer: (() -> Void)? = nil
 
     @State private var isPresetHovered = false
+    @State private var isFocusHovered = false
+    @State private var isBreakHovered = false
 
     public init(
         viewModel: TimerViewModel,
@@ -46,14 +48,16 @@ public struct DashboardTimerView: View {
 
     private var pageTitle: String {
         if isStopwatchMode { return "Stopwatch" }
-        if viewModel.activeMode == "Custom Timer" { return "Custom timer" }
-        if viewModel.activePreset == "Short Break" || viewModel.activePreset == "Long Break" { return "Break timer" }
-        return "Focus timer"
+        if viewModel.isBreakPreset { return "Break Timer" }
+        if viewModel.activeMode == "Custom Timer" { return "Custom Timer" }
+        return "Focus Timer"
     }
 
     private var pageSubtitle: String {
         if isStopwatchMode {
             return viewModel.isStopwatchRunning ? "Stopwatch in progress" : "Track exact split times & laps"
+        } else if viewModel.isBreakPreset {
+            return viewModel.isTimerRunning ? "Break in progress · Rest and recharge" : "Step away from the screen for a quick refresh"
         } else {
             return viewModel.isTimerRunning ? "Session in progress" : "Set duration directly on clock or click a shortcut"
         }
@@ -111,26 +115,14 @@ public struct DashboardTimerView: View {
     @ViewBuilder
     private func crossModeMiniBarSection(stageMaxWidth: CGFloat) -> some View {
         if isStopwatchMode {
-            if viewModel.isTimerRunning || viewModel.timeRemaining < viewModel.totalTime || viewModel.hasPreservedSession {
+            if viewModel.isTimerRunning || viewModel.timeRemaining < viewModel.totalTime {
                 PersistentCrossModeMiniBar(viewModel: viewModel, type: .focusTimer) {
-                    viewModel.restorePreservedSessionIfNeeded()
                     onSwitchToTimer?()
                 }
                 .frame(maxWidth: stageMaxWidth)
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
         } else {
-            // When user is viewing a different mode/preset on stage, but has a preserved active/paused session
-            if viewModel.hasPreservedSession {
-                PersistentCrossModeMiniBar(viewModel: viewModel, type: .preservedSession) {
-                    withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
-                        viewModel.restorePreservedSession()
-                    }
-                }
-                .frame(maxWidth: stageMaxWidth)
-                .transition(.move(edge: .top).combined(with: .opacity))
-            }
-
             if viewModel.isStopwatchRunning || viewModel.stopwatchTime > 0 {
                 PersistentCrossModeMiniBar(viewModel: viewModel, type: .stopwatch) {
                     onSwitchToStopwatch?()
@@ -171,20 +163,37 @@ public struct DashboardTimerView: View {
                             Text(showPresetFullTitles ? "Focus Session" : "Focus")
                                 .font(.system(size: 11, weight: viewModel.isFocusPreset ? .bold : .medium))
                         }
-                        .foregroundColor(viewModel.isFocusPreset ? .white : .gray)
+                        .foregroundColor(
+                            viewModel.isFocusPreset
+                                ? .white
+                                : (isFocusHovered ? .white.opacity(0.95) : .gray)
+                        )
                         .padding(.horizontal, isCompact ? 10 : 14)
                         .frame(height: 32)
                         .background(
-                            viewModel.isFocusPreset ? Color.orange.opacity(0.24) : Color.clear,
+                            viewModel.isFocusPreset
+                                ? Color.orange.opacity(0.24)
+                                : (isFocusHovered ? Color.white.opacity(0.08) : Color.clear),
                             in: Capsule()
+                        )
+                        .overlay(
+                            Capsule().stroke(
+                                viewModel.isFocusPreset
+                                    ? Color.orange.opacity(0.40)
+                                    : (isFocusHovered ? Color.white.opacity(0.18) : Color.clear),
+                                lineWidth: 1
+                            )
                         )
                         .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
                     .onHover { h in
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            isFocusHovered = h
+                        }
                         if h { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
                     }
-                    .help("Switch to Focus Session")
+                    .help(viewModel.isTimerActive && !viewModel.isFocusPreset ? "Switch to Focus Session (confirms ending break)" : "Switch to Focus Session")
 
                     Button {
                         withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
@@ -197,20 +206,37 @@ public struct DashboardTimerView: View {
                             Text(showPresetFullTitles ? "Break" : "Break")
                                 .font(.system(size: 11, weight: viewModel.isBreakPreset ? .bold : .medium))
                         }
-                        .foregroundColor(viewModel.isBreakPreset ? .white : .gray)
+                        .foregroundColor(
+                            viewModel.isBreakPreset
+                                ? .white
+                                : (isBreakHovered ? .white.opacity(0.95) : .gray)
+                        )
                         .padding(.horizontal, isCompact ? 10 : 14)
                         .frame(height: 32)
                         .background(
-                            viewModel.isBreakPreset ? Color.teal.opacity(0.24) : Color.clear,
+                            viewModel.isBreakPreset
+                                ? Color.teal.opacity(0.24)
+                                : (isBreakHovered ? Color.white.opacity(0.08) : Color.clear),
                             in: Capsule()
+                        )
+                        .overlay(
+                            Capsule().stroke(
+                                viewModel.isBreakPreset
+                                    ? Color.teal.opacity(0.40)
+                                    : (isBreakHovered ? Color.white.opacity(0.18) : Color.clear),
+                                lineWidth: 1
+                            )
                         )
                         .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
                     .onHover { h in
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            isBreakHovered = h
+                        }
                         if h { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
                     }
-                    .help("Switch to Break Session")
+                    .help(viewModel.isTimerActive && viewModel.isFocusPreset ? "Switch to Break (confirms ending focus session)" : "Switch to Break Session")
                 }
                 .padding(3)
                 .background(Color.white.opacity(0.04), in: Capsule())
@@ -299,6 +325,7 @@ public struct DashboardTimerView: View {
                 title: primaryActionTitle,
                 isPrimary: true,
                 isCyan: isStopwatchMode,
+                isTeal: viewModel.isBreakPreset && !isStopwatchMode,
                 compact: isCompact,
                 buttonWidth: dockButtonWidth
             ) {
@@ -464,11 +491,6 @@ public struct DashboardTimerView: View {
                         viewModel.continueCurrentTimer()
                     }
                 },
-                onPauseAndSwitch: {
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
-                        viewModel.pauseAndSwitch()
-                    }
-                },
                 onEndAndSwitch: {
                     withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
                         viewModel.endAndSwitch()
@@ -537,7 +559,7 @@ public struct DashboardTimerView: View {
                         .fill(Color.white.opacity(0.02))
                         .background(
                             RadialGradient(
-                                colors: [(isStopwatchMode ? Color.cyan : Color.orange).opacity((isStopwatchMode ? viewModel.isStopwatchRunning : viewModel.isTimerRunning) ? 0.038 : 0.015), Color.clear],
+                                colors: [(isStopwatchMode ? Color.cyan : (viewModel.isBreakPreset ? Color.teal : Color.orange)).opacity((isStopwatchMode ? viewModel.isStopwatchRunning : viewModel.isTimerRunning) ? 0.045 : 0.015), Color.clear],
                                 center: .center,
                                 startRadius: 40,
                                 endRadius: 460

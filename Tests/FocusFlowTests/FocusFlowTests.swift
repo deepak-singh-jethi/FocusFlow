@@ -327,25 +327,38 @@ final class FocusFlowTests: XCTestCase {
         vm.timeRemaining = 1200 // 20m remaining of 25m
         XCTAssertTrue(vm.isTimerRunning)
 
-        // 2. User switches mode from Focus to Break
+        // 2. User presses Break: app presents confirmation reminder before ending active focus session
         vm.switchToBreak(minutes: 5)
+        XCTAssertTrue(vm.showConflictModal, "App must remind user before ending their active focus session")
+        XCTAssertEqual(vm.pendingTimerRequest?.name, "Short Break")
 
-        // Focus timer must NOT be lost! It is safely preserved.
-        XCTAssertTrue(vm.hasPreservedSession, "Focus session must be preserved in background")
-        XCTAssertEqual(vm.preservedSession?.activePreset, "Focus")
-        XCTAssertEqual(vm.preservedSession?.timeRemaining, 1200, "Preserved focus timer must retain remaining time")
+        // 3. User cancels/continues: Focus timer continues running uninterrupted
+        vm.continueCurrentTimer()
+        XCTAssertFalse(vm.showConflictModal)
+        XCTAssertTrue(vm.isTimerRunning)
+        XCTAssertEqual(vm.timeRemaining, 1200)
+
+        // 4. User presses Break and confirms End & Switch
+        vm.switchToBreak(minutes: 5)
+        XCTAssertTrue(vm.showConflictModal)
+        vm.endAndSwitch()
+        XCTAssertFalse(vm.showConflictModal)
+
+        // Clean transition to Break stage - active countdown starts immediately
         XCTAssertEqual(vm.activePreset, "Short Break")
         XCTAssertEqual(vm.totalTime, 300)
-        XCTAssertEqual(vm.timeRemaining, 300)
-        XCTAssertFalse(vm.isTimerRunning, "Only one countdown timer runs at a time")
+        XCTAssertTrue(vm.isTimerRunning, "Target break session auto-starts immediately")
 
-        // 3. User switches mode from Break back to Focus
+        // Stop timer to return to idle state
+        vm.stopTimer()
+        XCTAssertFalse(vm.isTimerRunning)
+
+        // 5. User switches mode from Break back to Focus while idle: instantaneous with zero modals
         vm.switchToFocus(minutes: 25)
-
-        // Focus timer must be restored directly without resetting to 25m!
+        XCTAssertFalse(vm.showConflictModal, "Idle switching should be frictionless without modals")
         XCTAssertEqual(vm.activePreset, "Focus")
-        XCTAssertEqual(vm.timeRemaining, 1200, "Focus timer must NOT reset to 25m upon switching back")
         XCTAssertEqual(vm.totalTime, 1500)
+        XCTAssertEqual(vm.timeRemaining, 1500)
     }
 
     @MainActor
@@ -353,34 +366,30 @@ final class FocusFlowTests: XCTestCase {
         let (vm, tempURL) = makeIsolatedViewModel()
         defer { cleanup(url: tempURL) }
 
-        // Start Focus and switch to Break
-        vm.startTimer()
-        vm.timeRemaining = 1000
+        // 1. Start Break and elapse 60 seconds
         vm.switchToBreak(minutes: 5)
-
-        // Start Break and elapse 60 seconds
         vm.startTimer()
         vm.timeRemaining = 240 // 4m remaining of 5m
+        XCTAssertTrue(vm.isTimerRunning)
 
-        // Switch back to Focus
+        // 2. Switch back to Focus while Break is running: presents confirmation
         vm.switchToFocus(minutes: 25)
+        XCTAssertTrue(vm.showConflictModal, "App must remind user before ending running break session")
+        XCTAssertEqual(vm.pendingTimerRequest?.name, "Focus")
+
+        // 3. User chooses Continue Session
+        vm.continueCurrentTimer()
+        XCTAssertFalse(vm.showConflictModal)
+        XCTAssertTrue(vm.isTimerRunning)
+        XCTAssertEqual(vm.timeRemaining, 240)
+
+        // 4. User confirms End & Switch
+        vm.switchToFocus(minutes: 25)
+        vm.endAndSwitch()
+        XCTAssertFalse(vm.showConflictModal)
         XCTAssertEqual(vm.activePreset, "Focus")
-        XCTAssertEqual(vm.timeRemaining, 1000)
-
-        // Break session is preserved in background
-        XCTAssertTrue(vm.hasPreservedSession)
-        XCTAssertEqual(vm.preservedSession?.activePreset, "Short Break")
-        XCTAssertEqual(vm.preservedSession?.timeRemaining, 240)
-
-        // Switch back to Break
-        vm.switchToBreak(minutes: 5)
-        XCTAssertEqual(vm.activePreset, "Short Break")
-        XCTAssertEqual(vm.timeRemaining, 240, "Break timer must resume from 4m, not reset to 5m")
-
-        // Focus session is preserved in background
-        XCTAssertTrue(vm.hasPreservedSession)
-        XCTAssertEqual(vm.preservedSession?.activePreset, "Focus")
-        XCTAssertEqual(vm.preservedSession?.timeRemaining, 1000)
+        XCTAssertEqual(vm.totalTime, 1500)
+        XCTAssertTrue(vm.isTimerRunning, "Target focus session auto-starts")
     }
 
     @MainActor
@@ -423,41 +432,31 @@ final class FocusFlowTests: XCTestCase {
     }
 
     @MainActor
-    func testPauseAndSwitchPreservesSession() {
+    func testPauseAndSwitchDelegatesToEndAndSwitch() {
         let (vm, tempURL) = makeIsolatedViewModel()
         defer { cleanup(url: tempURL) }
 
         // Setup 25m timer and elapse 500 seconds
         vm.startTimer()
         vm.timeRemaining = 1000 // 1000s remaining of 1500s
-        let previousRemaining = vm.timeRemaining
+        let initialRecords = vm.sessionRecords.count
 
         // User attempts to switch to Exam Run (50m)
         vm.requestPresetChange(name: "Exam Run", minutes: 50)
         XCTAssertTrue(vm.showConflictModal)
 
-        // User selects: Pause & Switch
+        // User selects: Pause & Switch (delegates to End & Switch)
         vm.pauseAndSwitch()
 
         XCTAssertFalse(vm.showConflictModal)
         XCTAssertNil(vm.pendingTimerRequest)
 
-        // Stage is now switched to Exam Run
+        // Stage is now switched to Exam Run cleanly
         XCTAssertEqual(vm.activePreset, "Exam Run")
         XCTAssertEqual(vm.totalTime, 3000)
-        XCTAssertEqual(vm.timeRemaining, 3000)
-        XCTAssertFalse(vm.isTimerRunning, "Only one countdown timer should run at a time")
-
-        // Preserved session is safely retained
-        XCTAssertTrue(vm.hasPreservedSession)
-        XCTAssertEqual(vm.preservedSession?.activePreset, "Focus")
-        XCTAssertEqual(vm.preservedSession?.timeRemaining, previousRemaining)
-
-        // User now clicks mini-bar to restore preserved timer
-        vm.restorePreservedSession()
-        XCTAssertEqual(vm.activePreset, "Focus")
-        XCTAssertEqual(vm.timeRemaining, previousRemaining)
-        XCTAssertEqual(vm.totalTime, 1500)
+        XCTAssertTrue(vm.isTimerRunning, "Target timer auto-starts upon switch")
+        XCTAssertNil(vm.preservedSession, "No confusing background sessions retained")
+        XCTAssertGreaterThanOrEqual(vm.sessionRecords.count, initialRecords)
     }
 
     @MainActor
@@ -476,10 +475,9 @@ final class FocusFlowTests: XCTestCase {
 
         XCTAssertFalse(vm.showConflictModal)
         XCTAssertNil(vm.pendingTimerRequest)
-        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertTrue(vm.isTimerRunning, "Target timer auto-starts cleanly")
         XCTAssertNil(vm.preservedSession)
         XCTAssertEqual(vm.activePreset, "Exam Run")
-        XCTAssertEqual(vm.timeRemaining, 3000)
         XCTAssertGreaterThanOrEqual(vm.sessionRecords.count, initialRecordCount)
     }
 
@@ -488,11 +486,19 @@ final class FocusFlowTests: XCTestCase {
         let (vm1, tempURL) = makeIsolatedViewModel()
         defer { cleanup(url: tempURL) }
 
-        vm1.startTimer()
-        vm1.timeRemaining = 850
-        vm1.switchToBreak(minutes: 5)
-
-        XCTAssertTrue(vm1.hasPreservedSession)
+        // Assign preserved session for schema serialization test
+        vm1.preservedSession = PreservedTimerSession(
+            activePreset: "Focus",
+            activeMode: "Pomodoro",
+            isBreakSession: false,
+            totalTime: 1500,
+            timeRemaining: 850,
+            preciseProgress: 850.0 / 1500.0,
+            customMinutes: 25,
+            customSeconds: 0,
+            currentSession: 1,
+            activeTaskIndex: 0
+        )
         vm1.persistData(force: true)
 
         // Reload fresh ViewModel from disk

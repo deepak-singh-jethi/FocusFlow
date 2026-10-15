@@ -15,6 +15,7 @@ public struct InPlaceTimeInputView: View {
     @FocusState private var focusedField: TimeInputField?
     @State private var isMinutesHovered: Bool = false
     @State private var isSecondsHovered: Bool = false
+    @State private var isSyncingProgrammatically: Bool = false
 
     private enum TimeInputField: Hashable {
         case minutes
@@ -225,10 +226,14 @@ public struct InPlaceTimeInputView: View {
     }
 
     private func syncInputFields() {
+        isSyncingProgrammatically = true
         let m = viewModel.totalTime / 60
         let s = viewModel.totalTime % 60
         inputMinutes = "\(m)"
         inputSeconds = String(format: "%02d", s)
+        DispatchQueue.main.async {
+            isSyncingProgrammatically = false
+        }
     }
 
     private func adjustMinutes(by delta: Int) {
@@ -236,17 +241,26 @@ public struct InPlaceTimeInputView: View {
         let newM = min(max(currentM + delta, 1), 360)
         inputMinutes = "\(newM)"
         inputSeconds = "00"
-        viewModel.setCustomDuration(minutes: newM, seconds: 0)
+        if viewModel.isBreakPreset {
+            viewModel.switchToBreak(minutes: newM)
+        } else {
+            viewModel.setCustomDuration(minutes: newM, seconds: 0)
+        }
     }
 
     private func selectPreset(minutes: Int) {
         inputMinutes = "\(minutes)"
         inputSeconds = "00"
-        viewModel.setCustomDuration(minutes: minutes, seconds: 0)
+        if viewModel.isBreakPreset {
+            viewModel.switchToBreak(minutes: minutes)
+        } else {
+            viewModel.setCustomDuration(minutes: minutes, seconds: 0)
+        }
         focusedField = nil
     }
 
     private func handleMinutesChange(_ newVal: String) {
+        guard !isSyncingProgrammatically, focusedField == .minutes else { return }
         let digits = newVal.filter { $0.isNumber }
         if digits.count > 3 {
             inputMinutes = String(digits.prefix(3))
@@ -258,11 +272,17 @@ public struct InPlaceTimeInputView: View {
         if let val = Int(digits), val > 0 {
             let safeM = min(val, 360)
             let s = Int(inputSeconds.filter { $0.isNumber }) ?? (viewModel.totalTime % 60)
-            viewModel.setCustomDuration(minutes: safeM, seconds: s)
+            if viewModel.isBreakPreset {
+                let name = (safeM >= 15) ? "Long Break" : "Short Break"
+                viewModel.requestModeOrPresetChange(name: name, minutes: safeM, seconds: s, mode: "Pomodoro", isBreak: true)
+            } else {
+                viewModel.setCustomDuration(minutes: safeM, seconds: s)
+            }
         }
     }
 
     private func handleSecondsChange(_ newVal: String) {
+        guard !isSyncingProgrammatically, focusedField == .seconds else { return }
         let digits = newVal.filter { $0.isNumber }
         if digits.count > 2 {
             inputSeconds = String(digits.prefix(2))
@@ -276,17 +296,28 @@ public struct InPlaceTimeInputView: View {
             let m = Int(inputMinutes.filter { $0.isNumber }) ?? (viewModel.totalTime / 60)
             let total = m * 60 + safeS
             if total >= 5 {
-                viewModel.setCustomDuration(minutes: m, seconds: safeS)
+                if viewModel.isBreakPreset {
+                    let name = (m >= 15) ? "Long Break" : "Short Break"
+                    viewModel.requestModeOrPresetChange(name: name, minutes: m, seconds: safeS, mode: "Pomodoro", isBreak: true)
+                } else {
+                    viewModel.setCustomDuration(minutes: m, seconds: safeS)
+                }
             }
         }
     }
 
     private func applyCustomInput() {
+        guard !isSyncingProgrammatically else { return }
         let m = min(max(Int(inputMinutes.filter { $0.isNumber }) ?? 0, 0), 360)
         let s = min(max(Int(inputSeconds.filter { $0.isNumber }) ?? 0, 0), 59)
         let total = m * 60 + s
         if total >= 5 {
-            viewModel.setCustomDuration(minutes: m, seconds: s)
+            if viewModel.isBreakPreset {
+                let name = (m >= 15) ? "Long Break" : "Short Break"
+                viewModel.requestModeOrPresetChange(name: name, minutes: m, seconds: s, mode: "Pomodoro", isBreak: true)
+            } else {
+                viewModel.setCustomDuration(minutes: m, seconds: s)
+            }
         }
         formatAndFinalizeFields()
     }

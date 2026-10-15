@@ -74,18 +74,20 @@ public struct DigitalClockView: View {
     public var body: some View {
         VStack(spacing: max(10, size * 0.03)) {
             if !minimal {
+                let accentColor: Color = isStopwatch ? Color.cyan : (isPaused ? Color.yellow : (viewModel.isBreakPreset ? Color.teal : Color.orange))
+                let badgeText: String = isPaused ? "PAUSED" : (viewModel.isBreakPreset ? "BREAK" : subtitle)
                 HStack(spacing: 6) {
                     Circle()
-                        .fill(isStopwatch ? Color.cyan : (isPaused ? Color.yellow : Color.orange))
+                        .fill(accentColor)
                         .frame(width: 6, height: 6)
-                    Text(isPaused ? "PAUSED" : subtitle)
+                    Text(badgeText)
                         .font(.system(size: max(11, min(16, size * 0.032)), weight: .bold))
                         .tracking(2.2)
-                        .foregroundColor(isStopwatch ? .cyan : (isPaused ? .yellow : .orange))
+                        .foregroundColor(accentColor)
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 5)
-                .background((isStopwatch ? Color.cyan : (isPaused ? Color.yellow : Color.orange)).opacity(0.12), in: Capsule())
+                .background(accentColor.opacity(0.12), in: Capsule())
             }
 
             if isSettingTime {
@@ -105,25 +107,41 @@ public struct DigitalClockView: View {
                     .foregroundColor(.white)
                     .lineLimit(1)
                     .minimumScaleFactor(0.65)
-                    .shadow(color: (isStopwatch ? Color.cyan : Color.orange).opacity(isRunning ? 0.35 : 0.0), radius: 28)
+                    .shadow(color: (isStopwatch ? Color.cyan : (viewModel.isBreakPreset ? Color.teal : Color.orange)).opacity(isRunning ? 0.35 : 0.0), radius: 28)
 
-                if !minimal && !isStopwatch && viewModel.tasks.indices.contains(viewModel.activeTaskIndex) {
-                    let task = viewModel.tasks[viewModel.activeTaskIndex]
-                    HStack(spacing: 7) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: max(11, min(14, size * 0.026))))
-                            .foregroundColor(.orange)
-                        Text(task.title)
-                            .font(.system(size: max(12, min(17, size * 0.034)), weight: .medium))
-                            .foregroundColor(.white.opacity(0.92))
-                        Text("·")
-                            .foregroundColor(.gray.opacity(0.6))
-                        Text("\(task.formattedTimeSpent) spent")
-                            .font(.system(size: max(11, min(14, size * 0.026)), weight: .semibold, design: .rounded))
-                            .foregroundColor(.orange)
+                if !minimal && !isStopwatch {
+                    if viewModel.isBreakPreset {
+                        HStack(spacing: 8) {
+                            Image(systemName: "cup.and.saucer.fill")
+                                .font(.system(size: max(12, min(15, size * 0.028))))
+                                .foregroundColor(.teal)
+                            Text("Mindful Break · Rest and recharge")
+                                .font(.system(size: max(12, min(16, size * 0.032)), weight: .medium))
+                                .foregroundColor(.white.opacity(0.88))
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 5)
+                        .background(Color.teal.opacity(0.12), in: Capsule())
+                        .overlay(Capsule().stroke(Color.teal.opacity(0.24), lineWidth: 1))
+                        .lineLimit(1)
+                    } else if viewModel.tasks.indices.contains(viewModel.activeTaskIndex) {
+                        let task = viewModel.tasks[viewModel.activeTaskIndex]
+                        HStack(spacing: 7) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: max(11, min(14, size * 0.026))))
+                                .foregroundColor(.orange)
+                            Text(task.title)
+                                .font(.system(size: max(12, min(17, size * 0.034)), weight: .medium))
+                                .foregroundColor(.white.opacity(0.92))
+                            Text("·")
+                                .foregroundColor(.gray.opacity(0.6))
+                            Text("\(task.formattedTimeSpent) spent")
+                                .font(.system(size: max(11, min(14, size * 0.026)), weight: .semibold, design: .rounded))
+                                .foregroundColor(.orange)
+                        }
+                        .lineLimit(1)
+                        .frame(maxWidth: min(size * 1.4, 720))
                     }
-                    .lineLimit(1)
-                    .frame(maxWidth: min(size * 1.4, 720))
                 }
 
                 if !minimal && !isStopwatch {
@@ -132,7 +150,11 @@ public struct DigitalClockView: View {
                             ZStack(alignment: .leading) {
                                 Capsule().fill(Color.white.opacity(0.08))
                                 Capsule()
-                                    .fill(LinearGradient(colors: [.orange, .pink], startPoint: .leading, endPoint: .trailing))
+                                    .fill(LinearGradient(
+                                        colors: viewModel.isBreakPreset ? [.teal, Color.cyan] : [.orange, .pink],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    ))
                                     .frame(width: bar.size.width * max(0.001, viewModel.preciseProgress))
                                     .shadow(color: .orange.opacity(0.4), radius: 4)
                                     .animation(.linear(duration: 0.1), value: viewModel.preciseProgress)
@@ -210,7 +232,7 @@ public struct RingClockView: View {
                 .trim(from: 0, to: max(0.0008, progress))
                 .stroke(
                     LinearGradient(
-                        colors: isStopwatch ? [Color.cyan, Color.blue] : [Color.orange, Color.pink],
+                        colors: isStopwatch ? [Color.cyan, Color.blue] : (viewModel.isBreakPreset ? [Color.teal, Color.cyan] : [Color.orange, Color.pink]),
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
@@ -218,24 +240,26 @@ public struct RingClockView: View {
                 )
                 .rotationEffect(.degrees(-90))
                 .frame(width: ringDiameter, height: ringDiameter)
-                .shadow(color: (isStopwatch ? Color.cyan : Color.orange).opacity(isRunning ? 0.45 : 0.2), radius: 8)
+                .shadow(color: (isStopwatch ? Color.cyan : (viewModel.isBreakPreset ? Color.teal : Color.orange)).opacity(isRunning ? 0.45 : 0.2), radius: 8)
                 .animation(.linear(duration: 0.1), value: progress)
 
             // Center Content (Always Clean & Distraction-Free)
             VStack(spacing: max(6, size * 0.022)) {
                 if !minimal {
+                    let accentColor: Color = isStopwatch ? Color.cyan : (isPaused ? Color.yellow : (viewModel.isBreakPreset ? Color.teal : Color.orange))
+                    let badgeText: String = isPaused ? "PAUSED" : (viewModel.isBreakPreset ? "BREAK" : subtitle)
                     HStack(spacing: 6) {
                         Circle()
-                            .fill(isStopwatch ? Color.cyan : (isPaused ? Color.yellow : Color.orange))
+                            .fill(accentColor)
                             .frame(width: 6, height: 6)
-                        Text(isPaused ? "PAUSED" : subtitle)
+                        Text(badgeText)
                             .font(.system(size: max(11, min(15, size * 0.032)), weight: .bold))
                             .tracking(2)
-                            .foregroundColor(isStopwatch ? .cyan : (isPaused ? .yellow : .orange))
+                            .foregroundColor(accentColor)
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 4)
-                    .background((isStopwatch ? Color.cyan : (isPaused ? Color.yellow : Color.orange)).opacity(0.12), in: Capsule())
+                    .background(accentColor.opacity(0.12), in: Capsule())
                 }
 
                 Text(timeDisplay)
@@ -246,18 +270,30 @@ public struct RingClockView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.65)
 
-                if !minimal && !isStopwatch && viewModel.tasks.indices.contains(viewModel.activeTaskIndex) {
-                    let task = viewModel.tasks[viewModel.activeTaskIndex]
-                    VStack(spacing: 2) {
-                        Text(task.title)
-                            .font(.system(size: max(11, min(15, size * 0.030)), weight: .medium))
-                            .foregroundColor(.white.opacity(0.92))
-                            .lineLimit(1)
-                        Text("\(task.formattedTimeSpent) spent · \(task.expectedTime) est.")
-                            .font(.system(size: max(10, min(12, size * 0.024)), weight: .semibold, design: .rounded))
-                            .foregroundColor(.orange)
+                if !minimal && !isStopwatch {
+                    if viewModel.isBreakPreset {
+                        VStack(spacing: 2) {
+                            Text("Take a Breath")
+                                .font(.system(size: max(11, min(15, size * 0.030)), weight: .medium))
+                                .foregroundColor(.white.opacity(0.92))
+                            Text("Rest and recharge")
+                                .font(.system(size: max(10, min(12, size * 0.024)), weight: .semibold, design: .rounded))
+                                .foregroundColor(.teal)
+                        }
+                        .frame(maxWidth: size * 0.68)
+                    } else if viewModel.tasks.indices.contains(viewModel.activeTaskIndex) {
+                        let task = viewModel.tasks[viewModel.activeTaskIndex]
+                        VStack(spacing: 2) {
+                            Text(task.title)
+                                .font(.system(size: max(11, min(15, size * 0.030)), weight: .medium))
+                                .foregroundColor(.white.opacity(0.92))
+                                .lineLimit(1)
+                            Text("\(task.formattedTimeSpent) spent · \(task.expectedTime) est.")
+                                .font(.system(size: max(10, min(12, size * 0.024)), weight: .semibold, design: .rounded))
+                                .foregroundColor(.orange)
+                        }
+                        .frame(maxWidth: size * 0.68)
                     }
-                    .frame(maxWidth: size * 0.68)
                 }
             }
         }
@@ -380,7 +416,7 @@ public struct AnalogDialView: View {
                     Text("\(minuteVal)")
                         .font(.system(size: max(10, dialDiameter * 0.035), weight: .semibold, design: .rounded))
                         .monospacedDigit()
-                        .foregroundColor(label == 0 ? (isStopwatch ? .cyan : .orange) : Color.white.opacity(0.75))
+                        .foregroundColor(label == 0 ? (isStopwatch ? .cyan : (viewModel.isBreakPreset ? .teal : .orange)) : Color.white.opacity(0.75))
                         .position(
                             x: dialDiameter * 0.5 + sin(angle) * numRadius,
                             y: dialDiameter * 0.5 - cos(angle) * numRadius
@@ -399,21 +435,21 @@ public struct AnalogDialView: View {
                     Capsule()
                         .fill(
                             LinearGradient(
-                                colors: isStopwatch ? [Color.cyan, Color.blue] : [Color.orange, Color(red: 1.0, green: 0.4, blue: 0.25)],
+                                colors: isStopwatch ? [Color.cyan, Color.blue] : (viewModel.isBreakPreset ? [Color.teal, Color.cyan] : [Color.orange, Color(red: 1.0, green: 0.4, blue: 0.25)]),
                                 startPoint: .bottom,
                                 endPoint: .top
                             )
                         )
                         .frame(width: max(3, dialDiameter * 0.011), height: dialDiameter * 0.25)
                         .offset(y: -dialDiameter * 0.125)
-                        .shadow(color: (isStopwatch ? Color.cyan : Color.orange).opacity(0.4), radius: 6)
+                        .shadow(color: (isStopwatch ? Color.cyan : (viewModel.isBreakPreset ? Color.teal : Color.orange)).opacity(0.4), radius: 6)
 
                     // Outer Track Pip Indicator
                     Circle()
-                        .fill(isStopwatch ? Color.cyan : Color.orange)
+                        .fill(isStopwatch ? Color.cyan : (viewModel.isBreakPreset ? Color.teal : Color.orange))
                         .frame(width: max(6, dialDiameter * 0.018), height: max(6, dialDiameter * 0.018))
                         .offset(y: -dialDiameter * 0.42)
-                        .shadow(color: (isStopwatch ? Color.cyan : Color.orange).opacity(0.6), radius: 4)
+                        .shadow(color: (isStopwatch ? Color.cyan : (viewModel.isBreakPreset ? Color.teal : Color.orange)).opacity(0.6), radius: 4)
                 }
                 .rotationEffect(.degrees(progress * 360))
                 .animation(.linear(duration: 0.1), value: progress)
@@ -424,7 +460,7 @@ public struct AnalogDialView: View {
                     .frame(width: max(14, dialDiameter * 0.06), height: max(14, dialDiameter * 0.06))
                     .overlay(Circle().stroke(Color.white.opacity(0.15), lineWidth: 1))
                 Circle()
-                    .fill(isStopwatch ? Color.cyan : Color.orange)
+                    .fill(isStopwatch ? Color.cyan : (viewModel.isBreakPreset ? Color.teal : Color.orange))
                     .frame(width: max(6, dialDiameter * 0.024), height: max(6, dialDiameter * 0.024))
             }
             .frame(width: dialDiameter, height: dialDiameter)
@@ -433,7 +469,7 @@ public struct AnalogDialView: View {
             if !minimal {
                 HStack(spacing: 8) {
                     Circle()
-                        .fill(isRunning ? (isStopwatch ? Color.cyan : Color.orange) : (isPaused ? Color.yellow : Color.gray))
+                        .fill(isRunning ? (isStopwatch ? Color.cyan : (viewModel.isBreakPreset ? Color.teal : Color.orange)) : (isPaused ? Color.yellow : Color.gray))
                         .frame(width: 6, height: 6)
                     Text(timeDisplay)
                         .font(.system(size: max(18, dialDiameter * 0.055), weight: .bold, design: .rounded))

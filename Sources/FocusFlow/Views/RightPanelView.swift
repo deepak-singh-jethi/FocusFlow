@@ -219,11 +219,6 @@ public struct RightPanelView: View {
                             viewModel.continueCurrentTimer()
                         }
                     },
-                    onPauseAndSwitch: {
-                        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
-                            viewModel.pauseAndSwitch()
-                        }
-                    },
                     onEndAndSwitch: {
                         withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
                             viewModel.endAndSwitch()

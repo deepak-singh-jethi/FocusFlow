@@ -93,24 +93,37 @@ public struct CapsuleActionButton: View {
     public var title: String
     public var isPrimary: Bool = false
     public var isCyan: Bool = false
+    public var isTeal: Bool = false
     public var compact: Bool = false
     public var buttonWidth: CGFloat? = nil
     public var action: () -> Void
 
     @State private var isHovered = false
 
-    public init(icon: String, title: String, isPrimary: Bool = false, isCyan: Bool = false, compact: Bool = false, buttonWidth: CGFloat? = nil, action: @escaping () -> Void) {
+    public init(
+        icon: String,
+        title: String,
+        isPrimary: Bool = false,
+        isCyan: Bool = false,
+        isTeal: Bool = false,
+        compact: Bool = false,
+        buttonWidth: CGFloat? = nil,
+        action: @escaping () -> Void
+    ) {
         self.icon = icon
         self.title = title
         self.isPrimary = isPrimary
         self.isCyan = isCyan
+        self.isTeal = isTeal
         self.compact = compact
         self.buttonWidth = buttonWidth
         self.action = action
     }
 
     private var primaryGradient: LinearGradient {
-        if isCyan {
+        if isTeal {
+            return LinearGradient(colors: [Color.teal, Color(red: 0.10, green: 0.76, blue: 0.82)], startPoint: .leading, endPoint: .trailing)
+        } else if isCyan {
             return LinearGradient(colors: [Color.cyan, Color(red: 0.0, green: 0.65, blue: 0.95)], startPoint: .leading, endPoint: .trailing)
         } else {
             return LinearGradient(colors: [Color.orange, Color(red: 1.0, green: 0.38, blue: 0.28)], startPoint: .leading, endPoint: .trailing)
@@ -118,7 +131,9 @@ public struct CapsuleActionButton: View {
     }
 
     private var primaryShadowColor: Color {
-        if isCyan {
+        if isTeal {
+            return Color.teal.opacity(isHovered ? 0.55 : 0.38)
+        } else if isCyan {
             return Color.cyan.opacity(isHovered ? 0.55 : 0.38)
         } else {
             return Color.orange.opacity(isHovered ? 0.55 : 0.38)

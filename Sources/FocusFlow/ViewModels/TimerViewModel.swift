@@ -341,45 +341,15 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func pauseAndSwitch() {
-        guard let pending = pendingTimerRequest else {
-            showConflictModal = false
-            return
-        }
-
-        // 1. Record active elapsed segment if running
-        recordActiveSessionSegment()
-
-        // 2. Pause active timer
-        if isTimerRunning {
-            isTimerRunning = false
-            targetEndDate = nil
-            fractionalRemaining = TimeInterval(timeRemaining)
-            updateMasterEngine()
-        }
-
-        // 3. Save current session into preservedSession
-        preservedSession = PreservedTimerSession(
-            activePreset: activePreset,
-            activeMode: activeMode,
-            isBreakSession: isBreakSession,
-            totalTime: totalTime,
-            timeRemaining: timeRemaining,
-            preciseProgress: preciseProgress,
-            customMinutes: customMinutes,
-            customSeconds: customSeconds,
-            currentSession: currentSession,
-            activeTaskIndex: activeTaskIndex
-        )
-
-        // 4. Apply new requested preset/mode
-        applyPresetDirectly(name: pending.name, minutes: pending.minutes, seconds: pending.seconds, mode: pending.mode, isBreak: pending.isBreak)
-
-        showConflictModal = false
-        pendingTimerRequest = nil
-        persistData()
+        endAndSwitch()
     }
 
-    public func endAndSwitch() {
+    public var currentSessionElapsedMinutes: Int {
+        let elapsed = max(0, totalTime - timeRemaining)
+        return max(1, Int(round(Double(elapsed) / 60.0)))
+    }
+
+    public func endAndSwitch(autoStart: Bool = true) {
         guard let pending = pendingTimerRequest else {
             showConflictModal = false
             return
@@ -399,6 +369,11 @@ public class TimerViewModel: ObservableObject {
         showConflictModal = false
         pendingTimerRequest = nil
         persistData()
+
+        // 4. Start target timer immediately so user directly transitions into active Break/Focus session
+        if autoStart {
+            startTimer()
+        }
     }
 
     public func restorePreservedSession() {
@@ -788,132 +763,32 @@ public class TimerViewModel: ObservableObject {
         // If we are already in this exact Break preset, do nothing
         if isBreakPreset && activeMode == "Pomodoro" && activePreset == breakName { return }
 
-        // If we have a preserved Break session, restore it!
-        if let preserved = preservedSession, preserved.isBreakSession {
-            let wasActive = (isTimerRunning || (timeRemaining < totalTime && timeRemaining > 0))
-            if isTimerRunning {
-                recordActiveSessionSegment()
-                stopTimer()
-            }
-            let focusToPreserve: PreservedTimerSession? = wasActive ? PreservedTimerSession(
-                activePreset: activePreset,
-                activeMode: activeMode,
-                isBreakSession: isBreakSession,
-                totalTime: totalTime,
-                timeRemaining: timeRemaining,
-                preciseProgress: preciseProgress,
-                customMinutes: customMinutes,
-                customSeconds: customSeconds,
-                currentSession: currentSession,
-                activeTaskIndex: activeTaskIndex
-            ) : nil
-
-            activePreset = preserved.activePreset
-            activeMode = preserved.activeMode
-            isBreakSession = true
-            totalTime = preserved.totalTime
-            timeRemaining = preserved.timeRemaining
-            preciseProgress = preserved.preciseProgress
-            customMinutes = preserved.customMinutes
-            customSeconds = preserved.customSeconds
-            customDurationSeconds = preserved.totalTime
-            currentSession = preserved.currentSession
-            activeTaskIndex = preserved.activeTaskIndex
-
-            preservedSession = focusToPreserve
-            persistData()
+        // If a timer is currently active (running or paused with time elapsed):
+        // Remind user that switching will end their active focus session and request confirmation!
+        if isTimerActive {
+            pendingTimerRequest = (name: breakName, minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: true)
+            showConflictModal = true
             return
         }
 
-        // If Focus is currently active, preserve Focus before switching
-        if isTimerActive && !isBreakPreset {
-            if isTimerRunning {
-                recordActiveSessionSegment()
-                stopTimer()
-            }
-            let focusSession = PreservedTimerSession(
-                activePreset: activePreset,
-                activeMode: activeMode,
-                isBreakSession: false,
-                totalTime: totalTime,
-                timeRemaining: timeRemaining,
-                preciseProgress: preciseProgress,
-                customMinutes: customMinutes,
-                customSeconds: customSeconds,
-                currentSession: currentSession,
-                activeTaskIndex: activeTaskIndex
-            )
-            preservedSession = focusSession
-            applyPresetDirectly(name: breakName, minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: true)
-            return
-        }
-
-        requestModeOrPresetChange(name: breakName, minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: true)
+        // Timer is idle: switch immediately and cleanly
+        applyPresetDirectly(name: breakName, minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: true)
     }
 
     public func switchToFocus(minutes: Int = 25) {
         // If we are already in Focus with this duration, do nothing
         if isFocusPreset && activeMode == "Pomodoro" && (activePreset == "Focus" && totalTime == minutes * 60) { return }
 
-        // If we have a preserved Focus session, restore it!
-        if let preserved = preservedSession, !preserved.isBreakSession {
-            let wasActive = (isTimerRunning || (timeRemaining < totalTime && timeRemaining > 0))
-            if isTimerRunning {
-                stopTimer()
-            }
-            let breakToPreserve: PreservedTimerSession? = wasActive ? PreservedTimerSession(
-                activePreset: activePreset,
-                activeMode: activeMode,
-                isBreakSession: isBreakSession,
-                totalTime: totalTime,
-                timeRemaining: timeRemaining,
-                preciseProgress: preciseProgress,
-                customMinutes: customMinutes,
-                customSeconds: customSeconds,
-                currentSession: currentSession,
-                activeTaskIndex: activeTaskIndex
-            ) : nil
-
-            activePreset = preserved.activePreset
-            activeMode = preserved.activeMode
-            isBreakSession = false
-            totalTime = preserved.totalTime
-            timeRemaining = preserved.timeRemaining
-            preciseProgress = preserved.preciseProgress
-            customMinutes = preserved.customMinutes
-            customSeconds = preserved.customSeconds
-            customDurationSeconds = preserved.totalTime
-            currentSession = preserved.currentSession
-            activeTaskIndex = preserved.activeTaskIndex
-
-            preservedSession = breakToPreserve
-            persistData()
+        // If a timer is currently active (e.g. running break timer):
+        // Remind user that switching will end their active session and request confirmation!
+        if isTimerActive {
+            pendingTimerRequest = (name: "Focus", minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: false)
+            showConflictModal = true
             return
         }
 
-        // If Break is currently active, preserve Break before switching
-        if isTimerActive && isBreakPreset {
-            if isTimerRunning {
-                stopTimer()
-            }
-            let breakSession = PreservedTimerSession(
-                activePreset: activePreset,
-                activeMode: activeMode,
-                isBreakSession: true,
-                totalTime: totalTime,
-                timeRemaining: timeRemaining,
-                preciseProgress: preciseProgress,
-                customMinutes: customMinutes,
-                customSeconds: customSeconds,
-                currentSession: currentSession,
-                activeTaskIndex: activeTaskIndex
-            )
-            preservedSession = breakSession
-            applyPresetDirectly(name: "Focus", minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: false)
-            return
-        }
-
-        requestModeOrPresetChange(name: "Focus", minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: false)
+        // Timer is idle: switch immediately and cleanly
+        applyPresetDirectly(name: "Focus", minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: false)
     }
 
     public func applyPendingPreset() {

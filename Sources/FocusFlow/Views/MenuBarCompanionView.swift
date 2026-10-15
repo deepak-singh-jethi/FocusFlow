@@ -53,6 +53,7 @@ public struct MenuBarCompanionView: View {
     @State private var inputMinutes: String = "25"
     @State private var inputSeconds: String = "00"
     @State private var isEditingDirectTime: Bool = false
+    @State private var isSyncingFields: Bool = false
 
     @State private var isPlayHovered: Bool = false
     @State private var isLapHovered: Bool = false
@@ -116,10 +117,14 @@ public struct MenuBarCompanionView: View {
     }
 
     private func syncInputFields() {
+        isSyncingFields = true
         let m = viewModel.totalTime / 60
         let s = viewModel.totalTime % 60
         inputMinutes = "\(m)"
         inputSeconds = String(format: "%02d", s)
+        DispatchQueue.main.async {
+            isSyncingFields = false
+        }
     }
 
     // MARK: - 1. Top Header Row
@@ -294,6 +299,7 @@ public struct MenuBarCompanionView: View {
                             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.40), lineWidth: 1))
                             .onSubmit { applyCustomInput() }
                             .onChange(of: inputMinutes) { _, newVal in
+                                guard !isSyncingFields else { return }
                                 let digits = newVal.filter { $0.isNumber }
                                 let val = min(Int(digits) ?? 0, 360)
                                 if digits != newVal {
@@ -318,6 +324,7 @@ public struct MenuBarCompanionView: View {
                             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.15), lineWidth: 1))
                             .onSubmit { applyCustomInput() }
                             .onChange(of: inputSeconds) { _, newVal in
+                                guard !isSyncingFields else { return }
                                 let digits = newVal.filter { $0.isNumber }
                                 let val = min(Int(digits) ?? 0, 59)
                                 if digits != newVal {
@@ -378,21 +385,35 @@ public struct MenuBarCompanionView: View {
         let newM = min(max(currentM + delta, 1), 360)
         inputMinutes = "\(newM)"
         inputSeconds = "00"
-        viewModel.setCustomDuration(minutes: newM, seconds: 0)
+        if viewModel.isBreakPreset {
+            viewModel.switchToBreak(minutes: newM)
+        } else {
+            viewModel.setCustomDuration(minutes: newM, seconds: 0)
+        }
     }
 
     private func selectQuickDuration(minutes: Int) {
         inputMinutes = "\(minutes)"
         inputSeconds = "00"
-        viewModel.setCustomDuration(minutes: minutes, seconds: 0)
+        if viewModel.isBreakPreset {
+            viewModel.switchToBreak(minutes: minutes)
+        } else {
+            viewModel.setCustomDuration(minutes: minutes, seconds: 0)
+        }
     }
 
     private func applyCustomInput() {
+        guard !isSyncingFields else { return }
         let m = min(max(Int(inputMinutes.filter { $0.isNumber }) ?? 0, 0), 360)
         let s = min(max(Int(inputSeconds.filter { $0.isNumber }) ?? 0, 0), 59)
         let total = m * 60 + s
         if total >= 5 {
-            viewModel.setCustomDuration(minutes: m, seconds: s)
+            if viewModel.isBreakPreset {
+                let name = (m >= 15) ? "Long Break" : "Short Break"
+                viewModel.requestModeOrPresetChange(name: name, minutes: m, seconds: s, mode: "Pomodoro", isBreak: true)
+            } else {
+                viewModel.setCustomDuration(minutes: m, seconds: s)
+            }
         }
     }
 
