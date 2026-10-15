@@ -56,7 +56,7 @@ public class TimerViewModel: ObservableObject {
     @Published public var focusedSeconds: Int = 0 // Maintained for backward compatibility with existing views
 
     // Wall-clock segment tracking (prevents duplicate counting on pause/resume/tick)
-    private var sessionSegmentStartDate: Date?
+    internal var sessionSegmentStartDate: Date?
 
     // MARK: Stopwatch States (Priority 5)
     @Published public var stopwatchTime: Int = 0
@@ -159,34 +159,29 @@ public class TimerViewModel: ObservableObject {
         self.storage = storage
         loadPersistedData()
         NotificationService.shared.requestAuthorization()
-        setupTerminationObserver()
     }
 
-    private func setupTerminationObserver() {
-        NotificationCenter.default.addObserver(
-            forName: NSApplication.willTerminateNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.handleAppTermination()
-            }
-        }
-    }
+    public private(set) var hasTerminated: Bool = false
 
-    private func handleAppTermination() {
+    public func handleAppTermination() {
+        guard !hasTerminated else { return }
+        hasTerminated = true
+
         if isTimerRunning {
-            // Step 1: Timers running at quit are not recovered as paused sessions.
-            // Record active segment so worked focus time is not lost, but clear paused session snapshot.
+            stopTimer()
+        } else {
             recordActiveSessionSegment()
-            isTimerRunning = false
-            targetEndDate = nil
-            pausedSession = nil
         }
+
         if isStopwatchRunning {
             stopStopwatch()
         }
+
         persistData(force: true)
+    }
+
+    public func resetTerminationStateForTesting() {
+        hasTerminated = false
     }
 
     // MARK: - Persistence Integration (Priority 4A & 4C)
@@ -236,6 +231,26 @@ public class TimerViewModel: ObservableObject {
                 self.preciseProgress = min(max(Double(paused.timeRemaining) / Double(paused.totalTime), 0.0), 1.0)
             } else {
                 self.preciseProgress = paused.preciseProgress
+            }
+            self.isTimerRunning = false
+            self.targetEndDate = nil
+            self.fractionalRemaining = nil
+        } else {
+            if self.activePreset == "Short Break" || self.activePreset == "Break" {
+                self.isBreakSession = true
+                self.totalTime = 5 * 60
+                self.timeRemaining = 5 * 60
+                self.preciseProgress = 1.0
+            } else if self.activePreset == "Long Break" {
+                self.isBreakSession = true
+                self.totalTime = 15 * 60
+                self.timeRemaining = 15 * 60
+                self.preciseProgress = 1.0
+            } else if self.activePreset == "Focus" {
+                self.isBreakSession = false
+                self.totalTime = 25 * 60
+                self.timeRemaining = 25 * 60
+                self.preciseProgress = 1.0
             }
             self.isTimerRunning = false
             self.targetEndDate = nil
@@ -545,6 +560,7 @@ public class TimerViewModel: ObservableObject {
     // MARK: Focus Timer Core Controls
     public func startTimer() {
         guard !isTimerRunning else { return }
+        hasTerminated = false
         // Ensure only one countdown timer runs at a time
         isTimerRunning = true
         let remainingInterval = fractionalRemaining ?? TimeInterval(timeRemaining)
@@ -558,6 +574,10 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func stopTimer() {
+        var capturedRemaining = timeRemaining
+        var capturedProgress = preciseProgress
+        let wasRunning = isTimerRunning
+
         if isTimerRunning, let target = targetEndDate {
             let remaining = max(0, target.timeIntervalSinceNow)
             fractionalRemaining = remaining
@@ -569,22 +589,24 @@ public class TimerViewModel: ObservableObject {
                 }
             }
             timeRemaining = newRemaining
+            capturedRemaining = newRemaining
             if totalTime > 0 {
                 preciseProgress = min(max(remaining / Double(totalTime), 0.0), 1.0)
+                capturedProgress = preciseProgress
             }
         }
         recordActiveSessionSegment()
         isTimerRunning = false
         targetEndDate = nil
         updateMasterEngine()
-        if timeRemaining < totalTime && timeRemaining > 0 {
+        if capturedRemaining > 0 && (capturedRemaining < totalTime || wasRunning) {
             pausedSession = PausedTimerSession(
                 activePreset: activePreset,
                 activeMode: activeMode,
                 isBreakSession: isBreakSession,
                 totalTime: totalTime,
-                timeRemaining: timeRemaining,
-                preciseProgress: preciseProgress,
+                timeRemaining: capturedRemaining,
+                preciseProgress: capturedProgress,
                 customMinutes: customMinutes,
                 customSeconds: customSeconds,
                 currentSession: currentSession,

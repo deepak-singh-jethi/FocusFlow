@@ -33,6 +33,10 @@ public final class FocusFlowAppDelegate: NSObject, NSApplicationDelegate, NSWind
         return false
     }
 
+    public func applicationWillTerminate(_ notification: Notification) {
+        viewModel.handleAppTermination()
+    }
+
     public func showMainWindow() {
         let msg = "showMainWindow called at \(Date()), mainWindow=\(String(describing: mainWindow))\n"
         if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: "/tmp/focusflow_did_launch.txt")) {
