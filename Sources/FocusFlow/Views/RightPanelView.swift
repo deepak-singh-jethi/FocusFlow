@@ -212,6 +212,7 @@ public struct RightPanelView: View {
                 TimerConflictSwitchModal(
                     currentPresetName: viewModel.displayedTimerPreset,
                     currentRemainingTime: viewModel.displayedTimerTimeString,
+                    currentElapsedMinutes: viewModel.currentSessionElapsedMinutes,
                     targetPresetName: pending.name,
                     targetDurationString: targetDuration,
                     onContinue: {

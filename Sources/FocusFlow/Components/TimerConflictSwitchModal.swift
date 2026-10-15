@@ -1,21 +1,24 @@
 import SwiftUI
 import AppKit
 
-// MARK: - Intentional Mode Switch Confirmation Modal
+// MARK: - Modern macOS Obsidian HUD Mode Switch Confirmation Dialog
 public struct TimerConflictSwitchModal: View {
     public let currentPresetName: String
     public let currentRemainingTime: String
+    public let currentElapsedMinutes: Int
     public let targetPresetName: String
     public let targetDurationString: String
     public let onContinue: () -> Void
     public let onEndAndSwitch: () -> Void
 
-    @State private var isContinueHovered = false
-    @State private var isEndHovered = false
+    @State private var isPrimaryHovered = false
+    @State private var isSecondaryHovered = false
+    @State private var isCloseHovered = false
 
     public init(
         currentPresetName: String,
         currentRemainingTime: String,
+        currentElapsedMinutes: Int = 1,
         targetPresetName: String,
         targetDurationString: String,
         onContinue: @escaping () -> Void,
@@ -24,6 +27,7 @@ public struct TimerConflictSwitchModal: View {
     ) {
         self.currentPresetName = currentPresetName
         self.currentRemainingTime = currentRemainingTime
+        self.currentElapsedMinutes = max(1, currentElapsedMinutes)
         self.targetPresetName = targetPresetName
         self.targetDurationString = targetDurationString
         self.onContinue = onContinue
@@ -32,229 +36,232 @@ public struct TimerConflictSwitchModal: View {
 
     public var body: some View {
         let isTargetBreak = targetPresetName.contains("Break")
+        let accentColor = isTargetBreak ? Color.teal : Color.orange
+        let sourceIcon = isTargetBreak ? "flame.fill" : "cup.and.saucer.fill"
+        let targetIcon = isTargetBreak ? "cup.and.saucer.fill" : "flame.fill"
 
         ZStack {
-            // High-contrast dark backdrop scrim
-            Color.black.opacity(0.72)
+            // High-contrast frosted backdrop scrim
+            Color.black.opacity(0.68)
                 .ignoresSafeArea()
                 .onTapGesture {
                     onContinue()
                 }
 
-            // Spacious obsidian dialog card
-            VStack(spacing: 20) {
-                // 1. Hero Luminous Squircle Icon
-                ZStack {
-                    Circle()
-                        .fill(
-                            RadialGradient(
-                                colors: [
-                                    (isTargetBreak ? Color.teal : Color.orange).opacity(0.28),
-                                    Color.clear
-                                ],
-                                center: .center,
-                                startRadius: 0,
-                                endRadius: 38
+            // Compact, widescreen macOS Obsidian HUD Card
+            VStack(alignment: .leading, spacing: 18) {
+                // 1. Header Row: Luminous Inline Squircle Badge + Title + Close Button
+                HStack(alignment: .center, spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(accentColor.opacity(0.16))
+                            .frame(width: 36, height: 36)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .stroke(accentColor.opacity(0.38), lineWidth: 1)
                             )
-                        )
-                        .frame(width: 76, height: 76)
+                            .shadow(color: accentColor.opacity(0.35), radius: 8)
 
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    (isTargetBreak ? Color.teal : Color.orange).opacity(0.22),
-                                    (isTargetBreak ? Color.cyan : Color.orange).opacity(0.12)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .frame(width: 54, height: 54)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .stroke((isTargetBreak ? Color.teal : Color.orange).opacity(0.42), lineWidth: 1)
-                        )
-
-                    Image(systemName: isTargetBreak ? "cup.and.saucer.fill" : "flame.fill")
-                        .font(.system(size: 23, weight: .bold))
-                        .foregroundColor(isTargetBreak ? .teal : .orange)
-                        .shadow(color: (isTargetBreak ? Color.teal : Color.orange).opacity(0.60), radius: 6)
-                }
-
-                // 2. Title & Status
-                VStack(spacing: 12) {
-                    Text(isTargetBreak ? "Take a Break?" : "Start Focus Session?")
-                        .font(.system(size: 21, weight: .bold, design: .rounded))
-                        .foregroundColor(.white)
-
-                    // Current Session Status Pill
-                    HStack(spacing: 8) {
-                        Circle()
-                            .fill(isTargetBreak ? Color.orange : Color.teal)
-                            .frame(width: 7, height: 7)
-                        Text("\(currentPresetName) session active ·")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(Color.white.opacity(0.65))
-                        Text(currentRemainingTime)
-                            .font(.system(size: 12.5, weight: .bold, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundColor(.white)
-                        Text("remaining")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(Color.white.opacity(0.65))
+                        Image(systemName: targetIcon)
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(accentColor)
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
-                    .background(Color.white.opacity(0.045), in: Capsule())
-                    .overlay(Capsule().stroke(Color.white.opacity(0.09), lineWidth: 1))
 
-                    Text("Ending this session will safely record the focus time you've completed into your daily stats and immediately transition to **\(targetPresetName)**.")
-                        .font(.system(size: 13, weight: .regular))
-                        .foregroundColor(Color.white.opacity(0.72))
-                        .multilineTextAlignment(.center)
-                        .lineSpacing(3.5)
-                        .padding(.horizontal, 8)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(isTargetBreak ? "Take a Break?" : "Start Focus Session?")
+                            .font(.system(size: 16.5, weight: .bold, design: .rounded))
+                            .foregroundColor(.white)
+
+                        Text(isTargetBreak ? "Step away from the screen and recharge" : "Resume your deep work zone")
+                            .font(.system(size: 11.5, weight: .regular))
+                            .foregroundColor(Color.white.opacity(0.55))
+                    }
+
+                    Spacer()
+
+                    // Subtle close button (Esc)
+                    Button(action: onContinue) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundColor(Color.white.opacity(isCloseHovered ? 0.90 : 0.45))
+                            .frame(width: 24, height: 24)
+                            .background(
+                                Color.white.opacity(isCloseHovered ? 0.10 : 0.03),
+                                in: Circle()
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { h in
+                        isCloseHovered = h
+                        if h { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+                    }
+                    .help("Cancel (Esc)")
                 }
 
-                // 3. Two Clear Intentional Actions
-                VStack(spacing: 11) {
-                    // Action 1: Intentional Switch & Start (Vibrant Action Card)
-                    Button(action: onEndAndSwitch) {
-                        HStack(spacing: 14) {
-                            ZStack {
-                                Circle()
-                                    .fill(Color.black.opacity(0.18))
-                                    .frame(width: 36, height: 36)
-                                Image(systemName: isTargetBreak ? "cup.and.saucer.fill" : "play.fill")
-                                    .font(.system(size: 14, weight: .bold))
-                                    .foregroundColor(isTargetBreak ? Color(red: 0.02, green: 0.20, blue: 0.20) : Color(red: 0.25, green: 0.08, blue: 0.02))
-                            }
+                // 2. Visual Session Transition Capsule (Hero Information Architecture)
+                HStack(spacing: 0) {
+                    // Left: Source Session (Active/Paused)
+                    HStack(spacing: 8) {
+                        Image(systemName: sourceIcon)
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(isTargetBreak ? .orange : .teal)
 
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(isTargetBreak ? "End Session & Start Break" : "End Break & Start Focus")
-                                    .font(.system(size: 13.5, weight: .bold))
-                                    .foregroundColor(isTargetBreak ? Color(red: 0.02, green: 0.18, blue: 0.18) : Color(red: 0.22, green: 0.06, blue: 0.02))
-                                Text("Log completed time and begin \(targetPresetName) (\(targetDurationString))")
-                                    .font(.system(size: 11, weight: .medium))
-                                    .foregroundColor(isTargetBreak ? Color(red: 0.06, green: 0.26, blue: 0.26) : Color(red: 0.35, green: 0.12, blue: 0.05))
-                            }
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("\(currentPresetName) (\(currentRemainingTime) left)")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundColor(.white)
+                                .lineLimit(1)
 
-                            Spacer()
-
-                            Image(systemName: "arrow.right")
-                                .font(.system(size: 12, weight: .bold))
-                                .foregroundColor(isTargetBreak ? Color(red: 0.02, green: 0.20, blue: 0.20) : Color(red: 0.25, green: 0.08, blue: 0.02))
+                            Text(isTargetBreak ? "\(currentElapsedMinutes)m focus logged" : "Break ended early")
+                                .font(.system(size: 10.5, weight: .regular))
+                                .foregroundColor(Color.white.opacity(0.52))
                         }
-                        .padding(.horizontal, 16)
-                        .frame(maxWidth: .infinity, minHeight: 52)
+                    }
+
+                    Spacer()
+
+                    // Center: Direction Indicator
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(Color.white.opacity(0.35))
+                        .padding(.horizontal, 10)
+
+                    Spacer()
+
+                    // Right: Target Session (Ready to Launch)
+                    HStack(spacing: 8) {
+                        Image(systemName: targetIcon)
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(accentColor)
+
+                        VStack(alignment: .trailing, spacing: 1) {
+                            Text(targetPresetName)
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundColor(.white)
+                                .lineLimit(1)
+
+                            Text("\(targetDurationString) countdown")
+                                .font(.system(size: 10.5, weight: .medium))
+                                .foregroundColor(accentColor.opacity(0.90))
+                        }
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Color.white.opacity(0.038), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Color.white.opacity(0.07), lineWidth: 1)
+                )
+
+                // 3. Clear Reassurance Copy
+                Text(isTargetBreak
+                    ? "Your focus time worked so far will be safely logged to today's stats."
+                    : "Ending break early will immediately start your scheduled focus countdown."
+                )
+                .font(.system(size: 12, weight: .regular))
+                .foregroundColor(Color.white.opacity(0.68))
+                .lineSpacing(2)
+
+                // 4. Horizontal Desktop Action Bar (Standard macOS HIG)
+                HStack(spacing: 10) {
+                    // Secondary Action: Keep Current Session (Esc)
+                    Button(action: onContinue) {
+                        HStack(spacing: 6) {
+                            Text(isTargetBreak ? "Keep Focusing" : "Continue Break")
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundColor(Color.white.opacity(isSecondaryHovered ? 0.95 : 0.80))
+
+                            Text("esc")
+                                .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                                .foregroundColor(Color.white.opacity(0.38))
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1.5)
+                                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 4))
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 34)
+                        .background(
+                            Color.white.opacity(isSecondaryHovered ? 0.08 : 0.04),
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(isSecondaryHovered ? Color.white.opacity(0.20) : Color.white.opacity(0.09), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(.cancelAction)
+                    .onHover { h in
+                        isSecondaryHovered = h
+                        if h { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+                    }
+
+                    // Primary Action: End & Switch to Target (Return ↵)
+                    Button(action: onEndAndSwitch) {
+                        HStack(spacing: 6) {
+                            Image(systemName: targetIcon)
+                                .font(.system(size: 11, weight: .bold))
+
+                            Text(isTargetBreak ? "Start Break (\(targetDurationString))" : "Start Focus")
+                                .font(.system(size: 12.5, weight: .bold))
+
+                            Text("↵")
+                                .font(.system(size: 11, weight: .bold))
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 4))
+                        }
+                        .foregroundColor(isTargetBreak ? Color(red: 0.02, green: 0.16, blue: 0.16) : Color(red: 0.22, green: 0.05, blue: 0.02))
+                        .frame(maxWidth: .infinity, minHeight: 34)
                         .background(
                             LinearGradient(
                                 colors: isTargetBreak
-                                    ? [Color(red: 0.08, green: 0.78, blue: 0.82), Color(red: 0.02, green: 0.86, blue: 0.88)]
-                                    : [Color(red: 0.98, green: 0.45, blue: 0.20), Color(red: 1.0, green: 0.56, blue: 0.28)],
+                                    ? [Color(red: 0.02, green: 0.78, blue: 0.82), Color(red: 0.0, green: 0.88, blue: 0.86)]
+                                    : [Color(red: 0.98, green: 0.44, blue: 0.18), Color(red: 1.0, green: 0.58, blue: 0.28)],
                                 startPoint: .leading,
                                 endPoint: .trailing
                             ),
-                            in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                                .stroke(Color.white.opacity(isEndHovered ? 0.40 : 0.22), lineWidth: 1)
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Color.white.opacity(isPrimaryHovered ? 0.40 : 0.20), lineWidth: 1)
                         )
                         .shadow(
-                            color: (isTargetBreak ? Color.teal : Color.orange).opacity(isEndHovered ? 0.45 : 0.25),
-                            radius: isEndHovered ? 12 : 7,
-                            y: 3
+                            color: accentColor.opacity(isPrimaryHovered ? 0.45 : 0.25),
+                            radius: isPrimaryHovered ? 10 : 5,
+                            y: 2
                         )
-                        .scaleEffect(isEndHovered ? 1.01 : 1.0)
+                        .scaleEffect(isPrimaryHovered ? 1.012 : 1.0)
                     }
                     .buttonStyle(.plain)
-                    .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-                    .onHover { h in
-                        isEndHovered = h
-                        if h { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
-                    }
-
-                    // Action 2: Continue Session (Primary Safe Action)
-                    Button(action: onContinue) {
-                        HStack(spacing: 14) {
-                            ZStack {
-                                Circle()
-                                    .fill(Color.white.opacity(0.08))
-                                    .frame(width: 36, height: 36)
-                                Image(systemName: "play.circle.fill")
-                                    .font(.system(size: 16, weight: .semibold))
-                                    .foregroundColor(.white.opacity(0.85))
-                            }
-
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(isTargetBreak ? "Continue Focusing" : "Continue Break")
-                                    .font(.system(size: 13.5, weight: .semibold))
-                                    .foregroundColor(.white)
-                                Text("Keep your current session running without interruption")
-                                    .font(.system(size: 11, weight: .regular))
-                                    .foregroundColor(Color.white.opacity(0.55))
-                            }
-
-                            Spacer()
-
-                            Text("↵")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundColor(Color.white.opacity(0.40))
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 3)
-                                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 5))
-                                .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.white.opacity(0.10), lineWidth: 1))
-                        }
-                        .padding(.horizontal, 16)
-                        .frame(maxWidth: .infinity, minHeight: 50)
-                        .background(
-                            Color.white.opacity(isContinueHovered ? 0.08 : 0.04),
-                            in: RoundedRectangle(cornerRadius: 13, style: .continuous)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                                .stroke(isContinueHovered ? Color.white.opacity(0.24) : Color.white.opacity(0.09), lineWidth: 1)
-                        )
-                        .scaleEffect(isContinueHovered ? 1.008 : 1.0)
-                    }
-                    .buttonStyle(.plain)
-                    .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-                    .onHover { h in
-                        isContinueHovered = h
-                        if h { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
-                    }
                     .keyboardShortcut(.defaultAction)
+                    .onHover { h in
+                        isPrimaryHovered = h
+                        if h { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+                    }
                 }
-
-                // 4. Keyboard Shortcuts Micro-Hint
-                HStack(spacing: 8) {
-                    Text("↵ Enter to continue")
-                    Text("•")
-                    Text("Esc to cancel")
-                }
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(Color.white.opacity(0.40))
                 .padding(.top, 2)
-
-                // Invisible Escape key handler
-                Button(action: onContinue) {
-                    EmptyView()
-                }
-                .keyboardShortcut(.cancelAction)
-                .opacity(0)
-                .frame(width: 0, height: 0)
             }
-            .padding(.horizontal, 28)
-            .padding(.vertical, 26)
-            .frame(width: 480)
+            .padding(22)
+            .frame(width: 440)
             .background(
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .fill(Color(red: 0.105, green: 0.115, blue: 0.155))
+                ZStack {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(Color(red: 0.11, green: 0.12, blue: 0.16))
+
+                    // Ambient luminous background glow from accent color
+                    RadialGradient(
+                        colors: [accentColor.opacity(0.10), Color.clear],
+                        center: .topLeading,
+                        startRadius: 10,
+                        endRadius: 280
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                }
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .stroke(
                         LinearGradient(
                             colors: [Color.white.opacity(0.18), Color.white.opacity(0.05)],
@@ -264,9 +271,10 @@ public struct TimerConflictSwitchModal: View {
                         lineWidth: 1
                     )
             )
-            .shadow(color: Color.black.opacity(0.68), radius: 36, y: 16)
+            .shadow(color: Color.black.opacity(0.70), radius: 36, y: 16)
         }
-        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: isContinueHovered)
-        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: isEndHovered)
+        .animation(.spring(response: 0.22, dampingFraction: 0.8), value: isPrimaryHovered)
+        .animation(.spring(response: 0.22, dampingFraction: 0.8), value: isSecondaryHovered)
+        .animation(.easeInOut(duration: 0.15), value: isCloseHovered)
     }
 }
