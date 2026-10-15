@@ -811,13 +811,38 @@ public class TimerViewModel: ObservableObject {
         stopTimer()
         fractionalRemaining = nil
         if isBreakPreset {
+            if activePreset == "Long Break" {
+                currentSession = 1
+            }
+
+            if let preserved = preservedSession, preserved.isBreakSession {
+                preservedSession = nil
+            }
+
             applyPresetDirectly(name: "Focus", minutes: 25, mode: "Pomodoro", isBreak: false)
+            persistData()
+            if autoStartNextSession {
+                startTimer()
+            }
         } else {
-            advanceSession()
+            let isFinalSession = currentSession >= totalSessions
+            currentSession = isFinalSession ? (autoStartNextSession ? currentSession : 1) : currentSession + 1
+            let nextBreakPreset = isFinalSession ? "Long Break" : "Short Break"
+            let nextBreakMinutes = isFinalSession ? 15 : 5
+
+            if let preserved = preservedSession, !preserved.isBreakSession {
+                preservedSession = nil
+            }
+
+            applyPresetDirectly(name: nextBreakPreset, minutes: nextBreakMinutes, mode: "Pomodoro", isBreak: true)
+            persistData()
+            if autoStartNextSession {
+                startTimer()
+            }
         }
     }
 
-    private func handleSessionComplete() {
+    internal func handleSessionComplete() {
         stopTimer()
         fractionalRemaining = nil
 
@@ -866,20 +891,6 @@ public class TimerViewModel: ObservableObject {
             if autoStartNextSession {
                 startTimer()
             }
-        }
-    }
-
-    private func advanceSession() {
-        recordActiveSessionSegment()
-        completedSessions += 1
-        let isFinalSession = currentSession >= totalSessions
-        currentSession = isFinalSession ? (autoStartNextSession ? currentSession : 1) : currentSession + 1
-        let nextBreakPreset = isFinalSession ? "Long Break" : "Short Break"
-        let nextBreakMinutes = isFinalSession ? 15 : 5
-        applyPresetDirectly(name: nextBreakPreset, minutes: nextBreakMinutes, mode: "Pomodoro", isBreak: true)
-        persistData()
-        if autoStartNextSession {
-            startTimer()
         }
     }
 

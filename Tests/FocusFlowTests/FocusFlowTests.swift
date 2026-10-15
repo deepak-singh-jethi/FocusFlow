@@ -110,15 +110,15 @@ final class FocusFlowTests: XCTestCase {
         let activeIndex = vm.activeTaskIndex
         XCTAssertFalse(vm.tasks[activeIndex].isCompleted)
 
-        // Simulate session completion by invoking skipSession() or letting timer finish
+        // Simulate session completion by invoking skipSession()
         vm.skipSession()
 
-        // Verify session progression occurred
-        XCTAssertEqual(vm.completedSessions, 1)
+        // Verify session progression occurred without increasing completedSessions
+        XCTAssertEqual(vm.completedSessions, 0, "Skipping a session must NOT increase completedSessions")
         XCTAssertTrue(vm.isBreakPreset)
 
         // PRIORITY 3 ACCEPTANCE: Task must still be incomplete!
-        XCTAssertFalse(vm.tasks[activeIndex].isCompleted, "Completing a Pomodoro must NEVER automatically mark a longer task complete")
+        XCTAssertFalse(vm.tasks[activeIndex].isCompleted, "Completing or skipping a Pomodoro must NEVER automatically mark a longer task complete")
     }
 
     // MARK: - Priority 2: Date-Aware Session Tracking & Midnight Transitions
@@ -508,5 +508,69 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertTrue(vm2.hasPreservedSession, "Preserved session must survive app relaunch")
         XCTAssertEqual(vm2.preservedSession?.activePreset, "Focus")
         XCTAssertEqual(vm2.preservedSession?.timeRemaining, 850)
+    }
+
+    // MARK: - Regressions: Fix 1 (Skip vs Natural Completion) & Fix 2 (Stopwatch Formatting)
+    @MainActor
+    func testSkippedSessionsDoNotIncreaseCompletedCount() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        XCTAssertEqual(vm.completedSessions, 0)
+        XCTAssertEqual(vm.activePreset, "Focus")
+
+        // 1. Skip Focus session
+        vm.skipSession()
+        XCTAssertEqual(vm.completedSessions, 0, "Skipping a focus session must not increment completedSessions")
+        XCTAssertTrue(vm.isBreakPreset, "Skipping focus must advance to break")
+        XCTAssertEqual(vm.activePreset, "Short Break")
+
+        // 2. Skip Break session
+        vm.skipSession()
+        XCTAssertEqual(vm.completedSessions, 0, "Skipping a break session must not increment completedSessions")
+        XCTAssertFalse(vm.isBreakPreset, "Skipping break must return to focus")
+        XCTAssertEqual(vm.activePreset, "Focus")
+    }
+
+    @MainActor
+    func testNaturalFocusCompletionIncreasesCompletedCountExactlyOnce() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        XCTAssertEqual(vm.completedSessions, 0)
+        XCTAssertEqual(vm.activePreset, "Focus")
+
+        // Simulate natural completion of a focus session
+        vm.handleSessionComplete()
+
+        XCTAssertEqual(vm.completedSessions, 1, "Natural completion of focus timer must increment completedSessions by 1")
+        XCTAssertTrue(vm.isBreakPreset, "Natural completion of focus timer must transition to break")
+        XCTAssertEqual(vm.activePreset, "Short Break")
+    }
+
+    func testStopwatchLapFormattingBeforeAndAfterOneHour() {
+        // Table required by specification:
+        // 8.2 seconds -> "08.20"
+        XCTAssertEqual(StopwatchLap.formatDuration(8.2), "08.20")
+
+        // 75.5 seconds -> "01:15.50"
+        XCTAssertEqual(StopwatchLap.formatDuration(75.5), "01:15.50")
+
+        // 59 minutes, 59.99 seconds -> "59:59.99"
+        XCTAssertEqual(StopwatchLap.formatDuration(59 * 60 + 59.99), "59:59.99")
+
+        // 60 minutes -> "01:00:00.00"
+        XCTAssertEqual(StopwatchLap.formatDuration(60 * 60), "01:00:00.00")
+
+        // 1 hour, 5 minutes, 10 seconds -> "01:05:10.00"
+        XCTAssertEqual(StopwatchLap.formatDuration(3600 + 300 + 10), "01:05:10.00")
+
+        // 2 hours -> "02:00:00.00"
+        XCTAssertEqual(StopwatchLap.formatDuration(2 * 3600), "02:00:00.00")
+
+        // Verify StopwatchLap properties use the corrected format
+        let hourLap = StopwatchLap(lapNumber: 1, lapDuration: 3665.25, totalTime: 7330.50)
+        XCTAssertEqual(hourLap.formattedLapDuration, "01:01:05.25")
+        XCTAssertEqual(hourLap.formattedTotalTime, "02:02:10.50")
     }
 }

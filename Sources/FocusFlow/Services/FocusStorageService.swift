@@ -76,10 +76,13 @@ public struct StopwatchLap: Identifiable, Codable, Equatable {
 
     public static func formatDuration(_ time: TimeInterval) -> String {
         let totalHundredths = max(0, Int(round(time * 100)))
+        let hours = totalHundredths / 360_000
         let minutes = (totalHundredths / 6000) % 60
         let seconds = (totalHundredths / 100) % 60
         let hundredths = totalHundredths % 100
-        if minutes > 0 {
+        if hours > 0 {
+            return String(format: "%02d:%02d:%02d.%02d", hours, minutes, seconds, hundredths)
+        } else if (totalHundredths / 6000) > 0 {
             return String(format: "%02d:%02d.%02d", minutes, seconds, hundredths)
         } else {
             return String(format: "%02d.%02d", seconds, hundredths)
