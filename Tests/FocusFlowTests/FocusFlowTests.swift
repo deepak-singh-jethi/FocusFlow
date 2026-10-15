@@ -573,4 +573,371 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(hourLap.formattedLapDuration, "01:01:05.25")
         XCTAssertEqual(hourLap.formattedTotalTime, "02:02:10.50")
     }
+
+    // MARK: - Step 1: Restore Paused Timer After App Restart Tests
+
+    // 1. Pause Focus at 17:30 → save → create a new ViewModel using the same test storage → restore exactly 17:30.
+    @MainActor
+    func testPauseFocusRestoresExactRemainingTimeOnRelaunch() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Start 25-minute focus session
+        vm1.applyPresetDirectly(name: "Focus", minutes: 25)
+        XCTAssertEqual(vm1.totalTime, 1500)
+        XCTAssertEqual(vm1.timeRemaining, 1500)
+
+        // Simulate pausing when 17 minutes and 30 seconds (1050s) remain
+        vm1.timeRemaining = 1050
+        vm1.preciseProgress = 1050.0 / 1500.0
+        vm1.stopTimer()
+        XCTAssertNotNil(vm1.pausedSession)
+        XCTAssertEqual(vm1.pausedSession?.timeRemaining, 1050)
+        vm1.persistData(force: true)
+
+        // Relaunch app with fresh ViewModel pointed to the same storage
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.activePreset, "Focus")
+        XCTAssertEqual(vm2.totalTime, 1500)
+        XCTAssertEqual(vm2.timeRemaining, 1050, "Restored timer must display exactly 17:30 (1050 seconds)")
+        XCTAssertEqual(vm2.timeString, "17:30", "Formatted time display must be 17:30")
+        XCTAssertEqual(vm2.timerTimeString, "17:30")
+        XCTAssertFalse(vm2.isTimerRunning, "Restored timer must remain paused on launch")
+        XCTAssertEqual(vm2.preciseProgress, 1050.0 / 1500.0, accuracy: 0.001)
+        XCTAssertNotNil(vm2.pausedSession)
+    }
+
+    // 2. Restored timer remains paused until Resume is pressed.
+    @MainActor
+    func testRestoredTimerRemainsPausedUntilResumePressed() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.applyPresetDirectly(name: "Focus", minutes: 25)
+        vm1.timeRemaining = 1050
+        vm1.stopTimer()
+        vm1.persistData(force: true)
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertFalse(vm2.isTimerRunning, "Timer must start paused upon relaunch")
+        XCTAssertEqual(vm2.timeRemaining, 1050)
+
+        // Press Resume / Play
+        vm2.startTimer()
+
+        XCTAssertTrue(vm2.isTimerRunning, "Timer must run after user presses resume")
+        XCTAssertEqual(vm2.timeRemaining, 1050, "Timer must resume from 17:30, not reset to 25:00")
+        XCTAssertNil(vm2.pausedSession, "Active running timer clears pausedSession snapshot")
+    }
+
+    // 3. Paused Short Break and Long Break restore their correct durations and modes.
+    @MainActor
+    func testPausedShortBreakAndLongBreakRestoreDurationsAndModes() {
+        let (vm1, tempURL1) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL1) }
+
+        // Test Short Break (5 min = 300s), paused at 3m 30s (210s)
+        vm1.applyPresetDirectly(name: "Short Break", minutes: 5, isBreak: true)
+        XCTAssertEqual(vm1.activePreset, "Short Break")
+        XCTAssertTrue(vm1.isBreakPreset)
+        XCTAssertEqual(vm1.totalTime, 300)
+
+        vm1.timeRemaining = 210
+        vm1.stopTimer()
+        vm1.persistData(force: true)
+
+        let storage1 = FocusStorageService(storageURL: tempURL1)
+        let vm2 = TimerViewModel(storage: storage1)
+
+        XCTAssertEqual(vm2.activePreset, "Short Break")
+        XCTAssertTrue(vm2.isBreakPreset)
+        XCTAssertEqual(vm2.totalTime, 300)
+        XCTAssertEqual(vm2.timeRemaining, 210)
+        XCTAssertEqual(vm2.timeString, "03:30")
+        XCTAssertFalse(vm2.isTimerRunning)
+
+        // Test Long Break (15 min = 900s), paused at 10m 00s (600s)
+        let (vm3, tempURL2) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL2) }
+
+        vm3.applyPresetDirectly(name: "Long Break", minutes: 15, isBreak: true)
+        XCTAssertEqual(vm3.activePreset, "Long Break")
+        XCTAssertTrue(vm3.isBreakPreset)
+        XCTAssertEqual(vm3.totalTime, 900)
+
+        vm3.timeRemaining = 600
+        vm3.stopTimer()
+        vm3.persistData(force: true)
+
+        let storage2 = FocusStorageService(storageURL: tempURL2)
+        let vm4 = TimerViewModel(storage: storage2)
+
+        XCTAssertEqual(vm4.activePreset, "Long Break")
+        XCTAssertTrue(vm4.isBreakPreset)
+        XCTAssertEqual(vm4.totalTime, 900)
+        XCTAssertEqual(vm4.timeRemaining, 600)
+        XCTAssertEqual(vm4.timeString, "10:00")
+        XCTAssertFalse(vm4.isTimerRunning)
+    }
+
+    // 4. Paused Custom Timer restores its custom duration.
+    @MainActor
+    func testPausedCustomTimerRestoresCustomDurationAndRemainingTime() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Configure 45m 30s custom timer
+        vm1.setCustomDuration(minutes: 45, seconds: 30)
+        XCTAssertEqual(vm1.activeMode, "Custom Timer")
+        XCTAssertEqual(vm1.activePreset, "Custom")
+        XCTAssertEqual(vm1.totalTime, 45 * 60 + 30)
+        XCTAssertEqual(vm1.customMinutes, 45)
+        XCTAssertEqual(vm1.customSeconds, 30)
+
+        // Pause when 32m 10s (1930s) remain
+        vm1.timeRemaining = 1930
+        vm1.stopTimer()
+        vm1.persistData(force: true)
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.activeMode, "Custom Timer")
+        XCTAssertEqual(vm2.activePreset, "Custom")
+        XCTAssertEqual(vm2.customMinutes, 45)
+        XCTAssertEqual(vm2.customSeconds, 30)
+        XCTAssertEqual(vm2.totalTime, 2730)
+        XCTAssertEqual(vm2.timeRemaining, 1930)
+        XCTAssertEqual(vm2.timeString, "32:10")
+        XCTAssertEqual(vm2.formattedCustomDuration, "45m 30s")
+        XCTAssertFalse(vm2.isTimerRunning)
+
+        // Resuming countdown works from 1930s
+        vm2.startTimer()
+        XCTAssertTrue(vm2.isTimerRunning)
+        XCTAssertEqual(vm2.timeRemaining, 1930)
+    }
+
+    // 5. Reset timer → relaunch → previously paused progress must not reappear.
+    @MainActor
+    func testResetTimerClearsPausedSnapshotSoRelaunchDoesNotResurrectProgress() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.applyPresetDirectly(name: "Focus", minutes: 25)
+        vm1.timeRemaining = 1050
+        vm1.stopTimer()
+        XCTAssertNotNil(vm1.pausedSession)
+
+        // Reset timer back to full duration
+        vm1.resetFocusTimer()
+        XCTAssertEqual(vm1.timeRemaining, 1500)
+        XCTAssertNil(vm1.pausedSession, "Resetting timer must clear pausedSession snapshot")
+        vm1.persistData(force: true)
+
+        // Relaunch app
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.timeRemaining, 1500, "Reset timer must not resurrect previously paused 17:30 progress")
+        XCTAssertNil(vm2.pausedSession)
+        XCTAssertFalse(vm2.isTimerRunning)
+    }
+
+    // 6. Existing saved tasks, notes, statistics, and session records remain unchanged.
+    @MainActor
+    func testExistingSavedTasksNotesStatisticsAndSessionRecordsRemainUnchanged() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Setup custom tasks, notes, and a session record
+        vm1.tasks = [
+            FocusTask(title: "Task Alpha", estimatedMinutes: 50, timeSpentSeconds: 600),
+            FocusTask(title: "Task Beta", estimatedMinutes: 20, timeSpentSeconds: 120)
+        ]
+        vm1.notes = ["Architecture meeting notes", "Refactor checklist"]
+        vm1.dailyGoalHours = 6
+        vm1.totalSessions = 8
+        vm1.completedSessions = 3
+        let testRecord = FocusSessionRecord(
+            startTime: Date().addingTimeInterval(-1800),
+            endTime: Date().addingTimeInterval(-900),
+            durationSeconds: 900,
+            mode: "Focus"
+        )
+        vm1.sessionRecords = [testRecord]
+
+        // Pause timer at 15m remaining
+        vm1.applyPresetDirectly(name: "Focus", minutes: 25)
+        vm1.timeRemaining = 900
+        vm1.stopTimer()
+        vm1.persistData(force: true)
+
+        // Relaunch
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.tasks.count, 2)
+        XCTAssertEqual(vm2.tasks[0].title, "Task Alpha")
+        XCTAssertEqual(vm2.tasks[0].timeSpentSeconds, 600)
+        XCTAssertEqual(vm2.tasks[1].title, "Task Beta")
+        XCTAssertEqual(vm2.notes.count, 2)
+        XCTAssertEqual(vm2.notes[0], "Architecture meeting notes")
+        XCTAssertEqual(vm2.dailyGoalHours, 6)
+        XCTAssertEqual(vm2.totalSessions, 8)
+        XCTAssertEqual(vm2.completedSessions, 3)
+        XCTAssertEqual(vm2.sessionRecords.count, 1)
+        XCTAssertEqual(vm2.sessionRecords[0].durationSeconds, 900)
+        XCTAssertEqual(vm2.timeRemaining, 900)
+    }
+
+    // 7. Old save files without the new paused-timer field load successfully.
+    @MainActor
+    func testOldSaveFilesWithoutPausedTimerFieldLoadSuccessfully() {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_legacy_schema_\(UUID().uuidString).json")
+        defer { cleanup(url: tempURL) }
+
+        // JSON payload from older FocusFlow versions WITHOUT 'pausedSession'
+        let legacyJSON = """
+        {
+            "tasks": [
+                {
+                    "id": "11111111-2222-3333-4444-555555555555",
+                    "title": "Legacy Architecture Task",
+                    "estimatedMinutes": 30,
+                    "timeSpentSeconds": 500,
+                    "isLocked": false,
+                    "isCompleted": false,
+                    "icon": "star.fill",
+                    "iconColorName": "orange"
+                }
+            ],
+            "focusedSeconds": 1500,
+            "completedSessions": 2,
+            "notes": ["Old note from v1"],
+            "dailyGoalHours": 4,
+            "totalSessions": 4,
+            "autoStartNextSession": false,
+            "activePreset": "Focus",
+            "clockStyle": "Digital",
+            "sessionRecords": [],
+            "laps": []
+        }
+        """
+
+        try? legacyJSON.data(using: .utf8)?.write(to: tempURL)
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm.tasks.count, 1)
+        XCTAssertEqual(vm.tasks[0].title, "Legacy Architecture Task")
+        XCTAssertEqual(vm.completedSessions, 2)
+        XCTAssertEqual(vm.notes, ["Old note from v1"])
+        XCTAssertNil(vm.pausedSession, "Legacy save files must decode safely with pausedSession as nil")
+        XCTAssertEqual(vm.activePreset, "Focus")
+        XCTAssertFalse(vm.isTimerRunning)
+    }
+
+    // 8. Restoring a paused session must not increase completedSessions or duplicate focus time.
+    @MainActor
+    func testRestoringPausedSessionDoesNotIncreaseCompletedSessionsOrDuplicateFocusTime() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let calendar = Calendar.current
+        let startOfToday = calendar.startOfDay(for: Date())
+        let recordStart = startOfToday.addingTimeInterval(3600 * 2) // 2:00 AM today
+        let recordEnd = startOfToday.addingTimeInterval(3600 * 3)   // 3:00 AM today
+        let pastRecord = FocusSessionRecord(
+            startTime: recordStart,
+            endTime: recordEnd,
+            durationSeconds: 3600,
+            mode: "Focus"
+        )
+        vm1.sessionRecords = [pastRecord]
+        vm1.completedSessions = 4
+        let now = startOfToday.addingTimeInterval(3600 * 4) // 4:00 AM today
+        vm1.recalculateFocusMetrics(calendar: calendar, now: now)
+        let initialTodayFocused = vm1.todayFocusedSeconds
+        let initialLifetimeFocused = vm1.lifetimeFocusedSeconds
+        XCTAssertEqual(initialTodayFocused, 3600)
+
+        // Pause a session
+        vm1.applyPresetDirectly(name: "Focus", minutes: 25)
+        vm1.timeRemaining = 1050
+        vm1.stopTimer()
+        vm1.persistData(force: true)
+
+        // Relaunch the app 2 hours later (6:00 AM today)
+        let later = startOfToday.addingTimeInterval(3600 * 6)
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+        vm2.recalculateFocusMetrics(calendar: calendar, now: later)
+
+        XCTAssertEqual(vm2.completedSessions, 4, "Restoring paused timer must never increment completedSessions")
+        XCTAssertEqual(vm2.todayFocusedSeconds, initialTodayFocused, "Downtime while app was closed must not count as focus time")
+        XCTAssertEqual(vm2.lifetimeFocusedSeconds, initialLifetimeFocused, "Lifetime focused seconds must remain identical")
+        XCTAssertEqual(vm2.timeRemaining, 1050)
+    }
+
+    // 9. Existing preserved-session mode-switching functionality remains intact.
+    @MainActor
+    func testExistingPreservedSessionModeSwitchingRemainsIntact() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // 1. Start a Focus timer and advance to 15m remaining
+        vm.applyPresetDirectly(name: "Focus", minutes: 25)
+        vm.timeRemaining = 900
+        vm.stopTimer()
+        XCTAssertNotNil(vm.pausedSession)
+
+        // 2. Request switch to Short Break -> opens conflict modal
+        vm.switchToBreak(minutes: 5)
+        XCTAssertTrue(vm.showConflictModal, "Conflict modal must trigger for active timer")
+
+        // 3. Continue current timer dismisses modal without altering state
+        vm.continueCurrentTimer()
+        XCTAssertFalse(vm.showConflictModal)
+        XCTAssertEqual(vm.activePreset, "Focus")
+        XCTAssertEqual(vm.timeRemaining, 900)
+
+        // 4. Test preservedSession mode-switching (swap into preservedSession)
+        let preserved = PreservedTimerSession(
+            activePreset: "Focus",
+            activeMode: "Pomodoro",
+            isBreakSession: false,
+            totalTime: 1500,
+            timeRemaining: 900,
+            preciseProgress: 900.0 / 1500.0,
+            customMinutes: 25,
+            customSeconds: 0,
+            currentSession: 1,
+            activeTaskIndex: 0
+        )
+        vm.preservedSession = preserved
+        XCTAssertTrue(vm.hasPreservedSession)
+
+        // Switch to Break cleanly
+        vm.applyPresetDirectly(name: "Short Break", minutes: 5, isBreak: true)
+        XCTAssertEqual(vm.activePreset, "Short Break")
+        XCTAssertTrue(vm.hasPreservedSession)
+        // When current break timer is idle, displayedTimerPreset surfaces the background preserved session
+        XCTAssertEqual(vm.displayedTimerPreset, "Focus")
+
+        // When current break timer is running, displayedTimerPreset surfaces the active break
+        vm.startTimer()
+        XCTAssertEqual(vm.displayedTimerPreset, "Short Break")
+        vm.stopTimer()
+
+        // Restore preserved Focus session
+        vm.restorePreservedSession()
+        XCTAssertEqual(vm.activePreset, "Focus")
+        XCTAssertEqual(vm.timeRemaining, 900)
+    }
 }

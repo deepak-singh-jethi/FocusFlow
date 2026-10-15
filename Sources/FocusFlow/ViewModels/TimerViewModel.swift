@@ -17,7 +17,13 @@ public class TimerViewModel: ObservableObject {
         }
     }
     @Published public var totalTime: Int = 25 * 60
-    @Published public var currentSession: Int = 1
+    @Published public var currentSession: Int = 1 {
+        didSet {
+            if pausedSession != nil {
+                pausedSession?.currentSession = currentSession
+            }
+        }
+    }
     @Published public var totalSessions: Int = 4 {
         didSet { persistData() }
     }
@@ -90,6 +96,9 @@ public class TimerViewModel: ObservableObject {
     @Published public var autoStartNextSession: Bool = false {
         didSet { persistData() }
     }
+
+    // MARK: - Paused Timer Session State (Step 1 App Restart Recovery)
+    @Published public var pausedSession: PausedTimerSession?
 
     // MARK: - Preserved Background Session & Mode Conflict States
     @Published public var preservedSession: PreservedTimerSession?
@@ -167,7 +176,12 @@ public class TimerViewModel: ObservableObject {
 
     private func handleAppTermination() {
         if isTimerRunning {
-            stopTimer()
+            // Step 1: Timers running at quit are not recovered as paused sessions.
+            // Record active segment so worked focus time is not lost, but clear paused session snapshot.
+            recordActiveSessionSegment()
+            isTimerRunning = false
+            targetEndDate = nil
+            pausedSession = nil
         }
         if isStopwatchRunning {
             stopStopwatch()
@@ -201,6 +215,32 @@ public class TimerViewModel: ObservableObject {
         self.activePreset = saved.activePreset
         self.laps = saved.laps
         self.preservedSession = saved.preservedSession
+        self.pausedSession = saved.pausedSession
+
+        if let paused = saved.pausedSession {
+            self.activePreset = paused.activePreset
+            self.activeMode = paused.activeMode
+            self.isBreakSession = paused.isBreakSession
+            self.totalTime = paused.totalTime
+            self.timeRemaining = paused.timeRemaining
+            self.currentSession = paused.currentSession
+            if self.tasks.indices.contains(paused.activeTaskIndex) {
+                self.activeTaskIndex = paused.activeTaskIndex
+            }
+            if paused.activeMode == "Custom Timer" || paused.activePreset == "Custom" {
+                self.customMinutes = paused.customMinutes
+                self.customSeconds = paused.customSeconds
+                self.customDurationSeconds = paused.totalTime
+            }
+            if paused.totalTime > 0 {
+                self.preciseProgress = min(max(Double(paused.timeRemaining) / Double(paused.totalTime), 0.0), 1.0)
+            } else {
+                self.preciseProgress = paused.preciseProgress
+            }
+            self.isTimerRunning = false
+            self.targetEndDate = nil
+            self.fractionalRemaining = nil
+        }
     }
 
     public func persistData(force: Bool = false) {
@@ -229,7 +269,8 @@ public class TimerViewModel: ObservableObject {
             sessionRecords: sessionRecords,
             legacyLifetimeFocusedSeconds: legacyLifetimeFocusedSeconds,
             laps: laps,
-            preservedSession: preservedSession
+            preservedSession: preservedSession,
+            pausedSession: pausedSession
         )
         storage.save(payload)
     }
@@ -321,6 +362,7 @@ public class TimerViewModel: ObservableObject {
     public func applyPresetDirectly(name: String, minutes: Int, seconds: Int = 0, mode: String = "Pomodoro", isBreak: Bool = false) {
         if isTimerRunning { stopTimer() }
         fractionalRemaining = nil
+        pausedSession = nil
         activePreset = name
         activeMode = mode
         isBreakSession = isBreak
@@ -362,6 +404,7 @@ public class TimerViewModel: ObservableObject {
         stopTimer()
         fractionalRemaining = nil
         preservedSession = nil
+        pausedSession = nil
 
         // 3. Apply new requested preset/mode
         applyPresetDirectly(name: pending.name, minutes: pending.minutes, seconds: pending.seconds, mode: pending.mode, isBreak: pending.isBreak)
@@ -411,6 +454,18 @@ public class TimerViewModel: ObservableObject {
         activeTaskIndex = preserved.activeTaskIndex
 
         preservedSession = swapSession
+        pausedSession = (timeRemaining < totalTime && timeRemaining > 0) ? PausedTimerSession(
+            activePreset: activePreset,
+            activeMode: activeMode,
+            isBreakSession: isBreakSession,
+            totalTime: totalTime,
+            timeRemaining: timeRemaining,
+            preciseProgress: preciseProgress,
+            customMinutes: customMinutes,
+            customSeconds: customSeconds,
+            currentSession: currentSession,
+            activeTaskIndex: activeTaskIndex
+        ) : nil
         persistData()
     }
 
@@ -497,7 +552,9 @@ public class TimerViewModel: ObservableObject {
         preciseProgress = totalTime > 0 ? min(max(remainingInterval / Double(totalTime), 0.0), 1.0) : 1.0
         fractionalRemaining = nil
         sessionSegmentStartDate = Date()
+        pausedSession = nil
         updateMasterEngine()
+        persistData()
     }
 
     public func stopTimer() {
@@ -520,6 +577,22 @@ public class TimerViewModel: ObservableObject {
         isTimerRunning = false
         targetEndDate = nil
         updateMasterEngine()
+        if timeRemaining < totalTime && timeRemaining > 0 {
+            pausedSession = PausedTimerSession(
+                activePreset: activePreset,
+                activeMode: activeMode,
+                isBreakSession: isBreakSession,
+                totalTime: totalTime,
+                timeRemaining: timeRemaining,
+                preciseProgress: preciseProgress,
+                customMinutes: customMinutes,
+                customSeconds: customSeconds,
+                currentSession: currentSession,
+                activeTaskIndex: activeTaskIndex
+            )
+        } else {
+            pausedSession = nil
+        }
         persistData()
     }
 
@@ -542,6 +615,7 @@ public class TimerViewModel: ObservableObject {
         fractionalRemaining = nil
         timeRemaining = totalTime
         preciseProgress = 1.0
+        pausedSession = nil
         persistData()
     }
 
@@ -689,6 +763,10 @@ public class TimerViewModel: ObservableObject {
     public func selectTask(at index: Int) {
         guard tasks.indices.contains(index), !tasks[index].isCompleted else { return }
         activeTaskIndex = index
+        if pausedSession != nil {
+            pausedSession?.activeTaskIndex = index
+            persistData()
+        }
     }
 
     public func toggleTaskCompletion(at index: Int) {
@@ -696,6 +774,9 @@ public class TimerViewModel: ObservableObject {
         tasks[index].isCompleted.toggle()
         if activeTaskIndex == index && tasks[index].isCompleted {
             advanceToNextAvailableTask(after: index)
+        }
+        if pausedSession != nil {
+            pausedSession?.activeTaskIndex = activeTaskIndex
         }
         persistData()
     }
@@ -709,6 +790,9 @@ public class TimerViewModel: ObservableObject {
             activeTaskIndex -= 1
         } else if activeTaskIndex >= tasks.count {
             activeTaskIndex = tasks.count - 1
+        }
+        if pausedSession != nil {
+            pausedSession?.activeTaskIndex = activeTaskIndex
         }
         persistData()
     }
@@ -810,6 +894,7 @@ public class TimerViewModel: ObservableObject {
         recordActiveSessionSegment()
         stopTimer()
         fractionalRemaining = nil
+        pausedSession = nil
         if isBreakPreset {
             if activePreset == "Long Break" {
                 currentSession = 1
@@ -845,6 +930,7 @@ public class TimerViewModel: ObservableObject {
     internal func handleSessionComplete() {
         stopTimer()
         fractionalRemaining = nil
+        pausedSession = nil
 
         // Native macOS User Notification
         NotificationService.shared.sendSessionCompleteNotification(presetName: activePreset, isBreak: isBreakPreset)
@@ -949,6 +1035,7 @@ public class TimerViewModel: ObservableObject {
         totalTime = newTotal
         timeRemaining = newTotal
         preciseProgress = 1.0
+        pausedSession = nil
         persistData()
     }
 }

@@ -134,6 +134,50 @@ public struct PreservedTimerSession: Codable, Equatable {
     }
 }
 
+// MARK: - Paused Timer Session Snapshot (App Relaunch Recovery)
+public struct PausedTimerSession: Codable, Equatable {
+    public var activePreset: String
+    public var activeMode: String
+    public var isBreakSession: Bool
+    public var totalTime: Int
+    public var timeRemaining: Int
+    public var preciseProgress: Double
+    public var customMinutes: Int
+    public var customSeconds: Int
+    public var currentSession: Int
+    public var activeTaskIndex: Int
+
+    public init(
+        activePreset: String,
+        activeMode: String = "Pomodoro",
+        isBreakSession: Bool = false,
+        totalTime: Int,
+        timeRemaining: Int,
+        preciseProgress: Double,
+        customMinutes: Int = 25,
+        customSeconds: Int = 0,
+        currentSession: Int = 1,
+        activeTaskIndex: Int = 0
+    ) {
+        self.activePreset = activePreset
+        self.activeMode = activeMode
+        self.isBreakSession = isBreakSession
+        self.totalTime = totalTime
+        self.timeRemaining = timeRemaining
+        self.preciseProgress = preciseProgress
+        self.customMinutes = customMinutes
+        self.customSeconds = customSeconds
+        self.currentSession = currentSession
+        self.activeTaskIndex = activeTaskIndex
+    }
+
+    public var timeString: String {
+        let m = timeRemaining / 60
+        let s = timeRemaining % 60
+        return String(format: "%02d:%02d", m, s)
+    }
+}
+
 // MARK: - Persistent App State Payload
 public struct FocusAppData: Codable {
     public var tasks: [FocusTask]
@@ -149,6 +193,7 @@ public struct FocusAppData: Codable {
     public var legacyLifetimeFocusedSeconds: Int?
     public var laps: [StopwatchLap]
     public var preservedSession: PreservedTimerSession?
+    public var pausedSession: PausedTimerSession?
 
     enum CodingKeys: String, CodingKey {
         case tasks
@@ -164,6 +209,7 @@ public struct FocusAppData: Codable {
         case legacyLifetimeFocusedSeconds
         case laps
         case preservedSession
+        case pausedSession
     }
 
     public init(
@@ -179,7 +225,8 @@ public struct FocusAppData: Codable {
         sessionRecords: [FocusSessionRecord] = [],
         legacyLifetimeFocusedSeconds: Int? = nil,
         laps: [StopwatchLap] = [],
-        preservedSession: PreservedTimerSession? = nil
+        preservedSession: PreservedTimerSession? = nil,
+        pausedSession: PausedTimerSession? = nil
     ) {
         self.tasks = tasks
         self.focusedSeconds = focusedSeconds
@@ -194,6 +241,7 @@ public struct FocusAppData: Codable {
         self.legacyLifetimeFocusedSeconds = legacyLifetimeFocusedSeconds
         self.laps = laps
         self.preservedSession = preservedSession
+        self.pausedSession = pausedSession
     }
 
     public init(from decoder: Decoder) throws {
@@ -211,6 +259,7 @@ public struct FocusAppData: Codable {
         self.legacyLifetimeFocusedSeconds = try container.decodeIfPresent(Int.self, forKey: .legacyLifetimeFocusedSeconds)
         self.laps = try container.decodeIfPresent([StopwatchLap].self, forKey: .laps) ?? []
         self.preservedSession = try container.decodeIfPresent(PreservedTimerSession.self, forKey: .preservedSession)
+        self.pausedSession = try container.decodeIfPresent(PausedTimerSession.self, forKey: .pausedSession)
 
         // Backward compatibility migration:
         // If sessionRecords is empty and legacyLifetimeFocusedSeconds was nil,
