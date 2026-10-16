@@ -129,6 +129,13 @@ public class TimerViewModel: ObservableObject {
     // MARK: - Paused Timer Session State (Step 1 App Restart Recovery)
     @Published public var pausedSession: PausedTimerSession?
 
+    // MARK: - Companion Navigation Mode
+    public enum CompanionMode: String, CaseIterable {
+        case timer = "Focus Timer"
+        case stopwatch = "Stopwatch"
+    }
+    @Published public var selectedCompanionMode: CompanionMode = .timer
+
     // MARK: - Preserved Background Session & Mode Conflict States
     public enum ConflictPresentationOrigin: String, Equatable {
         case mainWindow
@@ -569,7 +576,7 @@ public class TimerViewModel: ObservableObject {
         origin: ConflictPresentationOrigin = .mainWindow
     ) {
         guard !isPersistenceBlocked else { return }
-        let isSame = (activePreset == name && activeMode == mode && (mode != "Custom Timer" || totalTime == (minutes * 60 + seconds)))
+        let isSame = (activePreset == name && activeMode == mode && totalTime == (minutes * 60 + seconds))
         if isSame { return }
 
         // If a timer is currently active (running or paused with time elapsed):
@@ -1122,9 +1129,9 @@ public class TimerViewModel: ObservableObject {
 
     public func switchToBreak(minutes: Int = 5, origin: ConflictPresentationOrigin = .mainWindow) {
         guard !isPersistenceBlocked else { return }
-        let breakName = (minutes == 15) ? "Long Break" : "Short Break"
-        // If we are already in this exact Break preset, do nothing
-        if isBreakPreset && activeMode == "Pomodoro" && activePreset == breakName { return }
+        let breakName = (minutes >= 15) ? "Long Break" : "Short Break"
+        // If we are already in this exact Break preset with the exact same duration, do nothing
+        if isBreakPreset && activeMode == "Pomodoro" && activePreset == breakName && totalTime == minutes * 60 { return }
 
         // If a timer is currently active (running or paused with time elapsed):
         // Remind user that switching will end their active focus session and request confirmation!

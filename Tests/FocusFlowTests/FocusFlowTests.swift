@@ -3364,4 +3364,349 @@ final class FocusFlowTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Timer Display Consistency & Menu-Bar UI Interaction Tests (15 Scenarios)
+
+    // 1. Running Focus Timer shows actual remaining time
+    @MainActor
+    func testTimerDisplay1_RunningFocusTimerShowsActualRemainingTime() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+        vm.timeRemaining = 1435 // 23:55
+        vm.selectedCompanionMode = .timer
+
+        XCTAssertTrue(vm.isTimerRunning)
+        XCTAssertEqual(vm.timerTimeString, "23:55")
+        XCTAssertEqual(vm.timeRemaining, 1435)
+        XCTAssertEqual(vm.totalTime, 1500)
+    }
+
+    // 2. Paused Focus Timer shows the same remaining time as its ViewModel
+    @MainActor
+    func testTimerDisplay2_PausedFocusTimerShowsSameRemainingTimeAsViewModel() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+        vm.timeRemaining = 1200 // 20:00
+        vm.stopTimer()
+
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertTrue(vm.isTimerActive) // Paused with elapsed progress is active!
+        XCTAssertEqual(vm.timeRemaining, 1200)
+        XCTAssertEqual(vm.timerTimeString, "20:00")
+        XCTAssertEqual(vm.totalTime, 1500)
+    }
+
+    // 3. Paused Short Break at 04:54 displays 04:54, not 05:00
+    @MainActor
+    func testTimerDisplay3_PausedShortBreakAt0454Displays0454Not0500() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.switchToBreak(minutes: 5, origin: .mainWindow)
+        XCTAssertEqual(vm.totalTime, 300)
+        XCTAssertEqual(vm.timerTimeString, "05:00")
+
+        vm.startTimer()
+        vm.timeRemaining = 294 // 04:54
+        vm.stopTimer() // Paused
+
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertTrue(vm.isTimerActive)
+        XCTAssertEqual(vm.timeRemaining, 294)
+        XCTAssertEqual(vm.timerTimeString, "04:54")
+        XCTAssertNotEqual(vm.timerTimeString, "05:00")
+    }
+
+    // 4. Paused Long Break restores the correct remaining time
+    @MainActor
+    func testTimerDisplay4_PausedLongBreakRestoresCorrectRemainingTime() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.switchToBreak(minutes: 15, origin: .mainWindow)
+        XCTAssertEqual(vm.totalTime, 900)
+
+        vm.startTimer()
+        vm.timeRemaining = 850 // 14:10
+        vm.stopTimer()
+
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertTrue(vm.isTimerActive)
+        XCTAssertEqual(vm.timeRemaining, 850)
+        XCTAssertEqual(vm.timerTimeString, "14:10")
+    }
+
+    // 5. Resume continues from the exact paused duration
+    @MainActor
+    func testTimerDisplay5_ResumeContinuesFromExactPausedDuration() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+        vm.timeRemaining = 1000
+        vm.stopTimer()
+
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertEqual(vm.timeRemaining, 1000)
+
+        // Resume via toggleTimer()
+        vm.toggleTimer()
+
+        XCTAssertTrue(vm.isTimerRunning)
+        XCTAssertEqual(vm.timeRemaining, 1000)
+        XCTAssertEqual(vm.timerTimeString, "16:40")
+    }
+
+    // 6. Reset returns to the configured duration
+    @MainActor
+    func testTimerDisplay6_ResetReturnsToConfiguredDuration() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+        vm.timeRemaining = 800
+        vm.stopTimer()
+
+        XCTAssertTrue(vm.isTimerActive)
+
+        vm.resetFocusTimer()
+
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertFalse(vm.isTimerActive)
+        XCTAssertEqual(vm.timeRemaining, 1500)
+        XCTAssertEqual(vm.totalTime, 1500)
+        XCTAssertEqual(vm.timerTimeString, "25:00")
+    }
+
+    // 7. Opening/reopening the popover does not reset paused time
+    @MainActor
+    func testTimerDisplay7_OpeningReopeningPopoverDoesNotResetPausedTime() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+        vm.timeRemaining = 1234
+        vm.stopTimer()
+        vm.selectedCompanionMode = .timer
+
+        XCTAssertEqual(vm.timeRemaining, 1234)
+
+        // Simulate multiple popover appearances
+        if vm.isStopwatchRunning && !vm.isTimerRunning && !vm.isTimerActive {
+            vm.selectedCompanionMode = .stopwatch
+        } else if vm.isTimerRunning && !vm.isStopwatchRunning {
+            vm.selectedCompanionMode = .timer
+        }
+
+        XCTAssertEqual(vm.timeRemaining, 1234)
+        XCTAssertEqual(vm.selectedCompanionMode, .timer)
+    }
+
+    // 8. Programmatic display synchronization does not change countdown or mutate data
+    @MainActor
+    func testTimerDisplay8_ProgrammaticDisplaySyncDoesNotMutateCountdown() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.switchToBreak(minutes: 5, origin: .mainWindow)
+        vm.startTimer()
+        vm.timeRemaining = 294 // 04:54
+        vm.stopTimer()
+
+        let initialRemaining = vm.timeRemaining
+        let initialTotal = vm.totalTime
+
+        // Reading timer display properties must never alter timeRemaining
+        _ = vm.timerTimeString
+        _ = vm.displayedTimerTimeString
+        _ = vm.fillAmount
+
+        XCTAssertEqual(vm.timeRemaining, initialRemaining)
+        XCTAssertEqual(vm.totalTime, initialTotal)
+    }
+
+    // 9. A prior nonzero paused Stopwatch does not hijack the Focus Timer status-bar clock
+    @MainActor
+    func testTimerDisplay9_PriorNonzeroPausedStopwatchDoesNotHijackFocusTimerClock() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Run stopwatch to 125 seconds, then pause
+        vm.startStopwatch()
+        vm.stopwatchStartDate = Date().addingTimeInterval(-125.0)
+        vm.stopStopwatch()
+
+        XCTAssertFalse(vm.isStopwatchRunning)
+        XCTAssertEqual(vm.stopwatchTime, 125)
+        XCTAssertEqual(vm.stopwatchTimeString, "02:05")
+
+        // User switches to Focus Timer and pauses Focus Timer at 22:30 (1350s)
+        vm.selectedCompanionMode = .timer
+        vm.startTimer()
+        vm.targetEndDate = Date().addingTimeInterval(1350.0)
+        vm.stopTimer()
+
+        XCTAssertEqual(vm.selectedCompanionMode, .timer)
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertTrue(vm.isTimerActive)
+        XCTAssertEqual(vm.timerTimeString, "22:30")
+
+        // Top menu-bar clock must show Focus Timer (22:30), NOT the old paused Stopwatch (02:05)
+        let displayTime = (vm.selectedCompanionMode == .stopwatch) ? vm.stopwatchTimeString : vm.timerTimeString
+        XCTAssertEqual(displayTime, "22:30")
+        XCTAssertNotEqual(displayTime, "02:05")
+    }
+
+    // 10. Selecting Stopwatch updates the intended clock and icon correctly
+    @MainActor
+    func testTimerDisplay10_SelectingStopwatchUpdatesIntendedClockAndIcon() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.stopwatchTime = 45
+        vm.selectedCompanionMode = .stopwatch
+
+        let displayTime = (vm.selectedCompanionMode == .stopwatch) ? vm.stopwatchTimeString : vm.timerTimeString
+        XCTAssertEqual(displayTime, "00:45")
+
+        vm.startStopwatch()
+        XCTAssertTrue(vm.isStopwatchRunning)
+        let runningIcon = vm.isStopwatchRunning ? "stopwatch.fill" : "stopwatch"
+        XCTAssertEqual(runningIcon, "stopwatch.fill")
+
+        vm.stopStopwatch()
+        let pausedIcon = vm.isStopwatchRunning ? "stopwatch.fill" : "stopwatch"
+        XCTAssertEqual(pausedIcon, "stopwatch")
+    }
+
+    // 11. Selecting Focus Timer restores Focus countdown display
+    @MainActor
+    func testTimerDisplay11_SelectingFocusTimerRestoresFocusCountdownDisplay() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.stopwatchTime = 45
+        vm.timeRemaining = 850 // 14:10
+        vm.activePreset = "Focus"
+
+        vm.selectedCompanionMode = .timer
+        let displayTime = (vm.selectedCompanionMode == .stopwatch) ? vm.stopwatchTimeString : vm.timerTimeString
+        XCTAssertEqual(displayTime, "14:10")
+    }
+
+    // 12. Same Break preset with a different duration is correctly processed
+    @MainActor
+    func testTimerDisplay12_SameBreakPresetWithDifferentDurationCorrectlyProcessed() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Start in 5m Short Break (idle)
+        vm.switchToBreak(minutes: 5, origin: .mainWindow)
+        XCTAssertEqual(vm.totalTime, 300)
+        XCTAssertEqual(vm.activePreset, "Short Break")
+
+        // User requests 10-minute break (also classified under Short Break)
+        vm.switchToBreak(minutes: 10, origin: .menuBar)
+
+        // Must NOT be ignored! Configured duration updates to 600s
+        XCTAssertEqual(vm.totalTime, 600)
+        XCTAssertEqual(vm.timeRemaining, 600)
+        XCTAssertEqual(vm.timerTimeString, "10:00")
+    }
+
+    // 13. A cancelled duration change preserves original progress
+    @MainActor
+    func testTimerDisplay13_CancelledDurationChangePreservesOriginalProgress() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.switchToBreak(minutes: 5, origin: .mainWindow)
+        vm.startTimer()
+        vm.timeRemaining = 250 // paused with progress
+        vm.stopTimer()
+
+        // Request 10m break while paused
+        vm.switchToBreak(minutes: 10, origin: .menuBar)
+
+        XCTAssertTrue(vm.showConflictModal)
+        XCTAssertEqual(vm.conflictOrigin, .menuBar)
+        XCTAssertEqual(vm.pendingTimerRequest?.minutes, 10)
+
+        // Cancel
+        vm.continueCurrentTimer()
+
+        XCTAssertFalse(vm.showConflictModal)
+        XCTAssertNil(vm.pendingTimerRequest)
+        XCTAssertEqual(vm.totalTime, 300)
+        XCTAssertEqual(vm.timeRemaining, 250)
+        XCTAssertEqual(vm.timerTimeString, "04:10")
+    }
+
+    // 14. Mode changes do not accidentally modify timer or stopwatch state
+    @MainActor
+    func testTimerDisplay14_ModeChangesDoNotAccidentallyModifyTimerOrStopwatchState() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+        vm.targetEndDate = Date().addingTimeInterval(500.0)
+        vm.stopTimer()
+
+        vm.startStopwatch()
+        vm.stopwatchStartDate = Date().addingTimeInterval(-60.0)
+        vm.recordLap()
+        vm.stopStopwatch()
+
+        XCTAssertEqual(vm.timeRemaining, 500)
+        XCTAssertEqual(vm.stopwatchTime, 60)
+        XCTAssertEqual(vm.laps.count, 1)
+
+        // Switch to stopwatch mode
+        vm.selectedCompanionMode = .stopwatch
+        XCTAssertEqual(vm.timeRemaining, 500)
+        XCTAssertEqual(vm.stopwatchTime, 60)
+        XCTAssertEqual(vm.laps.count, 1)
+
+        // Switch back to timer mode
+        vm.selectedCompanionMode = .timer
+        XCTAssertEqual(vm.timeRemaining, 500)
+        XCTAssertEqual(vm.stopwatchTime, 60)
+        XCTAssertEqual(vm.laps.count, 1)
+    }
+
+    // 15. Visual Snapshot of Paused Short Break (04:54) in Menu-Bar Popover
+    @MainActor
+    func testTimerDisplay15_VisualSnapshotPausedShortBreak() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.switchToBreak(minutes: 5, origin: .mainWindow)
+        vm.startTimer()
+        vm.timeRemaining = 294 // 04:54
+        vm.stopTimer()
+
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertTrue(vm.isTimerActive)
+        XCTAssertEqual(vm.timerTimeString, "04:54")
+
+        let audio = AmbientAudioPlayer()
+        let view = MenuBarCompanionView(viewModel: vm, audioPlayer: audio)
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 316, height: 420)
+        hostingView.layoutSubtreeIfNeeded()
+
+        if let bitmapRep = hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds) {
+            hostingView.cacheDisplay(in: hostingView.bounds, to: bitmapRep)
+            if let pngData = bitmapRep.representation(using: .png, properties: [:]) {
+                let outURL = URL(fileURLWithPath: "/tmp/focusflow_menubar_paused.png")
+                try pngData.write(to: outURL)
+                XCTAssertTrue(FileManager.default.fileExists(atPath: outURL.path))
+                XCTAssertGreaterThan(pngData.count, 1000)
+            }
+        }
+    }
 }

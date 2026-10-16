@@ -10,21 +10,25 @@ public struct MenuBarLabelView: View {
     }
 
     private var statusIcon: String {
-        if viewModel.isStopwatchRunning {
-            return "stopwatch.fill"
-        } else if viewModel.isTimerRunning {
-            return viewModel.isBreakPreset ? "cup.and.saucer.fill" : "flame.fill"
-        } else if viewModel.stopwatchTime > 0 && !viewModel.isTimerRunning {
-            return "stopwatch"
-        } else {
-            return "timer"
+        switch viewModel.selectedCompanionMode {
+        case .stopwatch:
+            return viewModel.isStopwatchRunning ? "stopwatch.fill" : "stopwatch"
+        case .timer:
+            if viewModel.isTimerRunning {
+                return viewModel.isBreakPreset ? "cup.and.saucer.fill" : "flame.fill"
+            } else if viewModel.isTimerActive {
+                return viewModel.isBreakPreset ? "cup.and.saucer" : "flame"
+            } else {
+                return "timer"
+            }
         }
     }
 
     private var displayTime: String {
-        if viewModel.isStopwatchRunning || (viewModel.stopwatchTime > 0 && !viewModel.isTimerRunning) {
+        switch viewModel.selectedCompanionMode {
+        case .stopwatch:
             return viewModel.stopwatchTimeString
-        } else {
+        case .timer:
             return viewModel.timerTimeString
         }
     }
@@ -38,18 +42,14 @@ public struct MenuBarLabelView: View {
     }
 }
 
-// MARK: - Companion Navigation Mode
-public enum CompanionMode: String, CaseIterable {
-    case timer = "Focus Timer"
-    case stopwatch = "Stopwatch"
-}
-
 // MARK: - Redesigned Menu Bar Companion Popover
 public struct MenuBarCompanionView: View {
     @ObservedObject public var viewModel: TimerViewModel
     @ObservedObject public var audioPlayer: AmbientAudioPlayer
 
-    @State private var selectedMode: CompanionMode = .timer
+    private var selectedMode: TimerViewModel.CompanionMode {
+        viewModel.selectedCompanionMode
+    }
     @State private var inputMinutes: String = "25"
     @State private var inputSeconds: String = "00"
     @State private var isEditingDirectTime: Bool = false
@@ -91,19 +91,22 @@ public struct MenuBarCompanionView: View {
             Group {
                 modeSegmentedControl
 
-                if selectedMode == .timer {
-                    if viewModel.showConflictModal && viewModel.conflictOrigin == .menuBar, let pending = viewModel.pendingTimerRequest {
-                        compactConflictConfirmationCard(pending: pending)
+                VStack(spacing: 12) {
+                    if selectedMode == .timer {
+                        if viewModel.showConflictModal && viewModel.conflictOrigin == .menuBar, let pending = viewModel.pendingTimerRequest {
+                            compactConflictConfirmationCard(pending: pending)
+                        } else {
+                            interactiveTimerCard
+                            timerActionButtonsRow
+                            quickPresetRow
+                        }
                     } else {
-                        interactiveTimerCard
-                        timerActionButtonsRow
-                        quickPresetRow
+                        stopwatchDisplayCard
+                        stopwatchActionButtonsRow
+                        stopwatchLapsSection
                     }
-                } else {
-                    stopwatchDisplayCard
-                    stopwatchActionButtonsRow
-                    stopwatchLapsSection
                 }
+                .frame(minHeight: 172, alignment: .top)
             }
             .disabled(viewModel.isPersistenceBlocked)
 
@@ -116,10 +119,10 @@ public struct MenuBarCompanionView: View {
         .background(Color(red: 0.08, green: 0.09, blue: 0.13))
         .onAppear {
             syncInputFields()
-            if viewModel.isStopwatchRunning {
-                selectedMode = .stopwatch
-            } else if viewModel.isTimerRunning {
-                selectedMode = .timer
+            if viewModel.isStopwatchRunning && !viewModel.isTimerRunning && !viewModel.isTimerActive {
+                viewModel.selectedCompanionMode = .stopwatch
+            } else if viewModel.isTimerRunning && !viewModel.isStopwatchRunning {
+                viewModel.selectedCompanionMode = .timer
             }
         }
         .onChange(of: viewModel.totalTime) { _, _ in
@@ -127,7 +130,6 @@ public struct MenuBarCompanionView: View {
                 syncInputFields()
             }
         }
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: selectedMode)
         .animation(.spring(response: 0.28, dampingFraction: 0.86), value: viewModel.activePreset)
         .animation(.spring(response: 0.28, dampingFraction: 0.86), value: viewModel.isTimerRunning)
         .animation(.spring(response: 0.28, dampingFraction: 0.86), value: viewModel.isStopwatchRunning)
@@ -184,9 +186,11 @@ public struct MenuBarCompanionView: View {
 
     private var statusPillText: String {
         if selectedMode == .stopwatch {
-            return viewModel.isStopwatchRunning ? "RUNNING" : "STOPWATCH"
+            return viewModel.isStopwatchRunning ? "RUNNING" : (viewModel.stopwatchTime > 0 ? "PAUSED" : "STOPWATCH")
         } else if viewModel.isTimerRunning {
             return isBreak ? "BREAK" : "RUNNING"
+        } else if viewModel.isTimerActive {
+            return "PAUSED"
         } else {
             return viewModel.activePreset.uppercased()
         }
@@ -194,9 +198,13 @@ public struct MenuBarCompanionView: View {
 
     private var statusPillColor: Color {
         if selectedMode == .stopwatch {
-            return .cyan
+            return viewModel.isStopwatchRunning ? .cyan : (viewModel.stopwatchTime > 0 ? .yellow : .cyan)
         } else if isBreak {
             return .teal
+        } else if viewModel.isTimerRunning {
+            return .orange
+        } else if viewModel.isTimerActive {
+            return .yellow
         } else {
             return .orange
         }
@@ -205,24 +213,26 @@ public struct MenuBarCompanionView: View {
     // MARK: - 2. Mode Segmented Switcher (Timer vs Stopwatch)
     private var modeSegmentedControl: some View {
         HStack(spacing: 0) {
-            ForEach(CompanionMode.allCases, id: \.self) { mode in
+            ForEach(TimerViewModel.CompanionMode.allCases, id: \.self) { mode in
+                let isSelected = selectedMode == mode
                 Button {
-                    withAnimation(.spring(response: 0.26, dampingFraction: 0.85)) {
-                        selectedMode = mode
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        viewModel.selectedCompanionMode = mode
                     }
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: mode == .timer ? "timer" : "stopwatch")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(size: 11, weight: .semibold))
                         Text(mode.rawValue)
-                            .font(.system(size: 11, weight: selectedMode == mode ? .bold : .medium))
+                            .font(.system(size: 11, weight: isSelected ? .bold : .medium))
                     }
-                    .foregroundColor(selectedMode == mode ? .white : .gray)
-                    .frame(maxWidth: .infinity, minHeight: 26)
+                    .foregroundColor(isSelected ? .white : .gray)
+                    .frame(maxWidth: .infinity, minHeight: 34)
                     .background(
-                        selectedMode == mode ? Color.white.opacity(0.12) : Color.clear,
+                        isSelected ? Color.white.opacity(0.12) : Color.white.opacity(0.001),
                         in: RoundedRectangle(cornerRadius: 6)
                     )
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
@@ -272,23 +282,45 @@ public struct MenuBarCompanionView: View {
                         Text(isBreak ? "Break Session" : "Session \(viewModel.currentSession) of \(viewModel.totalSessions)")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(.gray)
+                    }
+                    .padding(.top, 2)
+                }
+            } else if viewModel.isTimerActive {
+                // Paused view (exact remaining countdown)
+                VStack(spacing: 5) {
+                    Text(viewModel.timerTimeString)
+                        .font(.system(size: 38, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundColor(.white)
+                        .shadow(color: isBreak ? Color.teal.opacity(0.20) : Color.orange.opacity(0.20), radius: 6, y: 2)
 
-                        Text("•")
-                            .foregroundColor(.gray.opacity(0.5))
+                    // Paused progress bar (retains exact fill amount)
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(Color.white.opacity(0.08))
+                                .frame(height: 4)
 
-                        Button {
-                            viewModel.stopTimer()
-                            syncInputFields()
-                        } label: {
-                            HStack(spacing: 2) {
-                                Image(systemName: "pencil")
-                                    .font(.system(size: 9))
-                                Text("Edit")
-                                    .font(.system(size: 11, weight: .medium))
-                            }
-                            .foregroundColor(.orange)
+                            Capsule()
+                                .fill(
+                                    LinearGradient(
+                                        colors: isBreak
+                                            ? [Color.teal.opacity(0.85), Color.cyan.opacity(0.85)]
+                                            : [Color.orange.opacity(0.85), Color(red: 1.0, green: 0.40, blue: 0.35).opacity(0.85)],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                .frame(width: max(0, geo.size.width * CGFloat(viewModel.fillAmount)), height: 4)
                         }
-                        .buttonStyle(.plain)
+                    }
+                    .frame(height: 4)
+                    .padding(.horizontal, 16)
+
+                    HStack(spacing: 4) {
+                        Text(isBreak ? "Break Session • Paused" : "Session \(viewModel.currentSession) of \(viewModel.totalSessions) • Paused")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.gray)
                     }
                     .padding(.top, 2)
                 }
@@ -447,7 +479,7 @@ public struct MenuBarCompanionView: View {
                 HStack(spacing: 5) {
                     Image(systemName: viewModel.isTimerRunning ? "pause.fill" : "play.fill")
                         .font(.system(size: 12, weight: .bold))
-                    Text(viewModel.isTimerRunning ? "Pause" : "Start")
+                    Text(viewModel.isTimerRunning ? "Pause" : (viewModel.isTimerActive ? "Resume" : "Start"))
                         .font(.system(size: 13, weight: .bold))
                 }
                 .foregroundColor(Color(red: 0.10, green: 0.05, blue: 0.05))
@@ -829,32 +861,35 @@ public struct MenuBarCompanionView: View {
                 }
                 .padding(.horizontal, 2)
 
-                VStack(spacing: 3) {
-                    ForEach(Array(viewModel.laps.prefix(3).enumerated()), id: \.element.id) { index, lap in
-                        HStack {
-                            Image(systemName: "flag.fill")
-                                .font(.system(size: 8))
-                                .foregroundColor(index == 0 ? .cyan : .gray.opacity(0.5))
+                ScrollView(.vertical, showsIndicators: true) {
+                    VStack(spacing: 3) {
+                        ForEach(Array(viewModel.laps.enumerated()), id: \.element.id) { index, lap in
+                            HStack {
+                                Image(systemName: "flag.fill")
+                                    .font(.system(size: 8))
+                                    .foregroundColor(index == 0 ? .cyan : .gray.opacity(0.5))
 
-                            Text("Lap \(lap.lapNumber)")
-                                .font(.system(size: 11, weight: index == 0 ? .semibold : .medium))
-                                .foregroundColor(index == 0 ? .white : .gray)
+                                Text("Lap \(lap.lapNumber)")
+                                    .font(.system(size: 11, weight: index == 0 ? .semibold : .medium))
+                                    .foregroundColor(index == 0 ? .white : .gray)
 
-                            Spacer()
+                                Spacer()
 
-                            Text("+ \(lap.formattedLapDuration)")
-                                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                .foregroundColor(.gray.opacity(0.8))
+                                Text("+ \(lap.formattedLapDuration)")
+                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.gray.opacity(0.8))
 
-                            Text(lap.formattedTotalTime)
-                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                .foregroundColor(index == 0 ? .cyan : .white.opacity(0.8))
+                                Text(lap.formattedTotalTime)
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .foregroundColor(index == 0 ? .cyan : .white.opacity(0.8))
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.white.opacity(index == 0 ? 0.06 : 0.02), in: RoundedRectangle(cornerRadius: 6))
                         }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.white.opacity(index == 0 ? 0.06 : 0.02), in: RoundedRectangle(cornerRadius: 6))
                     }
                 }
+                .frame(maxHeight: 76)
             }
         }
         .padding(8)
