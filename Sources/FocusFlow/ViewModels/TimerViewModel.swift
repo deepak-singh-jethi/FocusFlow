@@ -130,8 +130,13 @@ public class TimerViewModel: ObservableObject {
     @Published public var pausedSession: PausedTimerSession?
 
     // MARK: - Preserved Background Session & Mode Conflict States
+    public enum ConflictPresentationOrigin: String, Equatable {
+        case mainWindow
+        case menuBar
+    }
     @Published public var preservedSession: PreservedTimerSession?
     @Published public var showConflictModal: Bool = false
+    @Published public var conflictOrigin: ConflictPresentationOrigin? = nil
     public var pendingTimerRequest: (name: String, minutes: Int, seconds: Int, mode: String, isBreak: Bool)? = nil
 
     public var hasPreservedSession: Bool {
@@ -315,6 +320,9 @@ public class TimerViewModel: ObservableObject {
         self.isTimerRunning = false
         self.targetEndDate = nil
         self.fractionalRemaining = nil
+        self.showConflictModal = false
+        self.pendingTimerRequest = nil
+        self.conflictOrigin = nil
     }
 
     private func applyLoadedData(_ saved: FocusAppData) {
@@ -542,17 +550,24 @@ public class TimerViewModel: ObservableObject {
     }
 
     // MARK: Mode Switching within Timer Sessions
-    public func changeMode(to newMode: String) {
+    public func changeMode(to newMode: String, origin: ConflictPresentationOrigin = .mainWindow) {
         guard !isPersistenceBlocked else { return }
         if newMode == "Pomodoro" {
-            switchToFocus(minutes: 25)
+            switchToFocus(minutes: 25, origin: origin)
         } else if newMode == "Custom Timer" {
-            requestModeOrPresetChange(name: "Custom", minutes: customMinutes, seconds: customSeconds, mode: "Custom Timer", isBreak: false)
+            requestModeOrPresetChange(name: "Custom", minutes: customMinutes, seconds: customSeconds, mode: "Custom Timer", isBreak: false, origin: origin)
         }
     }
 
     // MARK: - Conflict-Aware Mode / Preset Requests
-    public func requestModeOrPresetChange(name: String, minutes: Int, seconds: Int = 0, mode: String = "Pomodoro", isBreak: Bool = false) {
+    public func requestModeOrPresetChange(
+        name: String,
+        minutes: Int,
+        seconds: Int = 0,
+        mode: String = "Pomodoro",
+        isBreak: Bool = false,
+        origin: ConflictPresentationOrigin = .mainWindow
+    ) {
         guard !isPersistenceBlocked else { return }
         let isSame = (activePreset == name && activeMode == mode && (mode != "Custom Timer" || totalTime == (minutes * 60 + seconds)))
         if isSame { return }
@@ -560,9 +575,11 @@ public class TimerViewModel: ObservableObject {
         // If a timer is currently active (running or paused with time elapsed):
         if isTimerActive {
             pendingTimerRequest = (name: name, minutes: minutes, seconds: seconds, mode: mode, isBreak: isBreak)
+            conflictOrigin = origin
             showConflictModal = true
         } else {
             // Idle timer -> directly switch without interruption
+            conflictOrigin = nil
             applyPresetDirectly(name: name, minutes: minutes, seconds: seconds, mode: mode, isBreak: isBreak)
         }
     }
@@ -589,6 +606,7 @@ public class TimerViewModel: ObservableObject {
     public func continueCurrentTimer() {
         showConflictModal = false
         pendingTimerRequest = nil
+        conflictOrigin = nil
     }
 
     public func pauseAndSwitch() {
@@ -605,6 +623,7 @@ public class TimerViewModel: ObservableObject {
         guard !isPersistenceBlocked else { return }
         guard let pending = pendingTimerRequest else {
             showConflictModal = false
+            conflictOrigin = nil
             return
         }
 
@@ -622,6 +641,7 @@ public class TimerViewModel: ObservableObject {
 
         showConflictModal = false
         pendingTimerRequest = nil
+        conflictOrigin = nil
         persistData()
 
         // 4. Start target timer immediately so user directly transitions into active Break/Focus session
@@ -1074,33 +1094,33 @@ public class TimerViewModel: ObservableObject {
         persistData()
     }
 
-    public func requestPresetChange(name: String, minutes: Int) {
+    public func requestPresetChange(name: String, minutes: Int, origin: ConflictPresentationOrigin = .mainWindow) {
         guard !isPersistenceBlocked else { return }
         guard minutes > 0 else { return }
         if name == "Focus" {
-            switchToFocus(minutes: minutes)
+            switchToFocus(minutes: minutes, origin: origin)
             return
         }
         if name == "Short Break" || name == "Break" {
-            switchToBreak(minutes: minutes)
+            switchToBreak(minutes: minutes, origin: origin)
             return
         }
         if name == "Long Break" {
-            switchToBreak(minutes: minutes)
+            switchToBreak(minutes: minutes, origin: origin)
             return
         }
         let isBreak = (name == "Short Break" || name == "Long Break" || name == "Break")
-        requestModeOrPresetChange(name: name, minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: isBreak)
+        requestModeOrPresetChange(name: name, minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: isBreak, origin: origin)
     }
 
-    public func setCustomDuration(minutes: Int, seconds: Int) {
+    public func setCustomDuration(minutes: Int, seconds: Int, origin: ConflictPresentationOrigin = .mainWindow) {
         guard !isPersistenceBlocked else { return }
         let safeM = max(0, min(minutes, 360))
         let safeS = max(0, min(seconds, 59))
-        requestModeOrPresetChange(name: "Custom", minutes: safeM, seconds: safeS, mode: "Custom Timer", isBreak: false)
+        requestModeOrPresetChange(name: "Custom", minutes: safeM, seconds: safeS, mode: "Custom Timer", isBreak: false, origin: origin)
     }
 
-    public func switchToBreak(minutes: Int = 5) {
+    public func switchToBreak(minutes: Int = 5, origin: ConflictPresentationOrigin = .mainWindow) {
         guard !isPersistenceBlocked else { return }
         let breakName = (minutes == 15) ? "Long Break" : "Short Break"
         // If we are already in this exact Break preset, do nothing
@@ -1110,15 +1130,17 @@ public class TimerViewModel: ObservableObject {
         // Remind user that switching will end their active focus session and request confirmation!
         if isTimerActive {
             pendingTimerRequest = (name: breakName, minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: true)
+            conflictOrigin = origin
             showConflictModal = true
             return
         }
 
         // Timer is idle: switch immediately and cleanly
+        conflictOrigin = nil
         applyPresetDirectly(name: breakName, minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: true)
     }
 
-    public func switchToFocus(minutes: Int = 25) {
+    public func switchToFocus(minutes: Int = 25, origin: ConflictPresentationOrigin = .mainWindow) {
         guard !isPersistenceBlocked else { return }
         // If we are already in Focus with this duration, do nothing
         if isFocusPreset && activeMode == "Pomodoro" && (activePreset == "Focus" && totalTime == minutes * 60) { return }
@@ -1127,11 +1149,13 @@ public class TimerViewModel: ObservableObject {
         // Remind user that switching will end their active session and request confirmation!
         if isTimerActive {
             pendingTimerRequest = (name: "Focus", minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: false)
+            conflictOrigin = origin
             showConflictModal = true
             return
         }
 
         // Timer is idle: switch immediately and cleanly
+        conflictOrigin = nil
         applyPresetDirectly(name: "Focus", minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: false)
     }
 
@@ -1194,6 +1218,9 @@ public class TimerViewModel: ObservableObject {
         stopTimer()
         fractionalRemaining = nil
         pausedSession = nil
+        showConflictModal = false
+        pendingTimerRequest = nil
+        conflictOrigin = nil
 
         // Native macOS User Notification
         NotificationService.shared.sendSessionCompleteNotification(presetName: activePreset, isBreak: isBreakPreset)

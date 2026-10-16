@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 @testable import FocusFlow
 
 final class FocusFlowTests: XCTestCase {
@@ -2984,5 +2985,383 @@ final class FocusFlowTests: XCTestCase {
         // Primary is restored and healthy
         XCTAssertTrue(FileManager.default.fileExists(atPath: primaryURL.path))
         XCTAssertFalse(newStorage.isPersistenceBlocked)
+    }
+
+    // MARK: - Menu-Bar Timer Switch Confirmation Regression Tests (13 Scenarios)
+
+    // 1. Active Focus -> Break requests confirmation with origin: .menuBar
+    @MainActor
+    func testMenuBarSwitch1_ActiveFocusToBreakRequestsConfirmation() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+        XCTAssertTrue(vm.isTimerRunning)
+        XCTAssertTrue(vm.isTimerActive)
+        XCTAssertEqual(vm.activePreset, "Focus")
+
+        vm.switchToBreak(minutes: 5, origin: .menuBar)
+
+        XCTAssertTrue(vm.showConflictModal)
+        XCTAssertEqual(vm.conflictOrigin, .menuBar)
+        XCTAssertNotNil(vm.pendingTimerRequest)
+        XCTAssertEqual(vm.pendingTimerRequest?.name, "Short Break")
+        XCTAssertEqual(vm.pendingTimerRequest?.minutes, 5)
+        XCTAssertTrue(vm.pendingTimerRequest?.isBreak == true)
+        // Original timer keeps running during confirmation decision
+        XCTAssertTrue(vm.isTimerRunning)
+        XCTAssertEqual(vm.activePreset, "Focus")
+    }
+
+    // 2. Cancelling preserves the running timer, remaining time and current preset
+    @MainActor
+    func testMenuBarSwitch2_CancellingPreservesRunningTimerAndState() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+        vm.timeRemaining = 25 * 60 - 5
+        let remainingBefore = vm.timeRemaining
+
+        vm.requestPresetChange(name: "Short Break", minutes: 5, origin: .menuBar)
+        XCTAssertTrue(vm.showConflictModal)
+        XCTAssertEqual(vm.conflictOrigin, .menuBar)
+
+        vm.continueCurrentTimer()
+
+        XCTAssertFalse(vm.showConflictModal)
+        XCTAssertNil(vm.conflictOrigin)
+        XCTAssertNil(vm.pendingTimerRequest)
+        XCTAssertTrue(vm.isTimerRunning)
+        XCTAssertEqual(vm.activePreset, "Focus")
+        XCTAssertEqual(vm.timeRemaining, remainingBefore)
+    }
+
+    // 3. Confirming switches exactly once
+    @MainActor
+    func testMenuBarSwitch3_ConfirmingSwitchesExactlyOnce() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+        vm.requestPresetChange(name: "Short Break", minutes: 5, origin: .menuBar)
+        XCTAssertTrue(vm.showConflictModal)
+
+        vm.endAndSwitch()
+
+        XCTAssertFalse(vm.showConflictModal)
+        XCTAssertNil(vm.conflictOrigin)
+        XCTAssertNil(vm.pendingTimerRequest)
+        XCTAssertEqual(vm.activePreset, "Short Break")
+        XCTAssertEqual(vm.totalTime, 300)
+        XCTAssertTrue(vm.isTimerRunning)
+
+        // Calling endAndSwitch a second time is a safe no-op since pending is cleared
+        vm.endAndSwitch()
+        XCTAssertEqual(vm.activePreset, "Short Break")
+        XCTAssertEqual(vm.totalTime, 300)
+    }
+
+    // 4. Active Break -> Focus follows the same correct flow
+    @MainActor
+    func testMenuBarSwitch4_ActiveBreakToFocusFollowsCorrectFlow() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Start in Short Break
+        vm.switchToBreak(minutes: 5, origin: .mainWindow)
+        vm.startTimer()
+        XCTAssertTrue(vm.isTimerRunning)
+        XCTAssertTrue(vm.isBreakPreset)
+
+        // Switch to Focus requested from Menu Bar
+        vm.switchToFocus(minutes: 25, origin: .menuBar)
+
+        XCTAssertTrue(vm.showConflictModal)
+        XCTAssertEqual(vm.conflictOrigin, .menuBar)
+        XCTAssertNotNil(vm.pendingTimerRequest)
+        XCTAssertEqual(vm.pendingTimerRequest?.name, "Focus")
+        XCTAssertEqual(vm.pendingTimerRequest?.minutes, 25)
+        XCTAssertFalse(vm.pendingTimerRequest?.isBreak ?? true)
+        XCTAssertTrue(vm.isTimerRunning)
+        XCTAssertTrue(vm.isBreakPreset)
+
+        // Confirm
+        vm.endAndSwitch()
+
+        XCTAssertFalse(vm.showConflictModal)
+        XCTAssertNil(vm.conflictOrigin)
+        XCTAssertNil(vm.pendingTimerRequest)
+        XCTAssertEqual(vm.activePreset, "Focus")
+        XCTAssertEqual(vm.totalTime, 25 * 60)
+        XCTAssertTrue(vm.isTimerRunning)
+    }
+
+    // 5. Paused countdown remains paused and unchanged after cancellation
+    @MainActor
+    func testMenuBarSwitch5_PausedCountdownRemainsPausedAndUnchangedAfterCancellation() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+        // Simulate some time passed
+        vm.timeRemaining = 25 * 60 - 45
+        vm.stopTimer()
+
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertTrue(vm.isTimerActive) // Paused with elapsed progress is active!
+        let pausedRemaining = vm.timeRemaining
+
+        vm.requestPresetChange(name: "Long Break", minutes: 15, origin: .menuBar)
+
+        XCTAssertTrue(vm.showConflictModal)
+        XCTAssertEqual(vm.conflictOrigin, .menuBar)
+        XCTAssertEqual(vm.pendingTimerRequest?.name, "Long Break")
+
+        vm.continueCurrentTimer()
+
+        XCTAssertFalse(vm.showConflictModal)
+        XCTAssertNil(vm.conflictOrigin)
+        XCTAssertNil(vm.pendingTimerRequest)
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertEqual(vm.timeRemaining, pausedRemaining)
+        XCTAssertEqual(vm.activePreset, "Focus")
+    }
+
+    // 6. Idle preset changes do not trigger confirmation
+    @MainActor
+    func testMenuBarSwitch6_IdlePresetChangesDoNotTriggerConfirmation() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertFalse(vm.isTimerActive)
+
+        vm.requestPresetChange(name: "Short Break", minutes: 5, origin: .menuBar)
+
+        XCTAssertFalse(vm.showConflictModal)
+        XCTAssertNil(vm.conflictOrigin)
+        XCTAssertNil(vm.pendingTimerRequest)
+        XCTAssertEqual(vm.activePreset, "Short Break")
+        XCTAssertEqual(vm.totalTime, 300)
+    }
+
+    // 7. Custom duration requests are handled consistently
+    @MainActor
+    func testMenuBarSwitch7_CustomDurationRequestsHandledConsistently() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+
+        vm.setCustomDuration(minutes: 42, seconds: 15, origin: .menuBar)
+
+        XCTAssertTrue(vm.showConflictModal)
+        XCTAssertEqual(vm.conflictOrigin, .menuBar)
+        XCTAssertEqual(vm.pendingTimerRequest?.name, "Custom")
+        XCTAssertEqual(vm.pendingTimerRequest?.minutes, 42)
+        XCTAssertEqual(vm.pendingTimerRequest?.seconds, 15)
+        XCTAssertEqual(vm.pendingTimerRequest?.mode, "Custom Timer")
+
+        vm.endAndSwitch()
+
+        XCTAssertFalse(vm.showConflictModal)
+        XCTAssertNil(vm.conflictOrigin)
+        XCTAssertEqual(vm.activePreset, "Custom")
+        XCTAssertEqual(vm.totalTime, 42 * 60 + 15)
+        XCTAssertTrue(vm.isTimerRunning)
+    }
+
+    // 8. Repeated requests do not cause duplicate switches
+    @MainActor
+    func testMenuBarSwitch8_RepeatedRequestsDoNotCauseDuplicateSwitches() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+
+        // First request: Short Break
+        vm.requestPresetChange(name: "Short Break", minutes: 5, origin: .menuBar)
+        XCTAssertTrue(vm.showConflictModal)
+        XCTAssertEqual(vm.pendingTimerRequest?.name, "Short Break")
+
+        // Second request before confirming: Long Break
+        vm.requestPresetChange(name: "Long Break", minutes: 15, origin: .menuBar)
+        XCTAssertTrue(vm.showConflictModal)
+        XCTAssertEqual(vm.pendingTimerRequest?.name, "Long Break")
+        XCTAssertEqual(vm.pendingTimerRequest?.minutes, 15)
+
+        // Single confirmation switches to the latest request
+        vm.endAndSwitch()
+
+        XCTAssertFalse(vm.showConflictModal)
+        XCTAssertNil(vm.pendingTimerRequest)
+        XCTAssertEqual(vm.activePreset, "Long Break")
+        XCTAssertEqual(vm.totalTime, 900)
+    }
+
+    // 9. Pending requests are safely handled after a popover is dismissed and reopened
+    @MainActor
+    func testMenuBarSwitch9_PendingRequestsSafelyHandledAcrossPopoverDismissalAndReopen() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+
+        // User triggers switch in menu-bar popover
+        vm.requestPresetChange(name: "Short Break", minutes: 5, origin: .menuBar)
+        XCTAssertTrue(vm.showConflictModal)
+        XCTAssertEqual(vm.conflictOrigin, .menuBar)
+
+        // Simulate companion popover dismissal and reopening:
+        // ViewModel retains the pending request state
+        XCTAssertTrue(vm.showConflictModal)
+        XCTAssertEqual(vm.conflictOrigin, .menuBar)
+        XCTAssertNotNil(vm.pendingTimerRequest)
+
+        // Timer continues counting down in background
+        vm.timeRemaining -= 5
+
+        // User reopens and confirms switch
+        vm.endAndSwitch()
+
+        XCTAssertFalse(vm.showConflictModal)
+        XCTAssertNil(vm.conflictOrigin)
+        XCTAssertNil(vm.pendingTimerRequest)
+        XCTAssertEqual(vm.activePreset, "Short Break")
+        XCTAssertTrue(vm.isTimerRunning)
+    }
+
+    // 10. Storage-blocked state prevents confirmation from mutating persistent state
+    @MainActor
+    func testMenuBarSwitch10_StorageBlockedPreventsConfirmationFromMutatingPersistentState() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Start timer then trigger unrecoverable corruption state
+        vm.startTimer()
+        let corrupted = Data("CORRUPTED_TEST_STORAGE_BLOCKED".utf8)
+        try corrupted.write(to: tempURL)
+        vm.persistData(force: true)
+        XCTAssertTrue(vm.isPersistenceBlocked)
+
+        // Attempting preset request while blocked should be rejected
+        vm.requestPresetChange(name: "Short Break", minutes: 5, origin: .menuBar)
+        XCTAssertFalse(vm.showConflictModal)
+        XCTAssertNil(vm.pendingTimerRequest)
+
+        // Even if pending was somehow set, endAndSwitch rejects when persistence is blocked
+        vm.pendingTimerRequest = (name: "Short Break", minutes: 5, seconds: 0, mode: "Pomodoro", isBreak: true)
+        vm.showConflictModal = true
+        vm.conflictOrigin = .menuBar
+
+        vm.endAndSwitch()
+
+        // Should NOT have applied the switch because persistence is blocked
+        XCTAssertNotEqual(vm.activePreset, "Short Break")
+    }
+
+    // 11. Stopwatch state and laps remain unchanged
+    @MainActor
+    func testMenuBarSwitch11_StopwatchStateAndLapsRemainUnchangedDuringPresetSwitch() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Set up stopwatch with time and laps
+        vm.startStopwatch()
+        vm.stopwatchTime = 120
+        vm.stopwatchFractional = 120.5
+        vm.recordLap()
+        vm.stopwatchTime = 240
+        vm.stopwatchFractional = 240.8
+        vm.recordLap()
+        XCTAssertEqual(vm.laps.count, 2)
+
+        // Focus timer is started and switches
+        vm.startTimer()
+        vm.requestPresetChange(name: "Short Break", minutes: 5, origin: .menuBar)
+        XCTAssertTrue(vm.showConflictModal)
+
+        vm.endAndSwitch()
+
+        // Stopwatch state and recorded laps remain intact and unmodified
+        XCTAssertEqual(vm.laps.count, 2)
+        XCTAssertEqual(vm.stopwatchTime, 240)
+        XCTAssertEqual(vm.stopwatchFractional, 240.8)
+    }
+
+    // 12. Main window vs Menu bar presentation origin isolation
+    @MainActor
+    func testMenuBarSwitch12_MainWindowAndMenuBarPresentationOriginIsolation() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+
+        // Request from main window sets origin to .mainWindow
+        vm.requestPresetChange(name: "Short Break", minutes: 5, origin: .mainWindow)
+        XCTAssertTrue(vm.showConflictModal)
+        XCTAssertEqual(vm.conflictOrigin, .mainWindow)
+
+        // Request from menu bar updates origin to .menuBar
+        vm.requestPresetChange(name: "Long Break", minutes: 15, origin: .menuBar)
+        XCTAssertTrue(vm.showConflictModal)
+        XCTAssertEqual(vm.conflictOrigin, .menuBar)
+        XCTAssertEqual(vm.pendingTimerRequest?.name, "Long Break")
+
+        vm.continueCurrentTimer()
+        XCTAssertFalse(vm.showConflictModal)
+        XCTAssertNil(vm.conflictOrigin)
+    }
+
+    // 13. Timer completion while confirmation is pending cleanly dismisses conflict state
+    @MainActor
+    func testMenuBarSwitch13_TimerCompletionWhileConflictPendingCleansUpSafely() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+        vm.timeRemaining = 1
+        vm.requestPresetChange(name: "Short Break", minutes: 5, origin: .menuBar)
+        XCTAssertTrue(vm.showConflictModal)
+        XCTAssertEqual(vm.conflictOrigin, .menuBar)
+
+        // Timer finishes naturally: calls handleSessionComplete
+        vm.handleSessionComplete()
+
+        XCTAssertFalse(vm.showConflictModal)
+        XCTAssertNil(vm.conflictOrigin)
+        XCTAssertNil(vm.pendingTimerRequest)
+    }
+
+    // 14. Visual GUI Snapshot Verification of Menu Bar Confirmation Card
+    @MainActor
+    func testMenuBarSwitch14_VisualSnapshotRendering() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+        vm.timeRemaining = 24 * 60 + 35 // 24:35 remaining
+        vm.switchToBreak(minutes: 5, origin: .menuBar)
+
+        XCTAssertTrue(vm.showConflictModal)
+        XCTAssertEqual(vm.conflictOrigin, .menuBar)
+        XCTAssertEqual(vm.pendingTimerRequest?.name, "Short Break")
+
+        let audio = AmbientAudioPlayer()
+        let view = MenuBarCompanionView(viewModel: vm, audioPlayer: audio)
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 316, height: 420)
+        hostingView.layoutSubtreeIfNeeded()
+
+        if let bitmapRep = hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds) {
+            hostingView.cacheDisplay(in: hostingView.bounds, to: bitmapRep)
+            if let pngData = bitmapRep.representation(using: .png, properties: [:]) {
+                let outURL = URL(fileURLWithPath: "/tmp/focusflow_menubar_confirmation.png")
+                try pngData.write(to: outURL)
+                XCTAssertTrue(FileManager.default.fileExists(atPath: outURL.path))
+                XCTAssertGreaterThan(pngData.count, 1000)
+            }
+        }
     }
 }

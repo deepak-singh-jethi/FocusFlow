@@ -63,6 +63,9 @@ public struct MenuBarCompanionView: View {
     @State private var isQuitHovered: Bool = false
     @State private var isMusicPlayHovered: Bool = false
     @State private var hoveredSound: String? = nil
+    @State private var isConflictPrimaryHovered: Bool = false
+    @State private var isConflictSecondaryHovered: Bool = false
+    @State private var isConflictCloseHovered: Bool = false
 
     public init(viewModel: TimerViewModel, audioPlayer: AmbientAudioPlayer) {
         self.viewModel = viewModel
@@ -89,9 +92,13 @@ public struct MenuBarCompanionView: View {
                 modeSegmentedControl
 
                 if selectedMode == .timer {
-                    interactiveTimerCard
-                    timerActionButtonsRow
-                    quickPresetRow
+                    if viewModel.showConflictModal && viewModel.conflictOrigin == .menuBar, let pending = viewModel.pendingTimerRequest {
+                        compactConflictConfirmationCard(pending: pending)
+                    } else {
+                        interactiveTimerCard
+                        timerActionButtonsRow
+                        quickPresetRow
+                    }
                 } else {
                     stopwatchDisplayCard
                     stopwatchActionButtonsRow
@@ -126,6 +133,7 @@ public struct MenuBarCompanionView: View {
         .animation(.spring(response: 0.28, dampingFraction: 0.86), value: viewModel.isStopwatchRunning)
         .animation(.spring(response: 0.28, dampingFraction: 0.86), value: audioPlayer.isPlaying)
         .animation(.spring(response: 0.28, dampingFraction: 0.86), value: audioPlayer.selectedSound)
+        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: viewModel.showConflictModal)
     }
 
     private func syncInputFields() {
@@ -398,9 +406,9 @@ public struct MenuBarCompanionView: View {
         inputMinutes = "\(newM)"
         inputSeconds = "00"
         if viewModel.isBreakPreset {
-            viewModel.switchToBreak(minutes: newM)
+            viewModel.switchToBreak(minutes: newM, origin: .menuBar)
         } else {
-            viewModel.setCustomDuration(minutes: newM, seconds: 0)
+            viewModel.setCustomDuration(minutes: newM, seconds: 0, origin: .menuBar)
         }
     }
 
@@ -408,9 +416,9 @@ public struct MenuBarCompanionView: View {
         inputMinutes = "\(minutes)"
         inputSeconds = "00"
         if viewModel.isBreakPreset {
-            viewModel.switchToBreak(minutes: minutes)
+            viewModel.switchToBreak(minutes: minutes, origin: .menuBar)
         } else {
-            viewModel.setCustomDuration(minutes: minutes, seconds: 0)
+            viewModel.setCustomDuration(minutes: minutes, seconds: 0, origin: .menuBar)
         }
     }
 
@@ -422,9 +430,9 @@ public struct MenuBarCompanionView: View {
         if total >= 5 {
             if viewModel.isBreakPreset {
                 let name = (m >= 15) ? "Long Break" : "Short Break"
-                viewModel.requestModeOrPresetChange(name: name, minutes: m, seconds: s, mode: "Pomodoro", isBreak: true)
+                viewModel.requestModeOrPresetChange(name: name, minutes: m, seconds: s, mode: "Pomodoro", isBreak: true, origin: .menuBar)
             } else {
-                viewModel.setCustomDuration(minutes: m, seconds: s)
+                viewModel.setCustomDuration(minutes: m, seconds: s, origin: .menuBar)
             }
         }
     }
@@ -522,9 +530,9 @@ public struct MenuBarCompanionView: View {
         let isSelected = viewModel.activePreset == name
         return Button {
             if name == "Custom" {
-                viewModel.setCustomDuration(minutes: viewModel.customMinutes, seconds: 0)
+                viewModel.setCustomDuration(minutes: viewModel.customMinutes, seconds: 0, origin: .menuBar)
             } else {
-                viewModel.requestPresetChange(name: name, minutes: minutes)
+                viewModel.requestPresetChange(name: name, minutes: minutes, origin: .menuBar)
             }
             syncInputFields()
         } label: {
@@ -546,6 +554,144 @@ public struct MenuBarCompanionView: View {
             )
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: - Compact Conflict Confirmation Card (Menu Bar)
+    private func compactConflictConfirmationCard(pending: (name: String, minutes: Int, seconds: Int, mode: String, isBreak: Bool)) -> some View {
+        let targetDuration = pending.seconds > 0 ? "\(pending.minutes)m \(pending.seconds)s" : "\(pending.minutes)m"
+        return VStack(spacing: 9) {
+            // Header with warning icon and close button
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.orange)
+
+                Text("Switch Active Session?")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(.white)
+
+                Spacer()
+
+                Button {
+                    viewModel.continueCurrentTimer()
+                    syncInputFields()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.gray)
+                        .padding(4)
+                        .background(Color.white.opacity(isConflictCloseHovered ? 0.14 : 0.05), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .onHover { h in isConflictCloseHovered = h }
+                .help("Keep Current Session")
+            }
+
+            // Current vs Requested comparison
+            HStack(alignment: .center, spacing: 6) {
+                // Current session pill
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("CURRENT")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(.gray)
+
+                    Text(viewModel.displayedTimerPreset)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+
+                    Text(viewModel.timerTimeString)
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .foregroundColor(isBreak ? .teal : .orange)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 5)
+                .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.gray.opacity(0.8))
+
+                // Requested session pill
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("REQUESTED")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(.gray)
+
+                    Text(pending.name)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+
+                    Text(targetDuration)
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .foregroundColor(pending.isBreak ? .teal : .orange)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 5)
+                .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+            }
+
+            // Explanatory warning note
+            Text("Switching presets will end your current session.")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.white.opacity(0.72))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+
+            // Action Buttons Row: Keep Current Session vs End & Switch
+            HStack(spacing: 8) {
+                Button {
+                    viewModel.continueCurrentTimer()
+                    syncInputFields()
+                } label: {
+                    Text("Keep Current Session")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.80)
+                        .foregroundColor(.white.opacity(0.90))
+                        .frame(maxWidth: .infinity, minHeight: 28)
+                        .background(Color.white.opacity(isConflictSecondaryHovered ? 0.12 : 0.05), in: RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(isConflictSecondaryHovered ? 0.20 : 0.08), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.cancelAction)
+                .onHover { h in isConflictSecondaryHovered = h }
+                .help("Cancel and keep running current session")
+
+                Button {
+                    viewModel.endAndSwitch()
+                    syncInputFields()
+                } label: {
+                    Text("End & Switch")
+                        .font(.system(size: 10.5, weight: .bold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.80)
+                        .foregroundColor(Color(red: 0.10, green: 0.05, blue: 0.05))
+                        .frame(maxWidth: .infinity, minHeight: 28)
+                        .background(
+                            LinearGradient(
+                                colors: [.orange, Color(red: 1.0, green: 0.42, blue: 0.30)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            ),
+                            in: RoundedRectangle(cornerRadius: 6)
+                        )
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(isConflictPrimaryHovered ? 0.35 : 0.20), lineWidth: 1))
+                        .shadow(color: Color.orange.opacity(isConflictPrimaryHovered ? 0.35 : 0.15), radius: 4, y: 1)
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.defaultAction)
+                .onHover { h in isConflictPrimaryHovered = h }
+                .help("End current session and switch")
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity)
+        .background(Color(red: 0.11, green: 0.12, blue: 0.16), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.orange.opacity(0.35), lineWidth: 1))
     }
 
     // MARK: - 6. Stopwatch Display Card

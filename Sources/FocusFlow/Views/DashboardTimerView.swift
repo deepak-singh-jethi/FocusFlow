@@ -479,7 +479,7 @@ public struct DashboardTimerView: View {
                 removal: .scale(scale: 0.94).combined(with: .opacity)
             ))
         }
-        if viewModel.showConflictModal, let pending = viewModel.pendingTimerRequest {
+        if viewModel.showConflictModal && viewModel.conflictOrigin != .menuBar, let pending = viewModel.pendingTimerRequest {
             let targetDuration = pending.seconds > 0 ? "\(pending.minutes)m \(pending.seconds)s" : "\(pending.minutes)m"
             TimerConflictSwitchModal(
                 currentPresetName: viewModel.displayedTimerPreset,
