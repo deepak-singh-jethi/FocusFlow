@@ -83,6 +83,8 @@ public class TimerViewModel: ObservableObject {
     }
     internal var stopwatchStartDate: Date?
     public internal(set) var stopwatchFractional: TimeInterval?
+    public private(set) var lastRecordedLapElapsedSeconds: TimeInterval = 0.0
+    public private(set) var nextLapNumber: Int = 1
 
     // Task States (Persistent)
     @Published public var tasks: [FocusTask] = [
@@ -317,6 +319,8 @@ public class TimerViewModel: ObservableObject {
         self.completedSessions = 0
         self.notes = []
         self.laps = []
+        self.lastRecordedLapElapsedSeconds = 0.0
+        self.nextLapNumber = 1
         self.preservedSession = nil
         self.pausedSession = nil
         self.stopwatchFractional = nil
@@ -346,6 +350,25 @@ public class TimerViewModel: ObservableObject {
         self.laps = saved.laps
         self.preservedSession = saved.preservedSession
         self.pausedSession = saved.pausedSession
+
+        // Restore or derive stopwatch lap checkpoint and sequence number
+        if let persistedCheckpoint = saved.lastRecordedLapElapsedSeconds, persistedCheckpoint.isFinite && persistedCheckpoint >= 0 {
+            self.lastRecordedLapElapsedSeconds = persistedCheckpoint
+        } else if !saved.laps.isEmpty {
+            let maxLapTotal = saved.laps.map(\.totalTime).filter { $0.isFinite && $0 >= 0 }.max() ?? 0.0
+            self.lastRecordedLapElapsedSeconds = maxLapTotal
+        } else {
+            self.lastRecordedLapElapsedSeconds = 0.0
+        }
+
+        if let persistedNextLap = saved.nextLapNumber, persistedNextLap > 0 {
+            self.nextLapNumber = persistedNextLap
+        } else if !saved.laps.isEmpty {
+            let maxLapNum = saved.laps.map(\.lapNumber).filter { $0 > 0 }.max() ?? 0
+            self.nextLapNumber = maxLapNum + 1
+        } else {
+            self.nextLapNumber = 1
+        }
 
         let restoredElapsed = saved.stopwatchElapsedSeconds
         if restoredElapsed.isFinite && restoredElapsed > 0 {
@@ -448,7 +471,9 @@ public class TimerViewModel: ObservableObject {
             laps: laps,
             preservedSession: preservedSession,
             pausedSession: pausedSession,
-            stopwatchElapsedSeconds: currentStopwatchElapsed
+            stopwatchElapsedSeconds: currentStopwatchElapsed,
+            lastRecordedLapElapsedSeconds: lastRecordedLapElapsedSeconds,
+            nextLapNumber: nextLapNumber
         )
         do {
             try storage.save(payload)
@@ -939,6 +964,8 @@ public class TimerViewModel: ObservableObject {
         stopwatchFractional = nil
         stopwatchTime = 0
         laps.removeAll()
+        lastRecordedLapElapsedSeconds = 0.0
+        nextLapNumber = 1
         preciseStopwatchProgress = 0.0
         persistData(force: true)
     }
@@ -952,17 +979,17 @@ public class TimerViewModel: ObservableObject {
             currentTotal = max(0, stopwatchFractional ?? TimeInterval(stopwatchTime))
         }
 
-        // Previous cumulative total time across laps:
-        let previousTotal = laps.first?.totalTime ?? 0.0
-        let lapDuration = max(0, currentTotal - previousTotal)
-        let nextLapNumber = laps.count + 1
+        let lapDuration = max(0, currentTotal - lastRecordedLapElapsedSeconds)
+        let lapNum = nextLapNumber
 
         let newLap = StopwatchLap(
-            lapNumber: nextLapNumber,
+            lapNumber: lapNum,
             lapDuration: lapDuration,
             totalTime: currentTotal,
             timestamp: Date()
         )
+        lastRecordedLapElapsedSeconds = currentTotal
+        nextLapNumber += 1
         laps.insert(newLap, at: 0)
         persistData()
     }

@@ -195,6 +195,8 @@ public struct FocusAppData: Codable, Equatable {
     public var preservedSession: PreservedTimerSession?
     public var pausedSession: PausedTimerSession?
     public var stopwatchElapsedSeconds: TimeInterval
+    public var lastRecordedLapElapsedSeconds: TimeInterval?
+    public var nextLapNumber: Int?
 
     enum CodingKeys: String, CodingKey {
         case tasks
@@ -212,6 +214,8 @@ public struct FocusAppData: Codable, Equatable {
         case preservedSession
         case pausedSession
         case stopwatchElapsedSeconds
+        case lastRecordedLapElapsedSeconds
+        case nextLapNumber
     }
 
     public init(
@@ -229,7 +233,9 @@ public struct FocusAppData: Codable, Equatable {
         laps: [StopwatchLap] = [],
         preservedSession: PreservedTimerSession? = nil,
         pausedSession: PausedTimerSession? = nil,
-        stopwatchElapsedSeconds: TimeInterval = 0.0
+        stopwatchElapsedSeconds: TimeInterval = 0.0,
+        lastRecordedLapElapsedSeconds: TimeInterval? = nil,
+        nextLapNumber: Int? = nil
     ) {
         self.tasks = tasks
         self.focusedSeconds = focusedSeconds
@@ -249,6 +255,16 @@ public struct FocusAppData: Codable, Equatable {
             self.stopwatchElapsedSeconds = stopwatchElapsedSeconds
         } else {
             self.stopwatchElapsedSeconds = 0.0
+        }
+        if let lastLap = lastRecordedLapElapsedSeconds, lastLap.isFinite && lastLap >= 0 {
+            self.lastRecordedLapElapsedSeconds = lastLap
+        } else {
+            self.lastRecordedLapElapsedSeconds = nil
+        }
+        if let nextNum = nextLapNumber, nextNum > 0 {
+            self.nextLapNumber = nextNum
+        } else {
+            self.nextLapNumber = nil
         }
     }
 
@@ -273,6 +289,20 @@ public struct FocusAppData: Codable, Equatable {
             self.stopwatchElapsedSeconds = decodedElapsed
         } else {
             self.stopwatchElapsedSeconds = 0.0
+        }
+
+        let decodedLastLap = try container.decodeIfPresent(Double.self, forKey: .lastRecordedLapElapsedSeconds)
+        if let decodedLastLap = decodedLastLap, decodedLastLap.isFinite && decodedLastLap >= 0 {
+            self.lastRecordedLapElapsedSeconds = decodedLastLap
+        } else {
+            self.lastRecordedLapElapsedSeconds = nil
+        }
+
+        let decodedNextLapNumber = try container.decodeIfPresent(Int.self, forKey: .nextLapNumber)
+        if let decodedNextLapNumber = decodedNextLapNumber, decodedNextLapNumber > 0 {
+            self.nextLapNumber = decodedNextLapNumber
+        } else {
+            self.nextLapNumber = nil
         }
 
         // Backward compatibility migration:

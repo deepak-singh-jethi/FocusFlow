@@ -151,9 +151,8 @@ FocusFlow is continuously validated via GitHub Actions on macOS 14:
 
 ## Known Remaining Issues
 
-1. **Stopwatch Lap Deletion**: Deleting intermediate laps from the laps list may lead to inconsistent split duration calculations for subsequent laps.
-2. **Persistence Write Consolidation**: Multiple rapid actions can schedule overlapping delayed writes that would benefit from debounced consolidation.
-3. **Midnight Boundary Accounting**: When an active focus session spans midnight, the live daily focus total may incorrectly include elapsed time from the previous day. Only the portion overlapping the current local calendar day should be counted.
+1. **Persistence Write Consolidation**: Multiple rapid actions can schedule overlapping delayed writes that would benefit from debounced consolidation.
+2. **Midnight Boundary Accounting**: When an active focus session spans midnight, the live daily focus total may incorrectly include elapsed time from the previous day. Only the portion overlapping the current local calendar day should be counted.
 
 ---
 

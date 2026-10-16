@@ -3709,4 +3709,533 @@ final class FocusFlowTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Stopwatch Lap Integrity Tests
+
+    // 1. Record first lap at 10.5s -> Lap 1 duration = 10.5s, total = 10.5s
+    @MainActor
+    func testLapIntegrity01_RecordFirstLapAt10_5s() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.stopwatchFractional = 10.5
+        vm.stopwatchTime = 10
+        vm.recordLap()
+
+        XCTAssertEqual(vm.laps.count, 1)
+        XCTAssertEqual(vm.laps[0].lapNumber, 1)
+        XCTAssertEqual(vm.laps[0].lapDuration, 10.5, accuracy: 0.001)
+        XCTAssertEqual(vm.laps[0].totalTime, 10.5, accuracy: 0.001)
+        XCTAssertEqual(vm.lastRecordedLapElapsedSeconds, 10.5, accuracy: 0.001)
+        XCTAssertEqual(vm.nextLapNumber, 2)
+    }
+
+    // 2. Record second lap at 25.25s -> Lap 2 duration = 14.75s, total = 25.25s
+    @MainActor
+    func testLapIntegrity02_RecordSecondLapAt25_25s() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.stopwatchFractional = 10.5
+        vm.stopwatchTime = 10
+        vm.recordLap()
+
+        vm.stopwatchFractional = 25.25
+        vm.stopwatchTime = 25
+        vm.recordLap()
+
+        XCTAssertEqual(vm.laps.count, 2)
+        XCTAssertEqual(vm.laps[0].lapNumber, 2)
+        XCTAssertEqual(vm.laps[0].lapDuration, 14.75, accuracy: 0.001)
+        XCTAssertEqual(vm.laps[0].totalTime, 25.25, accuracy: 0.001)
+        XCTAssertEqual(vm.lastRecordedLapElapsedSeconds, 25.25, accuracy: 0.001)
+        XCTAssertEqual(vm.nextLapNumber, 3)
+    }
+
+    // 3. Delete latest lap, then record at 40.25s -> New duration = 15.0s, number = 3
+    @MainActor
+    func testLapIntegrity03_DeleteLatestLapThenRecordAt40_25s() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.stopwatchFractional = 10.5
+        vm.stopwatchTime = 10
+        vm.recordLap()
+
+        vm.stopwatchFractional = 25.25
+        vm.stopwatchTime = 25
+        vm.recordLap()
+
+        // Delete latest lap (Lap 2 at index 0)
+        vm.removeLap(at: 0)
+        XCTAssertEqual(vm.laps.count, 1)
+        XCTAssertEqual(vm.laps[0].lapNumber, 1)
+        XCTAssertEqual(vm.lastRecordedLapElapsedSeconds, 25.25, accuracy: 0.001, "Checkpoint must be preserved after deleting latest lap")
+        XCTAssertEqual(vm.nextLapNumber, 3, "Sequence counter must not decrement")
+
+        // Record third lap at 40.25s (15.0s since last recorded lap at 25.25s)
+        vm.stopwatchFractional = 40.25
+        vm.stopwatchTime = 40
+        vm.recordLap()
+
+        XCTAssertEqual(vm.laps.count, 2)
+        XCTAssertEqual(vm.laps[0].lapNumber, 3, "New lap must be Lap 3, not reusing deleted Lap 2")
+        XCTAssertEqual(vm.laps[0].lapDuration, 15.0, accuracy: 0.001, "Duration must be measured from checkpoint at 25.25s")
+        XCTAssertEqual(vm.laps[0].totalTime, 40.25, accuracy: 0.001)
+        XCTAssertEqual(vm.laps[1].lapNumber, 1)
+    }
+
+    // 4. Delete middle lap from three recorded laps -> Remaining records unchanged, next split correct
+    @MainActor
+    func testLapIntegrity04_DeleteMiddleLapFromThreeRecordedLaps() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.stopwatchFractional = 10.0
+        vm.stopwatchTime = 10
+        vm.recordLap() // Lap 1: 10s
+
+        vm.stopwatchFractional = 25.0
+        vm.stopwatchTime = 25
+        vm.recordLap() // Lap 2: 15s
+
+        vm.stopwatchFractional = 45.0
+        vm.stopwatchTime = 45
+        vm.recordLap() // Lap 3: 20s
+
+        XCTAssertEqual(vm.laps.count, 3)
+        let lap1ID = vm.laps[2].id
+        let lap3ID = vm.laps[0].id
+
+        // Delete middle lap (Lap 2 at index 1)
+        vm.removeLap(at: 1)
+        XCTAssertEqual(vm.laps.count, 2)
+        XCTAssertEqual(vm.laps[0].lapNumber, 3)
+        XCTAssertEqual(vm.laps[0].id, lap3ID, "Surviving Lap 3 UUID must be preserved")
+        XCTAssertEqual(vm.laps[0].lapDuration, 20.0, accuracy: 0.001)
+        XCTAssertEqual(vm.laps[1].lapNumber, 1)
+        XCTAssertEqual(vm.laps[1].id, lap1ID, "Surviving Lap 1 UUID must be preserved")
+        XCTAssertEqual(vm.laps[1].lapDuration, 10.0, accuracy: 0.001)
+
+        // Record fourth lap at 60.0s (15s after Lap 3 at 45.0s)
+        vm.stopwatchFractional = 60.0
+        vm.stopwatchTime = 60
+        vm.recordLap()
+
+        XCTAssertEqual(vm.laps.count, 3)
+        XCTAssertEqual(vm.laps[0].lapNumber, 4)
+        XCTAssertEqual(vm.laps[0].lapDuration, 15.0, accuracy: 0.001)
+        XCTAssertEqual(vm.laps[0].totalTime, 60.0, accuracy: 0.001)
+    }
+
+    // 5. Delete oldest lap -> No effect on next split
+    @MainActor
+    func testLapIntegrity05_DeleteOldestLapNoEffectOnNextSplit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.stopwatchFractional = 10.0
+        vm.stopwatchTime = 10
+        vm.recordLap() // Lap 1: 10s
+
+        vm.stopwatchFractional = 25.0
+        vm.stopwatchTime = 25
+        vm.recordLap() // Lap 2: 15s
+
+        // Delete oldest lap (Lap 1 at index 1)
+        vm.removeLap(at: 1)
+        XCTAssertEqual(vm.laps.count, 1)
+        XCTAssertEqual(vm.laps[0].lapNumber, 2)
+
+        // Record third lap at 40.0s (15s after Lap 2 at 25.0s)
+        vm.stopwatchFractional = 40.0
+        vm.stopwatchTime = 40
+        vm.recordLap()
+
+        XCTAssertEqual(vm.laps.count, 2)
+        XCTAssertEqual(vm.laps[0].lapNumber, 3)
+        XCTAssertEqual(vm.laps[0].lapDuration, 15.0, accuracy: 0.001)
+        XCTAssertEqual(vm.laps[0].totalTime, 40.0, accuracy: 0.001)
+    }
+
+    // 6. Delete all visible laps, then record again -> Duration uses last checkpoint; number is not reused
+    @MainActor
+    func testLapIntegrity06_DeleteAllVisibleLapsThenRecordAgain() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.stopwatchFractional = 10.0
+        vm.stopwatchTime = 10
+        vm.recordLap() // Lap 1
+
+        vm.stopwatchFractional = 25.0
+        vm.stopwatchTime = 25
+        vm.recordLap() // Lap 2
+
+        // Delete all visible laps
+        vm.removeLap(at: 0)
+        vm.removeLap(at: 0)
+        XCTAssertEqual(vm.laps.count, 0)
+        XCTAssertEqual(vm.lastRecordedLapElapsedSeconds, 25.0, accuracy: 0.001, "Checkpoint must be preserved after deleting all laps")
+        XCTAssertEqual(vm.nextLapNumber, 3, "Next lap number must not reset")
+
+        // Record again at 45.0s (20.0s since last recorded lap at 25.0s)
+        vm.stopwatchFractional = 45.0
+        vm.stopwatchTime = 45
+        vm.recordLap()
+
+        XCTAssertEqual(vm.laps.count, 1)
+        XCTAssertEqual(vm.laps[0].lapNumber, 3, "New lap must be Lap 3, not reused")
+        XCTAssertEqual(vm.laps[0].lapDuration, 20.0, accuracy: 0.001)
+        XCTAssertEqual(vm.laps[0].totalTime, 45.0, accuracy: 0.001)
+    }
+
+    // 7. Delete Lap 2 from Laps 1–3, then record -> New lap number = 4
+    @MainActor
+    func testLapIntegrity07_DeleteLap2FromLaps1To3ThenRecord() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.stopwatchFractional = 10.0
+        vm.stopwatchTime = 10
+        vm.recordLap() // Lap 1
+
+        vm.stopwatchFractional = 20.0
+        vm.stopwatchTime = 20
+        vm.recordLap() // Lap 2
+
+        vm.stopwatchFractional = 30.0
+        vm.stopwatchTime = 30
+        vm.recordLap() // Lap 3
+
+        // Delete Lap 2 (index 1)
+        vm.removeLap(at: 1)
+        XCTAssertEqual(vm.laps.map(\.lapNumber), [3, 1])
+
+        vm.stopwatchFractional = 45.0
+        vm.stopwatchTime = 45
+        vm.recordLap()
+
+        XCTAssertEqual(vm.laps.map(\.lapNumber), [4, 3, 1], "Lap numbering must be strictly monotonic, never reusing deleted 2 or current count")
+    }
+
+    // 8. Pause and resume stopwatch -> Accurate next split
+    @MainActor
+    func testLapIntegrity08_PauseAndResumeStopwatchAccurateNextSplit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startStopwatch()
+        vm.stopwatchStartDate = Date().addingTimeInterval(-10.0)
+        vm.recordLap() // Lap 1 at 10s
+        XCTAssertEqual(vm.laps[0].lapDuration, 10.0, accuracy: 0.2)
+
+        vm.stopStopwatch() // Pause
+        XCTAssertFalse(vm.isStopwatchRunning)
+        XCTAssertEqual(vm.lastRecordedLapElapsedSeconds, 10.0, accuracy: 0.2)
+
+        vm.startStopwatch() // Resume
+        vm.stopwatchStartDate = Date().addingTimeInterval(-30.0) // 20s later
+        vm.recordLap() // Lap 2 at 30s
+
+        XCTAssertEqual(vm.laps.count, 2)
+        XCTAssertEqual(vm.laps[0].lapNumber, 2)
+        XCTAssertEqual(vm.laps[0].lapDuration, 20.0, accuracy: 0.2)
+        XCTAssertEqual(vm.laps[0].totalTime, 30.0, accuracy: 0.2)
+    }
+
+    // 9. Quit/Reopen after deleting latest lap -> Accurate next split and next lap number
+    @MainActor
+    func testLapIntegrity09_QuitReopenAfterDeletingLatestLap() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.stopwatchFractional = 10.0
+        vm1.stopwatchTime = 10
+        vm1.recordLap() // Lap 1: 10s
+
+        vm1.stopwatchFractional = 25.0
+        vm1.stopwatchTime = 25
+        vm1.recordLap() // Lap 2: 15s
+
+        vm1.removeLap(at: 0) // Delete Lap 2
+        XCTAssertEqual(vm1.laps.count, 1)
+
+        vm1.handleAppTermination()
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.laps.count, 1)
+        XCTAssertEqual(vm2.laps[0].lapNumber, 1)
+        XCTAssertEqual(vm2.lastRecordedLapElapsedSeconds, 25.0, accuracy: 0.001, "Checkpoint must survive app relaunch")
+        XCTAssertEqual(vm2.nextLapNumber, 3, "Next lap number must survive app relaunch")
+
+        // Record in reopened ViewModel at 40.0s
+        vm2.stopwatchFractional = 40.0
+        vm2.stopwatchTime = 40
+        vm2.recordLap()
+
+        XCTAssertEqual(vm2.laps.count, 2)
+        XCTAssertEqual(vm2.laps[0].lapNumber, 3)
+        XCTAssertEqual(vm2.laps[0].lapDuration, 15.0, accuracy: 0.001)
+        XCTAssertEqual(vm2.laps[0].totalTime, 40.0, accuracy: 0.001)
+    }
+
+    // 10. Quit/Reopen after deleting all visible laps -> Checkpoint and numbering preserved
+    @MainActor
+    func testLapIntegrity10_QuitReopenAfterDeletingAllVisibleLaps() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.stopwatchFractional = 10.0
+        vm1.stopwatchTime = 10
+        vm1.recordLap()
+
+        vm1.stopwatchFractional = 25.0
+        vm1.stopwatchTime = 25
+        vm1.recordLap()
+
+        vm1.removeLap(at: 0)
+        vm1.removeLap(at: 0)
+        XCTAssertEqual(vm1.laps.count, 0)
+
+        vm1.handleAppTermination()
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.laps.count, 0)
+        XCTAssertEqual(vm2.lastRecordedLapElapsedSeconds, 25.0, accuracy: 0.001, "Checkpoint must survive relaunch even if all laps were deleted")
+        XCTAssertEqual(vm2.nextLapNumber, 3, "Sequence counter must survive relaunch even if all laps were deleted")
+
+        vm2.stopwatchFractional = 45.0
+        vm2.stopwatchTime = 45
+        vm2.recordLap()
+
+        XCTAssertEqual(vm2.laps.count, 1)
+        XCTAssertEqual(vm2.laps[0].lapNumber, 3)
+        XCTAssertEqual(vm2.laps[0].lapDuration, 20.0, accuracy: 0.001)
+        XCTAssertEqual(vm2.laps[0].totalTime, 45.0, accuracy: 0.001)
+    }
+
+    // 11. Reset stopwatch and record again -> New Lap 1 starts from zero
+    @MainActor
+    func testLapIntegrity11_ResetStopwatchAndRecordAgainStartsFromZero() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.stopwatchFractional = 10.0
+        vm.stopwatchTime = 10
+        vm.recordLap()
+
+        vm.stopwatchFractional = 25.0
+        vm.stopwatchTime = 25
+        vm.recordLap()
+
+        // Reset
+        vm.resetStopwatch()
+        XCTAssertEqual(vm.laps.count, 0)
+        XCTAssertEqual(vm.lastRecordedLapElapsedSeconds, 0.0)
+        XCTAssertEqual(vm.nextLapNumber, 1)
+
+        // Record new lap
+        vm.stopwatchFractional = 15.0
+        vm.stopwatchTime = 15
+        vm.recordLap()
+
+        XCTAssertEqual(vm.laps.count, 1)
+        XCTAssertEqual(vm.laps[0].lapNumber, 1)
+        XCTAssertEqual(vm.laps[0].lapDuration, 15.0, accuracy: 0.001)
+        XCTAssertEqual(vm.laps[0].totalTime, 15.0, accuracy: 0.001)
+    }
+
+    // 12. Load legacy JSON with surviving laps -> Valid checkpoint and sequence derived
+    @MainActor
+    func testLapIntegrity12_LoadLegacyJSONWithSurvivingLapsDerivesValidCheckpointAndSequence() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let tempURL = tempDir.appendingPathComponent("focusflow_data.json")
+        defer { cleanup(url: tempURL) }
+
+        // Construct older legacy JSON payload without lastRecordedLapElapsedSeconds or nextLapNumber
+        let legacyJSON = """
+        {
+            "tasks": [],
+            "focusedSeconds": 0,
+            "completedSessions": 0,
+            "notes": [],
+            "dailyGoalHours": 4,
+            "totalSessions": 4,
+            "autoStartNextSession": false,
+            "activePreset": "Focus",
+            "clockStyle": "Digital",
+            "sessionRecords": [],
+            "laps": [
+                {
+                    "id": "\(UUID().uuidString)",
+                    "lapNumber": 2,
+                    "lapDuration": 15.0,
+                    "totalTime": 25.0,
+                    "timestamp": "2026-10-16T12:00:00Z"
+                },
+                {
+                    "id": "\(UUID().uuidString)",
+                    "lapNumber": 1,
+                    "lapDuration": 10.0,
+                    "totalTime": 10.0,
+                    "timestamp": "2026-10-16T11:59:45Z"
+                }
+            ],
+            "stopwatchElapsedSeconds": 25.0
+        }
+        """.data(using: .utf8)!
+
+        try legacyJSON.write(to: tempURL)
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm.laps.count, 2)
+        XCTAssertEqual(vm.lastRecordedLapElapsedSeconds, 25.0, accuracy: 0.001, "Checkpoint must be derived from max totalTime of surviving laps")
+        XCTAssertEqual(vm.nextLapNumber, 3, "Next lap number must be derived from max lapNumber + 1 (not laps.count + 1)")
+
+        vm.stopwatchFractional = 40.0
+        vm.stopwatchTime = 40
+        vm.recordLap()
+
+        XCTAssertEqual(vm.laps.count, 3)
+        XCTAssertEqual(vm.laps[0].lapNumber, 3)
+        XCTAssertEqual(vm.laps[0].lapDuration, 15.0, accuracy: 0.001)
+        XCTAssertEqual(vm.laps[0].totalTime, 40.0, accuracy: 0.001)
+    }
+
+    // 13. Load legacy JSON without laps -> Safe default behavior
+    @MainActor
+    func testLapIntegrity13_LoadLegacyJSONWithoutLapsSafeDefaultBehavior() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let tempURL = tempDir.appendingPathComponent("focusflow_data.json")
+        defer { cleanup(url: tempURL) }
+
+        let legacyJSON = """
+        {
+            "tasks": [],
+            "focusedSeconds": 0,
+            "completedSessions": 0,
+            "notes": [],
+            "dailyGoalHours": 4,
+            "totalSessions": 4,
+            "autoStartNextSession": false,
+            "activePreset": "Focus",
+            "clockStyle": "Digital",
+            "sessionRecords": [],
+            "laps": [],
+            "stopwatchElapsedSeconds": 0.0
+        }
+        """.data(using: .utf8)!
+
+        try legacyJSON.write(to: tempURL)
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm.laps.count, 0)
+        XCTAssertEqual(vm.lastRecordedLapElapsedSeconds, 0.0)
+        XCTAssertEqual(vm.nextLapNumber, 1)
+
+        vm.stopwatchFractional = 12.0
+        vm.stopwatchTime = 12
+        vm.recordLap()
+
+        XCTAssertEqual(vm.laps.count, 1)
+        XCTAssertEqual(vm.laps[0].lapNumber, 1)
+        XCTAssertEqual(vm.laps[0].lapDuration, 12.0, accuracy: 0.001)
+    }
+
+    // 14. Existing fastest/slowest indicators -> Correct for visible laps
+    @MainActor
+    func testLapIntegrity14_ExistingFastestSlowestIndicatorsCorrectForVisibleLaps() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.stopwatchFractional = 10.0
+        vm.stopwatchTime = 10
+        vm.recordLap() // Lap 1: 10s
+
+        vm.stopwatchFractional = 15.0
+        vm.stopwatchTime = 15
+        vm.recordLap() // Lap 2: 5s (fastest)
+
+        vm.stopwatchFractional = 35.0
+        vm.stopwatchTime = 35
+        vm.recordLap() // Lap 3: 20s (slowest)
+
+        // laps order: [Lap 3 (20s), Lap 2 (5s), Lap 1 (10s)]
+        XCTAssertEqual(vm.fastestLapIndex, 1) // Lap 2
+        XCTAssertEqual(vm.slowestLapIndex, 0) // Lap 3
+
+        // Delete Lap 2 (the fastest lap)
+        vm.removeLap(at: 1)
+        // laps order: [Lap 3 (20s), Lap 1 (10s)]
+        XCTAssertEqual(vm.fastestLapIndex, 1, "Lap 1 (10s) must now be fastest among remaining")
+        XCTAssertEqual(vm.slowestLapIndex, 0, "Lap 3 (20s) remains slowest")
+    }
+
+    // 15. Storage blocked by corruption -> Lap mutations remain blocked and saved bytes protected
+    @MainActor
+    func testLapIntegrity15_StorageBlockedByCorruptionProtectsBytesAndBlocksLapMutations() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let tempURL = tempDir.appendingPathComponent("focusflow_data.json")
+        defer { cleanup(url: tempURL) }
+
+        // Corrupted primary and corrupted backup
+        let corruptBytes = "CORRUPTED_PRIMARY_BYTES".data(using: .utf8)!
+        try corruptBytes.write(to: tempURL)
+        let storage = FocusStorageService(storageURL: tempURL)
+        try corruptBytes.write(to: storage.backupURL)
+
+        let vm = TimerViewModel(storage: storage)
+        XCTAssertTrue(vm.isPersistenceBlocked)
+
+        // Recording lap while blocked must be rejected
+        vm.stopwatchFractional = 10.0
+        vm.stopwatchTime = 10
+        vm.recordLap()
+        XCTAssertEqual(vm.laps.count, 0)
+
+        // Deleting lap while blocked must be rejected
+        vm.removeLap(at: 0)
+
+        // Verify corrupted bytes remain untouched
+        let primaryBytes = try Data(contentsOf: tempURL)
+        XCTAssertEqual(primaryBytes, corruptBytes)
+    }
+
+    // 16. Existing lap UUIDs and elapsed stopwatch time are preserved across deletions
+    @MainActor
+    func testLapIntegrity16_ExistingLapUUIDsAndElapsedStatePreservedAcrossDeletion() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startStopwatch()
+        vm.stopwatchStartDate = Date().addingTimeInterval(-10.0)
+        vm.recordLap() // Lap 1 at 10s
+
+        vm.stopwatchStartDate = Date().addingTimeInterval(-25.0)
+        vm.recordLap() // Lap 2 at 25s
+
+        let lap1ID = vm.laps[1].id
+        let lap1Timestamp = vm.laps[1].timestamp
+
+        // Delete Lap 2
+        vm.removeLap(at: 0)
+
+        XCTAssertEqual(vm.laps.count, 1)
+        XCTAssertEqual(vm.laps[0].id, lap1ID, "Lap 1 ID must remain identical")
+        XCTAssertEqual(vm.laps[0].timestamp, lap1Timestamp, "Lap 1 timestamp must remain identical")
+        XCTAssertEqual(vm.laps[0].lapDuration, 10.0, accuracy: 0.2)
+        XCTAssertEqual(vm.laps[0].totalTime, 10.0, accuracy: 0.2)
+    }
 }
