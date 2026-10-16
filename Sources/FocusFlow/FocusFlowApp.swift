@@ -16,7 +16,6 @@ public final class FocusFlowAppDelegate: NSObject, NSApplicationDelegate, NSWind
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
-        try? "applicationDidFinishLaunching called at \(Date())\n".write(toFile: "/tmp/focusflow_did_launch.txt", atomically: true, encoding: .utf8)
         NSApp.setActivationPolicy(.regular)
         DispatchQueue.main.async { [weak self] in
             self?.showMainWindow()
@@ -38,12 +37,6 @@ public final class FocusFlowAppDelegate: NSObject, NSApplicationDelegate, NSWind
     }
 
     public func showMainWindow() {
-        let msg = "showMainWindow called at \(Date()), mainWindow=\(String(describing: mainWindow))\n"
-        if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: "/tmp/focusflow_did_launch.txt")) {
-            handle.seekToEndOfFile()
-            if let d = msg.data(using: .utf8) { handle.write(d) }
-            handle.closeFile()
-        }
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
 
