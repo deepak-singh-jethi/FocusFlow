@@ -194,6 +194,7 @@ public struct FocusAppData: Codable {
     public var laps: [StopwatchLap]
     public var preservedSession: PreservedTimerSession?
     public var pausedSession: PausedTimerSession?
+    public var stopwatchElapsedSeconds: TimeInterval
 
     enum CodingKeys: String, CodingKey {
         case tasks
@@ -210,6 +211,7 @@ public struct FocusAppData: Codable {
         case laps
         case preservedSession
         case pausedSession
+        case stopwatchElapsedSeconds
     }
 
     public init(
@@ -226,7 +228,8 @@ public struct FocusAppData: Codable {
         legacyLifetimeFocusedSeconds: Int? = nil,
         laps: [StopwatchLap] = [],
         preservedSession: PreservedTimerSession? = nil,
-        pausedSession: PausedTimerSession? = nil
+        pausedSession: PausedTimerSession? = nil,
+        stopwatchElapsedSeconds: TimeInterval = 0.0
     ) {
         self.tasks = tasks
         self.focusedSeconds = focusedSeconds
@@ -242,6 +245,11 @@ public struct FocusAppData: Codable {
         self.laps = laps
         self.preservedSession = preservedSession
         self.pausedSession = pausedSession
+        if stopwatchElapsedSeconds.isFinite && stopwatchElapsedSeconds > 0 {
+            self.stopwatchElapsedSeconds = stopwatchElapsedSeconds
+        } else {
+            self.stopwatchElapsedSeconds = 0.0
+        }
     }
 
     public init(from decoder: Decoder) throws {
@@ -260,6 +268,12 @@ public struct FocusAppData: Codable {
         self.laps = try container.decodeIfPresent([StopwatchLap].self, forKey: .laps) ?? []
         self.preservedSession = try container.decodeIfPresent(PreservedTimerSession.self, forKey: .preservedSession)
         self.pausedSession = try container.decodeIfPresent(PausedTimerSession.self, forKey: .pausedSession)
+        let decodedElapsed = try container.decodeIfPresent(Double.self, forKey: .stopwatchElapsedSeconds) ?? 0.0
+        if decodedElapsed.isFinite && decodedElapsed > 0 {
+            self.stopwatchElapsedSeconds = decodedElapsed
+        } else {
+            self.stopwatchElapsedSeconds = 0.0
+        }
 
         // Backward compatibility migration:
         // If sessionRecords is empty and legacyLifetimeFocusedSeconds was nil,

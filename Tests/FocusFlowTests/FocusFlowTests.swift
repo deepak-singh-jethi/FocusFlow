@@ -1321,4 +1321,263 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(StopwatchLap.formatDuration(75.5), "01:15.50")
         XCTAssertEqual(StopwatchLap.formatDuration(3600), "01:00:00.00")
     }
+
+    // MARK: - Stopwatch Elapsed-Time Recovery Tests
+
+    // 1. Paused stopwatch recovery: save 75.25 seconds, create new ViewModel using same isolated file, verify preserved & paused.
+    @MainActor
+    func testPausedStopwatchRecoveryOnRelaunch() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.stopwatchTime = 75
+        vm1.stopwatchFractional = 75.25
+        vm1.stopStopwatch() // Ensures paused state and persists
+        XCTAssertFalse(vm1.isStopwatchRunning)
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertFalse(vm2.isStopwatchRunning, "Restored stopwatch must be paused")
+        XCTAssertEqual(vm2.stopwatchTime, 75, "Stopwatch integer seconds must be restored")
+        XCTAssertEqual(vm2.stopwatchFractional, 75.25, "Stopwatch fractional precision must be restored")
+        XCTAssertEqual(vm2.stopwatchTimeString, "01:15")
+    }
+
+    // 2. Running stopwatch recovery: start stopwatch, simulate normal termination, create new ViewModel, verify restores paused.
+    @MainActor
+    func testRunningStopwatchRecoveryOnTermination() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.startStopwatch()
+        XCTAssertTrue(vm1.isStopwatchRunning)
+        vm1.stopwatchStartDate = Date().addingTimeInterval(-45.0)
+
+        vm1.handleAppTermination()
+        XCTAssertFalse(vm1.isStopwatchRunning)
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertFalse(vm2.isStopwatchRunning, "Restored running stopwatch must be paused upon relaunch")
+        XCTAssertEqual(vm2.stopwatchTime, 45, "Running stopwatch elapsed time must be restored")
+        XCTAssertEqual(vm2.stopwatchTimeString, "00:45")
+    }
+
+    // 3. Resume after recovery: confirm elapsed time continues from saved offset instead of restarting at zero.
+    @MainActor
+    func testResumeAfterStopwatchRecoveryContinuesFromSavedOffset() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.stopwatchTime = 30
+        vm1.stopwatchFractional = 30.5
+        vm1.stopStopwatch()
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.stopwatchTime, 30)
+        XCTAssertEqual(vm2.stopwatchFractional, 30.5)
+
+        // Resume stopwatch
+        vm2.startStopwatch()
+        XCTAssertTrue(vm2.isStopwatchRunning)
+        XCTAssertNil(vm2.stopwatchFractional)
+        guard let start = vm2.stopwatchStartDate else {
+            XCTFail("stopwatchStartDate must be set on resume")
+            return
+        }
+        // Start date must be backdated by approximately 30.5 seconds
+        let elapsedAtStart = Date().timeIntervalSince(start)
+        XCTAssertEqual(elapsedAtStart, 30.5, accuracy: 0.5)
+
+        vm2.stopStopwatch()
+    }
+
+    // 4. Precision: ensure fractional value such as 75.25 seconds survives persistence and can be used for subsequent lap calculations.
+    @MainActor
+    func testFractionalPrecisionPreservedForFutureLapCalculations() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.stopwatchTime = 75
+        vm1.stopwatchFractional = 75.25
+        vm1.stopStopwatch()
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.stopwatchFractional, 75.25)
+
+        // Record lap using restored fractional offset
+        vm2.recordLap()
+        XCTAssertEqual(vm2.laps.count, 1)
+        XCTAssertEqual(vm2.laps[0].totalTime, 75.25, accuracy: 0.001)
+        XCTAssertEqual(vm2.laps[0].lapDuration, 75.25, accuracy: 0.001)
+        XCTAssertEqual(vm2.laps[0].formattedTotalTime, "01:15.25")
+    }
+
+    // 5. Lap preservation: save multiple existing laps alongside elapsed time, relaunch, verify unchanged.
+    @MainActor
+    func testLapPreservationAcrossAppRestart() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let uuid1 = UUID()
+        let uuid2 = UUID()
+        let uuid3 = UUID()
+        let lap1 = StopwatchLap(id: uuid1, lapNumber: 1, lapDuration: 10.5, totalTime: 10.5)
+        let lap2 = StopwatchLap(id: uuid2, lapNumber: 2, lapDuration: 20.25, totalTime: 30.75)
+        let lap3 = StopwatchLap(id: uuid3, lapNumber: 3, lapDuration: 15.0, totalTime: 45.75)
+
+        vm1.laps = [lap3, lap2, lap1] // Laps are stored newest first
+        vm1.stopwatchTime = 45
+        vm1.stopwatchFractional = 45.75
+        vm1.stopStopwatch()
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.laps.count, 3)
+        XCTAssertEqual(vm2.laps[0].id, uuid3)
+        XCTAssertEqual(vm2.laps[0].lapNumber, 3)
+        XCTAssertEqual(vm2.laps[0].lapDuration, 15.0)
+        XCTAssertEqual(vm2.laps[0].totalTime, 45.75)
+
+        XCTAssertEqual(vm2.laps[1].id, uuid2)
+        XCTAssertEqual(vm2.laps[1].lapNumber, 2)
+        XCTAssertEqual(vm2.laps[1].lapDuration, 20.25)
+        XCTAssertEqual(vm2.laps[1].totalTime, 30.75)
+
+        XCTAssertEqual(vm2.laps[2].id, uuid1)
+        XCTAssertEqual(vm2.laps[2].lapNumber, 1)
+        XCTAssertEqual(vm2.laps[2].lapDuration, 10.5)
+        XCTAssertEqual(vm2.laps[2].totalTime, 10.5)
+
+        XCTAssertEqual(vm2.stopwatchTime, 45)
+        XCTAssertEqual(vm2.stopwatchFractional, 45.75)
+    }
+
+    // 6. Reset persistence: reset previously used stopwatch, relaunch and verify 00:00 with no laps.
+    @MainActor
+    func testResetStopwatchPersistsZeroAndClearsLaps() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.stopwatchTime = 60
+        vm1.stopwatchFractional = 60.5
+        vm1.laps = [StopwatchLap(lapNumber: 1, lapDuration: 60.5, totalTime: 60.5)]
+        vm1.resetStopwatch()
+
+        XCTAssertEqual(vm1.stopwatchTime, 0)
+        XCTAssertTrue(vm1.laps.isEmpty)
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.stopwatchTime, 0)
+        XCTAssertNil(vm2.stopwatchFractional)
+        XCTAssertEqual(vm2.stopwatchTimeString, "00:00")
+        XCTAssertTrue(vm2.laps.isEmpty, "Reset stopwatch must persist empty laps")
+    }
+
+    // 7. Backward compatibility: decode older JSON payload without stopwatchElapsedSeconds.
+    @MainActor
+    func testBackwardCompatibilityOlderJSONWithoutStopwatchElapsedSeconds() {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_legacy_stopwatch_\(UUID().uuidString).json")
+        defer { cleanup(url: tempURL) }
+
+        let legacyJSON = """
+        {
+            "tasks": [
+                {
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "title": "Legacy Task",
+                    "estimatedMinutes": 25,
+                    "timeSpentSeconds": 120,
+                    "isCompleted": false,
+                    "isLocked": false,
+                    "icon": "star.fill",
+                    "iconColorName": "orange"
+                }
+            ],
+            "focusedSeconds": 1200,
+            "completedSessions": 2,
+            "notes": ["Legacy Note"],
+            "dailyGoalHours": 4,
+            "totalSessions": 4,
+            "autoStartNextSession": false,
+            "activePreset": "Focus",
+            "clockStyle": "Digital",
+            "sessionRecords": [],
+            "laps": [
+                {
+                    "id": "22222222-2222-2222-2222-222222222222",
+                    "lapNumber": 1,
+                    "lapDuration": 25.5,
+                    "totalTime": 25.5,
+                    "timestamp": "2026-10-15T12:00:00Z"
+                }
+            ]
+        }
+        """
+        try? legacyJSON.data(using: .utf8)?.write(to: tempURL)
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm.tasks.count, 1)
+        XCTAssertEqual(vm.tasks[0].title, "Legacy Task")
+        XCTAssertEqual(vm.completedSessions, 2)
+        XCTAssertEqual(vm.laps.count, 1)
+        XCTAssertEqual(vm.laps[0].lapDuration, 25.5)
+
+        // Stopwatch elapsed time defaults to zero when omitted in legacy JSON
+        XCTAssertEqual(vm.stopwatchTime, 0)
+        XCTAssertNil(vm.stopwatchFractional)
+        XCTAssertEqual(vm.stopwatchTimeString, "00:00")
+        XCTAssertFalse(vm.isStopwatchRunning)
+    }
+
+    // 8. Repeat termination: calling shutdown handler twice must not accumulate additional stopwatch/task time.
+    @MainActor
+    func testRepeatTerminationDoesNotAccumulateExtraStopwatchOrTaskTime() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.startStopwatch()
+        vm1.stopwatchStartDate = Date().addingTimeInterval(-20.0)
+
+        vm1.handleAppTermination()
+        let taskTimeAfterFirst = vm1.tasks[vm1.activeTaskIndex].timeSpentSeconds
+        let stopwatchTimeAfterFirst = vm1.stopwatchTime
+
+        vm1.handleAppTermination()
+        vm1.handleAppTermination()
+
+        XCTAssertEqual(vm1.stopwatchTime, stopwatchTimeAfterFirst, "Repeat termination must not increment stopwatchTime")
+        XCTAssertEqual(vm1.tasks[vm1.activeTaskIndex].timeSpentSeconds, taskTimeAfterFirst, "Repeat termination must not double-count task time")
+    }
+
+    // 9. Long duration: recover stopwatch beyond 60 minutes and verify existing HH:mm:ss display remains correct.
+    @MainActor
+    func testLongDurationStopwatchRecoveryBeyondOneHour() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // 1 hour, 15 minutes, 30 seconds = 4530 seconds
+        vm1.stopwatchTime = 4530
+        vm1.stopwatchFractional = 4530.25
+        vm1.stopStopwatch()
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertFalse(vm2.isStopwatchRunning)
+        XCTAssertEqual(vm2.stopwatchTime, 4530)
+        XCTAssertEqual(vm2.stopwatchFractional, 4530.25)
+        XCTAssertEqual(vm2.stopwatchTimeString, "01:15:30", "Stopwatch display must show HH:mm:ss when recovered beyond 1 hour")
+    }
 }

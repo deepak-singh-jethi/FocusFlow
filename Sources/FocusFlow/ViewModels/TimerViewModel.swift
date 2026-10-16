@@ -70,8 +70,8 @@ public class TimerViewModel: ObservableObject {
             return String(format: "%02d:%02d", m, s)
         }
     }
-    private var stopwatchStartDate: Date?
-    private var stopwatchFractional: TimeInterval?
+    internal var stopwatchStartDate: Date?
+    public internal(set) var stopwatchFractional: TimeInterval?
 
     // Task States (Persistent)
     @Published public var tasks: [FocusTask] = [
@@ -212,6 +212,19 @@ public class TimerViewModel: ObservableObject {
         self.preservedSession = saved.preservedSession
         self.pausedSession = saved.pausedSession
 
+        let restoredElapsed = saved.stopwatchElapsedSeconds
+        if restoredElapsed.isFinite && restoredElapsed > 0 {
+            self.stopwatchFractional = restoredElapsed
+            self.stopwatchTime = max(0, Int(restoredElapsed))
+            self.preciseStopwatchProgress = (restoredElapsed.truncatingRemainder(dividingBy: 60.0)) / 60.0
+        } else {
+            self.stopwatchFractional = nil
+            self.stopwatchTime = 0
+            self.preciseStopwatchProgress = 0.0
+        }
+        self.isStopwatchRunning = false
+        self.stopwatchStartDate = nil
+
         if let paused = saved.pausedSession {
             self.activePreset = paused.activePreset
             self.activeMode = paused.activeMode
@@ -271,6 +284,15 @@ public class TimerViewModel: ObservableObject {
         }
         lastPersistTime = now
 
+        let currentStopwatchElapsed: TimeInterval
+        if isStopwatchRunning, let start = stopwatchStartDate {
+            currentStopwatchElapsed = max(0.0, Date().timeIntervalSince(start))
+        } else if let frac = stopwatchFractional {
+            currentStopwatchElapsed = max(0.0, frac)
+        } else {
+            currentStopwatchElapsed = max(0.0, TimeInterval(stopwatchTime))
+        }
+
         let payload = FocusAppData(
             tasks: tasks,
             focusedSeconds: todayFocusedSeconds,
@@ -285,7 +307,8 @@ public class TimerViewModel: ObservableObject {
             legacyLifetimeFocusedSeconds: legacyLifetimeFocusedSeconds,
             laps: laps,
             preservedSession: preservedSession,
-            pausedSession: pausedSession
+            pausedSession: pausedSession,
+            stopwatchElapsedSeconds: currentStopwatchElapsed
         )
         storage.save(payload)
     }
@@ -648,6 +671,7 @@ public class TimerViewModel: ObservableObject {
     // MARK: Stopwatch Core Controls (Priority 5)
     public func startStopwatch() {
         guard !isStopwatchRunning else { return }
+        hasTerminated = false
         isStopwatchRunning = true
         let offset = stopwatchFractional ?? TimeInterval(stopwatchTime)
         stopwatchStartDate = Date().addingTimeInterval(-offset)
@@ -690,7 +714,7 @@ public class TimerViewModel: ObservableObject {
         stopwatchTime = 0
         laps.removeAll()
         preciseStopwatchProgress = 0.0
-        persistData()
+        persistData(force: true)
     }
 
     public func recordLap() {
