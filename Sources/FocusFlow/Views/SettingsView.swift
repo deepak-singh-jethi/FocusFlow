@@ -83,6 +83,7 @@ public struct SettingsView: View {
                 }
                 .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
                 .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.06), lineWidth: 1))
+                .disabled(viewModel.isPersistenceBlocked)
             }
             .padding(.horizontal, 32)
             .padding(.bottom, 30)
@@ -91,6 +92,7 @@ public struct SettingsView: View {
         }
         .scrollIndicators(.hidden)
         .onChange(of: viewModel.totalSessions) { _, newTotal in
+            guard !viewModel.isPersistenceBlocked else { return }
             if viewModel.currentSession > newTotal {
                 viewModel.currentSession = 1
             }

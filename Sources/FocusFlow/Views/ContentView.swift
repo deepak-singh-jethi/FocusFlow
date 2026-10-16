@@ -26,11 +26,10 @@ public struct ContentView: View {
                 VStack(spacing: 0) {
                     if viewModel.isPersistenceBlocked {
                         storageErrorBanner
+                    } else if viewModel.isSaveFailed {
+                        saveFailureBanner
                     } else if viewModel.didRecoverFromBackup && viewModel.showRecoveryNotice {
                         recoverySuccessBanner
-                    }
-                    if viewModel.isSaveFailed {
-                        saveFailureBanner
                     }
 
                     ZStack {
@@ -160,7 +159,7 @@ public struct ContentView: View {
                 Text("Saved Data Protection Alert")
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(.white)
-                Text("Saved data could not be loaded because the save file is corrupted or unreadable. Automatic saving is blocked to protect your existing file.")
+                Text(viewModel.storageErrorMessage ?? "Saved data could not be loaded because the save file is corrupted or unreadable. Automatic saving is blocked to protect your existing file.")
                     .font(.system(size: 11))
                     .foregroundColor(.white.opacity(0.85))
             }

@@ -335,6 +335,7 @@ public final class FocusStorageService {
     public private(set) var isPersistenceBlocked: Bool = false
     public private(set) var lastLoadResult: StorageLoadResult?
     public private(set) var lastError: StorageError?
+    public internal(set) var hasInterruptedInitialSave: Bool = false
 
     // Testing hooks for simulating disk/IO failures
     public var simulateBackupFailure: Bool = false
@@ -394,6 +395,11 @@ public final class FocusStorageService {
     public func resetBlockedStateForTesting() {
         isPersistenceBlocked = false
         lastError = nil
+        hasInterruptedInitialSave = false
+        simulateBackupFailure = false
+        simulateWriteFailure = false
+        simulateDiagnosticFailure = false
+        simulateRestoreFailure = false
     }
 
     public func decodeData(from url: URL) throws -> FocusAppData {
@@ -581,11 +587,49 @@ public final class FocusStorageService {
         let backupExists = fileManager.fileExists(atPath: backupURL.path)
 
         // Case C: Primary is missing but an existing backup is present
-        // Requirement: "Handle the case where the primary is missing but an existing backup is present: do not treat it as a fresh installation or overwrite the backup. Use the existing recovery procedure or fail safely."
         if !primaryExists && backupExists {
-            let error = StorageError.persistenceBlocked(reason: "Primary file is missing while an existing backup is present. Overwrite blocked to protect existing backup.")
-            self.lastError = error
-            throw error
+            // First, decode and validate the existing backup
+            let backupData: FocusAppData
+            do {
+                backupData = try decodeData(from: backupURL)
+            } catch {
+                print("[FocusStorageService] Error: Primary missing and backup save file is corrupted: \(error)")
+                let storageErr = StorageError.corruptedBackupMissingPrimary(backupURL, underlyingError: error.localizedDescription)
+                self.lastError = storageErr
+                self.isPersistenceBlocked = true
+                throw storageErr
+            }
+
+            // Check if this is an interrupted initial save:
+            // either tracked by hasInterruptedInitialSave or the backup matches the in-memory data to be saved
+            let isInterruptedInitialSave = self.hasInterruptedInitialSave || (backupData == data)
+            guard isInterruptedInitialSave else {
+                let error = StorageError.persistenceBlocked(reason: "Primary file is missing while an existing backup is present. Overwrite blocked to protect existing backup.")
+                self.lastError = error
+                self.isPersistenceBlocked = true
+                throw error
+            }
+
+            // Safely complete the initial save by writing and validating the primary file
+            if simulateWriteFailure {
+                let error = StorageError.writeFailed(primaryURL, underlyingError: "Simulated primary write failure")
+                self.lastError = error
+                throw error
+            }
+
+            do {
+                try encodedData.write(to: primaryURL, options: [.atomic])
+                _ = try decodeData(from: primaryURL)
+            } catch {
+                print("[FocusStorageService] Error: Failed to write or validate primary file during recovery of interrupted save: \(error)")
+                let storageErr = StorageError.writeFailed(primaryURL, underlyingError: error.localizedDescription)
+                self.lastError = storageErr
+                throw storageErr
+            }
+
+            // Both primary and backup now exist and validate!
+            self.hasInterruptedInitialSave = false
+            return
         }
 
         // Case A: Fresh installation (neither primary nor backup exists)
@@ -611,6 +655,7 @@ public final class FocusStorageService {
             if simulateWriteFailure {
                 // "If primary creation fails after the backup succeeds, retain the valid backup so startup recovery can restore it."
                 // "Do not delete the valid backup as part of error cleanup."
+                self.hasInterruptedInitialSave = true
                 let error = StorageError.writeFailed(primaryURL, underlyingError: "Simulated primary write failure")
                 self.lastError = error
                 throw error
@@ -621,12 +666,14 @@ public final class FocusStorageService {
                 _ = try decodeData(from: primaryURL)
             } catch {
                 print("[FocusStorageService] Error: Failed to write or validate primary file on fresh install: \(error)")
+                self.hasInterruptedInitialSave = true
                 let storageErr = StorageError.writeFailed(primaryURL, underlyingError: error.localizedDescription)
                 self.lastError = storageErr
                 throw storageErr
             }
 
             // Step 4: Report success only after both required files exist and validate
+            self.hasInterruptedInitialSave = false
             return
         }
 

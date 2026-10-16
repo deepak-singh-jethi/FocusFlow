@@ -79,11 +79,10 @@ public struct MenuBarCompanionView: View {
 
             if viewModel.isPersistenceBlocked {
                 storageErrorBanner
+            } else if viewModel.isSaveFailed {
+                saveFailureBanner
             } else if viewModel.didRecoverFromBackup && viewModel.showRecoveryNotice {
                 recoverySuccessBanner
-            }
-            if viewModel.isSaveFailed {
-                saveFailureBanner
             }
 
             Group {

@@ -24,8 +24,19 @@ public class TimerViewModel: ObservableObject {
             }
         }
     }
+    private var isRevertingBlockedSetting = false
+
     @Published public var totalSessions: Int = 4 {
-        didSet { persistData() }
+        didSet {
+            guard !isRevertingBlockedSetting else { return }
+            if isPersistenceBlocked {
+                isRevertingBlockedSetting = true
+                totalSessions = oldValue
+                isRevertingBlockedSetting = false
+                return
+            }
+            persistData()
+        }
     }
     @Published public var preciseProgress: Double = 1.0
     @Published public var isTimerRunning: Bool = false
@@ -84,7 +95,16 @@ public class TimerViewModel: ObservableObject {
     @Published public var completedSessions: Int = 0
     @Published public var notes: [String] = []
     @Published public var dailyGoalHours: Int = 4 {
-        didSet { persistData() }
+        didSet {
+            guard !isRevertingBlockedSetting else { return }
+            if isPersistenceBlocked {
+                isRevertingBlockedSetting = true
+                dailyGoalHours = oldValue
+                isRevertingBlockedSetting = false
+                return
+            }
+            persistData()
+        }
     }
 
     // Alerts & Modals
@@ -94,7 +114,16 @@ public class TimerViewModel: ObservableObject {
     @Published public var noteDraft: String = ""
     public var pendingPreset: (name: String, minutes: Int)? = nil
     @Published public var autoStartNextSession: Bool = false {
-        didSet { persistData() }
+        didSet {
+            guard !isRevertingBlockedSetting else { return }
+            if isPersistenceBlocked {
+                isRevertingBlockedSetting = true
+                autoStartNextSession = oldValue
+                isRevertingBlockedSetting = false
+                return
+            }
+            persistData()
+        }
     }
 
     // MARK: - Paused Timer Session State (Step 1 App Restart Recovery)
@@ -373,7 +402,8 @@ public class TimerViewModel: ObservableObject {
         // Throttle disk writes to avoid repeated writes during UI animations or high frequency changes
         if !force && now.timeIntervalSince(lastPersistTime) < 1.0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                self?.persistData(force: true)
+                guard let self = self, !self.isPersistenceBlocked else { return }
+                self.persistData(force: true)
             }
             return
         }
@@ -413,6 +443,32 @@ public class TimerViewModel: ObservableObject {
                 self.lastSaveError = nil
             }
         } catch {
+            let isUnrecoverable: Bool
+            if storage.isPersistenceBlocked {
+                isUnrecoverable = true
+            } else if let storageErr = error as? StorageError {
+                switch storageErr {
+                case .persistenceBlocked, .corruptedPrimary, .corruptedPrimaryAndBackup, .corruptedBackupMissingPrimary, .diagnosticPreservationFailed:
+                    isUnrecoverable = true
+                case .backupFailed, .writeFailed:
+                    isUnrecoverable = false
+                }
+            } else {
+                isUnrecoverable = false
+            }
+
+            if isUnrecoverable {
+                self.isPersistenceBlocked = true
+                let reason = (error as? StorageError)?.description ?? error.localizedDescription
+                self.storageErrorMessage = "Data Protection Alert: Saved data could not be persisted because the save file is corrupted or unreadable. Automatic saving is blocked to protect your existing file.\n(\(reason))"
+                self.isSaveFailed = false
+                self.saveErrorMessage = nil
+                self.lastSaveError = nil
+                suspendActiveTimersForBlockedStorage()
+                print("[TimerViewModel] Storage blocked persistence due to unrecoverable state: \(error)")
+                return
+            }
+
             self.isSaveFailed = true
             if let storageErr = error as? StorageError {
                 self.lastSaveError = storageErr
@@ -633,6 +689,17 @@ public class TimerViewModel: ObservableObject {
     }
 
     // MARK: Master Engine
+    private func suspendActiveTimersForBlockedStorage() {
+        isTimerRunning = false
+        isStopwatchRunning = false
+        targetEndDate = nil
+        fractionalRemaining = nil
+        stopwatchStartDate = nil
+        sessionSegmentStartDate = nil
+        timerSubscription?.cancel()
+        timerSubscription = nil
+    }
+
     private func updateMasterEngine() {
         if isTimerRunning || isStopwatchRunning {
             if timerSubscription == nil {
@@ -650,6 +717,10 @@ public class TimerViewModel: ObservableObject {
     }
 
     private func tick() {
+        guard !isPersistenceBlocked else {
+            suspendActiveTimersForBlockedStorage()
+            return
+        }
         let now = Date()
 
         // 1. Tick Focus Timer smoothly if running
