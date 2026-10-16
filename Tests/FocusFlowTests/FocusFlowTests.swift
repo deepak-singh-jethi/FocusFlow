@@ -1266,4 +1266,49 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(vm1.sessionRecords[0].durationSeconds, 300, "Duration must not be multiplied across multiple calls")
         XCTAssertEqual(vm1.todayFocusedSeconds, 300)
     }
+
+    // MARK: - Final Stopwatch Hour Formatting Fix Tests
+    @MainActor
+    func testStopwatchElapsedDisplayHourFormattingBoundaries() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Table required by specification:
+        // 9 seconds -> "00:09"
+        vm.stopwatchTime = 9
+        XCTAssertEqual(vm.stopwatchTimeString, "00:09")
+
+        // 25 minutes -> "25:00"
+        vm.stopwatchTime = 25 * 60
+        XCTAssertEqual(vm.stopwatchTimeString, "25:00")
+
+        // 59 minutes 59 seconds -> "59:59"
+        vm.stopwatchTime = 59 * 60 + 59
+        XCTAssertEqual(vm.stopwatchTimeString, "59:59")
+
+        // 60 minutes -> "01:00:00"
+        vm.stopwatchTime = 60 * 60
+        XCTAssertEqual(vm.stopwatchTimeString, "01:00:00")
+
+        // 75 minutes -> "01:15:00"
+        vm.stopwatchTime = 75 * 60
+        XCTAssertEqual(vm.stopwatchTimeString, "01:15:00")
+
+        // 2 hours -> "02:00:00"
+        vm.stopwatchTime = 2 * 3600
+        XCTAssertEqual(vm.stopwatchTimeString, "02:00:00")
+
+        // 10 hours 15 minutes -> "10:15:00"
+        vm.stopwatchTime = 10 * 3600 + 15 * 60
+        XCTAssertEqual(vm.stopwatchTimeString, "10:15:00")
+
+        // Baseline 0 seconds
+        vm.stopwatchTime = 0
+        XCTAssertEqual(vm.stopwatchTimeString, "00:00")
+
+        // Verify StopwatchLap.formatDuration preserves hundredths of a second
+        XCTAssertEqual(StopwatchLap.formatDuration(8.2), "08.20")
+        XCTAssertEqual(StopwatchLap.formatDuration(75.5), "01:15.50")
+        XCTAssertEqual(StopwatchLap.formatDuration(3600), "01:00:00.00")
+    }
 }

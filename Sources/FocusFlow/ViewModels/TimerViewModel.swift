@@ -1026,9 +1026,15 @@ public class TimerViewModel: ObservableObject {
     }
 
     public var stopwatchTimeString: String {
-        let m = stopwatchTime / 60
-        let s = stopwatchTime % 60
-        return String(format: "%02d:%02d", m, s)
+        let total = max(0, stopwatchTime)
+        let hours = total / 3600
+        let minutes = (total / 60) % 60
+        let seconds = total % 60
+        if hours > 0 {
+            return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
+        } else {
+            return String(format: "%02d:%02d", minutes, seconds)
+        }
     }
 
     public var formattedCustomDuration: String {
