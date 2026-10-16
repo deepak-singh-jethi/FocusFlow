@@ -82,18 +82,24 @@ public struct MenuBarCompanionView: View {
             } else if viewModel.didRecoverFromBackup && viewModel.showRecoveryNotice {
                 recoverySuccessBanner
             }
-
-            modeSegmentedControl
-
-            if selectedMode == .timer {
-                interactiveTimerCard
-                timerActionButtonsRow
-                quickPresetRow
-            } else {
-                stopwatchDisplayCard
-                stopwatchActionButtonsRow
-                stopwatchLapsSection
+            if viewModel.isSaveFailed {
+                saveFailureBanner
             }
+
+            Group {
+                modeSegmentedControl
+
+                if selectedMode == .timer {
+                    interactiveTimerCard
+                    timerActionButtonsRow
+                    quickPresetRow
+                } else {
+                    stopwatchDisplayCard
+                    stopwatchActionButtonsRow
+                    stopwatchLapsSection
+                }
+            }
+            .disabled(viewModel.isPersistenceBlocked)
 
             musicControlSection
 
@@ -950,5 +956,33 @@ public struct MenuBarCompanionView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(Color.green.opacity(0.22), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    @ViewBuilder
+    private var saveFailureBanner: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(.orange)
+            Text("Changes Not Saved")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.white)
+            Spacer()
+            Button {
+                viewModel.retrySave()
+            } label: {
+                Text("Retry")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.orange.opacity(0.6), in: RoundedRectangle(cornerRadius: 4))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.orange.opacity(0.25), in: RoundedRectangle(cornerRadius: 6))
+        .help(viewModel.saveErrorMessage ?? "Recent changes may not have been saved due to a storage error.")
     }
 }

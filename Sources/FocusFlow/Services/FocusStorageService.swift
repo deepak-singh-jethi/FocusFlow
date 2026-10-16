@@ -293,7 +293,7 @@ public enum StorageLoadResult: Equatable {
     case unrecoverable(StorageError)
 }
 
-public enum StorageError: Error, Equatable, CustomStringConvertible {
+public enum StorageError: LocalizedError, Equatable, CustomStringConvertible {
     case corruptedPrimary(URL, underlyingError: String)
     case corruptedPrimaryAndBackup(primaryURL: URL, backupURL: URL, primaryError: String, backupError: String)
     case corruptedBackupMissingPrimary(URL, underlyingError: String)
@@ -301,6 +301,10 @@ public enum StorageError: Error, Equatable, CustomStringConvertible {
     case writeFailed(URL, underlyingError: String)
     case diagnosticPreservationFailed(URL, underlyingError: String)
     case persistenceBlocked(reason: String)
+
+    public var errorDescription: String? {
+        description
+    }
 
     public var description: String {
         switch self {
@@ -558,12 +562,7 @@ public final class FocusStorageService {
             throw error
         }
 
-        if simulateWriteFailure {
-            let error = StorageError.writeFailed(effectiveStorageURL, underlyingError: "Simulated primary write failure")
-            self.lastError = error
-            throw error
-        }
-
+        // 1. Encode and validate payload
         let encoder = JSONEncoder()
         encoder.outputFormatting = .prettyPrinted
         encoder.dateEncodingStrategy = .iso8601
@@ -579,31 +578,19 @@ public final class FocusStorageService {
         let primaryURL = effectiveStorageURL
         let backupURL = self.backupURL
         let primaryExists = fileManager.fileExists(atPath: primaryURL.path)
+        let backupExists = fileManager.fileExists(atPath: backupURL.path)
 
-        if primaryExists {
-            // Check if existing primary is valid before touching backup
-            let primaryIsValid: Bool
-            var existingPrimaryBytes = Data()
-            do {
-                let bytes = try Data(contentsOf: primaryURL)
-                let decoder = JSONDecoder()
-                decoder.dateDecodingStrategy = .iso8601
-                _ = try decoder.decode(FocusAppData.self, from: bytes)
-                existingPrimaryBytes = bytes
-                primaryIsValid = true
-            } catch {
-                primaryIsValid = false
-            }
+        // Case C: Primary is missing but an existing backup is present
+        // Requirement: "Handle the case where the primary is missing but an existing backup is present: do not treat it as a fresh installation or overwrite the backup. Use the existing recovery procedure or fail safely."
+        if !primaryExists && backupExists {
+            let error = StorageError.persistenceBlocked(reason: "Primary file is missing while an existing backup is present. Overwrite blocked to protect existing backup.")
+            self.lastError = error
+            throw error
+        }
 
-            if !primaryIsValid {
-                // If primary file is corrupted, NEVER overwrite backup with corrupted data or overwrite primary!
-                self.isPersistenceBlocked = true
-                let error = StorageError.persistenceBlocked(reason: "Primary save file is corrupted. Normal saves are blocked to protect data.")
-                self.lastError = error
-                throw error
-            }
-
-            // Primary is valid: back up existing valid primary before writing new data
+        // Case A: Fresh installation (neither primary nor backup exists)
+        if !primaryExists && !backupExists {
+            // Step 2: Atomically write and validate initial backup FIRST
             if simulateBackupFailure {
                 let error = StorageError.backupFailed(backupURL, underlyingError: "Simulated backup failure")
                 self.lastError = error
@@ -611,40 +598,93 @@ public final class FocusStorageService {
             }
 
             do {
-                try existingPrimaryBytes.write(to: backupURL, options: [.atomic])
+                try encodedData.write(to: backupURL, options: [.atomic])
+                _ = try decodeData(from: backupURL)
             } catch {
-                print("[FocusStorageService] Error: Failed to create or update backup at \(backupURL.path): \(error)")
+                print("[FocusStorageService] Error: Failed to write or validate initial backup: \(error)")
                 let storageErr = StorageError.backupFailed(backupURL, underlyingError: error.localizedDescription)
                 self.lastError = storageErr
                 throw storageErr
             }
+
+            // Step 3: Only after backup exists and is valid, atomically write primary file
+            if simulateWriteFailure {
+                // "If primary creation fails after the backup succeeds, retain the valid backup so startup recovery can restore it."
+                // "Do not delete the valid backup as part of error cleanup."
+                let error = StorageError.writeFailed(primaryURL, underlyingError: "Simulated primary write failure")
+                self.lastError = error
+                throw error
+            }
+
+            do {
+                try encodedData.write(to: primaryURL, options: [.atomic])
+                _ = try decodeData(from: primaryURL)
+            } catch {
+                print("[FocusStorageService] Error: Failed to write or validate primary file on fresh install: \(error)")
+                let storageErr = StorageError.writeFailed(primaryURL, underlyingError: error.localizedDescription)
+                self.lastError = storageErr
+                throw storageErr
+            }
+
+            // Step 4: Report success only after both required files exist and validate
+            return
+        }
+
+        // Case B: Subsequent save (primaryExists == true)
+        // Check if existing primary is valid before touching backup
+        let primaryIsValid: Bool
+        var existingPrimaryBytes = Data()
+        do {
+            let bytes = try Data(contentsOf: primaryURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            _ = try decoder.decode(FocusAppData.self, from: bytes)
+            existingPrimaryBytes = bytes
+            primaryIsValid = true
+        } catch {
+            primaryIsValid = false
+        }
+
+        if !primaryIsValid {
+            // Existing primary is corrupted! NEVER overwrite backup with corrupted data or overwrite primary!
+            self.isPersistenceBlocked = true
+            let error = StorageError.persistenceBlocked(reason: "Primary save file is corrupted. Normal saves are blocked to protect data.")
+            self.lastError = error
+            throw error
+        }
+
+        // Primary is valid: back up existing valid primary before writing new data
+        if simulateBackupFailure {
+            let error = StorageError.backupFailed(backupURL, underlyingError: "Simulated backup failure")
+            self.lastError = error
+            throw error
+        }
+
+        do {
+            try existingPrimaryBytes.write(to: backupURL, options: [.atomic])
+            _ = try decodeData(from: backupURL)
+        } catch {
+            print("[FocusStorageService] Error: Failed to create or update backup at \(backupURL.path): \(error)")
+            let storageErr = StorageError.backupFailed(backupURL, underlyingError: error.localizedDescription)
+            self.lastError = storageErr
+            throw storageErr
         }
 
         // Now write new encoded data to primary
+        if simulateWriteFailure {
+            let error = StorageError.writeFailed(primaryURL, underlyingError: "Simulated primary write failure")
+            self.lastError = error
+            throw error
+        }
+
         do {
             try encodedData.write(to: primaryURL, options: [.atomic])
+            _ = try decodeData(from: primaryURL)
         } catch {
             print("[FocusStorageService] Error: Failed to write primary storage data to \(primaryURL.path): \(error)")
             let storageErr = StorageError.writeFailed(primaryURL, underlyingError: error.localizedDescription)
             self.lastError = storageErr
             throw storageErr
-        }
-
-        // If primary did not exist previously (fresh install first save), also write initial backup
-        if !primaryExists {
-            if simulateBackupFailure {
-                let error = StorageError.backupFailed(backupURL, underlyingError: "Simulated backup failure")
-                self.lastError = error
-                throw error
-            }
-            do {
-                try encodedData.write(to: backupURL, options: [.atomic])
-            } catch {
-                print("[FocusStorageService] Error: Failed to write initial backup at \(backupURL.path): \(error)")
-                let storageErr = StorageError.backupFailed(backupURL, underlyingError: error.localizedDescription)
-                self.lastError = storageErr
-                throw storageErr
-            }
         }
     }
 }

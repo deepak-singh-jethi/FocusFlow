@@ -158,9 +158,17 @@ public class TimerViewModel: ObservableObject {
     @Published public private(set) var storageErrorMessage: String? = nil
     @Published public private(set) var recoveryNoticeMessage: String? = nil
     @Published public var showRecoveryNotice: Bool = false
+    @Published public private(set) var isSaveFailed: Bool = false
+    @Published public private(set) var saveErrorMessage: String? = nil
+    @Published public private(set) var lastSaveError: StorageError? = nil
 
     public func dismissRecoveryNotice() {
         showRecoveryNotice = false
+    }
+
+    public func retrySave() {
+        guard !isPersistenceBlocked else { return }
+        persistData(force: true)
     }
 
     // Active Timer Mode: "Pomodoro" or "Custom Timer"
@@ -178,6 +186,8 @@ public class TimerViewModel: ObservableObject {
     public func handleAppTermination() {
         guard !hasTerminated else { return }
         hasTerminated = true
+
+        guard !isPersistenceBlocked else { return }
 
         if isTimerRunning {
             stopTimer()
@@ -214,6 +224,9 @@ public class TimerViewModel: ObservableObject {
             self.storageErrorMessage = nil
             self.recoveryNoticeMessage = nil
             self.showRecoveryNotice = false
+            self.isSaveFailed = false
+            self.saveErrorMessage = nil
+            self.lastSaveError = nil
             // First run on a fresh machine (no storage file yet) -> Keep default initial tasks
             return
 
@@ -223,12 +236,18 @@ public class TimerViewModel: ObservableObject {
             self.storageErrorMessage = nil
             self.recoveryNoticeMessage = nil
             self.showRecoveryNotice = false
+            self.isSaveFailed = false
+            self.saveErrorMessage = nil
+            self.lastSaveError = nil
             applyLoadedData(saved)
 
         case .recovered(let saved, let backupURL, let diagURL):
             self.isPersistenceBlocked = false
             self.didRecoverFromBackup = true
             self.storageErrorMessage = nil
+            self.isSaveFailed = false
+            self.saveErrorMessage = nil
+            self.lastSaveError = nil
             if let diag = diagURL {
                 self.recoveryNoticeMessage = "Saved data recovered from backup (\(backupURL.lastPathComponent)). Diagnostic file: \(diag.lastPathComponent)."
             } else {
@@ -243,6 +262,9 @@ public class TimerViewModel: ObservableObject {
             self.storageErrorMessage = "Data Protection Alert: Saved data could not be loaded because the save file is corrupted or unreadable. Automatic saving is blocked to protect your existing file.\n(\(error.description))"
             self.recoveryNoticeMessage = nil
             self.showRecoveryNotice = false
+            self.isSaveFailed = false
+            self.saveErrorMessage = nil
+            self.lastSaveError = nil
             clearDataForStorageError()
         }
     }
@@ -385,7 +407,20 @@ public class TimerViewModel: ObservableObject {
         )
         do {
             try storage.save(payload)
+            if self.isSaveFailed {
+                self.isSaveFailed = false
+                self.saveErrorMessage = nil
+                self.lastSaveError = nil
+            }
         } catch {
+            self.isSaveFailed = true
+            if let storageErr = error as? StorageError {
+                self.lastSaveError = storageErr
+                self.saveErrorMessage = "Recent changes may not have been saved. (\(storageErr.description))"
+            } else {
+                self.lastSaveError = nil
+                self.saveErrorMessage = "Recent changes may not have been saved. (\(error.localizedDescription))"
+            }
             print("[TimerViewModel] Failed to persist data: \(error)")
         }
     }
@@ -452,6 +487,7 @@ public class TimerViewModel: ObservableObject {
 
     // MARK: Mode Switching within Timer Sessions
     public func changeMode(to newMode: String) {
+        guard !isPersistenceBlocked else { return }
         if newMode == "Pomodoro" {
             switchToFocus(minutes: 25)
         } else if newMode == "Custom Timer" {
@@ -461,6 +497,7 @@ public class TimerViewModel: ObservableObject {
 
     // MARK: - Conflict-Aware Mode / Preset Requests
     public func requestModeOrPresetChange(name: String, minutes: Int, seconds: Int = 0, mode: String = "Pomodoro", isBreak: Bool = false) {
+        guard !isPersistenceBlocked else { return }
         let isSame = (activePreset == name && activeMode == mode && (mode != "Custom Timer" || totalTime == (minutes * 60 + seconds)))
         if isSame { return }
 
@@ -475,6 +512,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func applyPresetDirectly(name: String, minutes: Int, seconds: Int = 0, mode: String = "Pomodoro", isBreak: Bool = false) {
+        guard !isPersistenceBlocked else { return }
         if isTimerRunning { stopTimer() }
         fractionalRemaining = nil
         pausedSession = nil
@@ -498,6 +536,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func pauseAndSwitch() {
+        guard !isPersistenceBlocked else { return }
         endAndSwitch()
     }
 
@@ -507,6 +546,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func endAndSwitch(autoStart: Bool = true) {
+        guard !isPersistenceBlocked else { return }
         guard let pending = pendingTimerRequest else {
             showConflictModal = false
             return
@@ -535,6 +575,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func restorePreservedSession() {
+        guard !isPersistenceBlocked else { return }
         guard let preserved = preservedSession else { return }
 
         // If current timer is active, swap it into preservedSession so neither is lost!
@@ -585,6 +626,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func restorePreservedSessionIfNeeded() {
+        guard !isPersistenceBlocked else { return }
         if hasPreservedSession && !isTimerRunning {
             restorePreservedSession()
         }
@@ -659,6 +701,7 @@ public class TimerViewModel: ObservableObject {
 
     // MARK: Focus Timer Core Controls
     public func startTimer() {
+        guard !isPersistenceBlocked else { return }
         guard !isTimerRunning else { return }
         hasTerminated = false
         // Ensure only one countdown timer runs at a time
@@ -674,6 +717,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func stopTimer() {
+        guard !isPersistenceBlocked else { return }
         var capturedRemaining = timeRemaining
         var capturedProgress = preciseProgress
         let wasRunning = isTimerRunning
@@ -719,6 +763,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func toggleTimer() {
+        guard !isPersistenceBlocked else { return }
         if isTimerRunning {
             stopTimer()
         } else {
@@ -732,6 +777,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func resetFocusTimer() {
+        guard !isPersistenceBlocked else { return }
         recordActiveSessionSegment()
         stopTimer()
         fractionalRemaining = nil
@@ -742,11 +788,13 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func resetTimer() {
+        guard !isPersistenceBlocked else { return }
         resetFocusTimer()
     }
 
     // MARK: Stopwatch Core Controls (Priority 5)
     public func startStopwatch() {
+        guard !isPersistenceBlocked else { return }
         guard !isStopwatchRunning else { return }
         hasTerminated = false
         isStopwatchRunning = true
@@ -758,6 +806,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func stopStopwatch() {
+        guard !isPersistenceBlocked else { return }
         if isStopwatchRunning, let start = stopwatchStartDate {
             let elapsed = Date().timeIntervalSince(start)
             let newTime = max(Int(elapsed), 0)
@@ -778,6 +827,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func toggleStopwatch() {
+        guard !isPersistenceBlocked else { return }
         if isStopwatchRunning {
             stopStopwatch()
         } else {
@@ -786,6 +836,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func resetStopwatch() {
+        guard !isPersistenceBlocked else { return }
         stopStopwatch()
         stopwatchFractional = nil
         stopwatchTime = 0
@@ -852,6 +903,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func requestReset(isStopwatch: Bool = false) {
+        guard !isPersistenceBlocked else { return }
         if isStopwatch {
             if stopwatchTime > 0 {
                 showResetAlert = true
@@ -868,6 +920,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func recordLapOrNote(isStopwatch: Bool = false) {
+        guard !isPersistenceBlocked else { return }
         if isStopwatch {
             recordLap()
         } else {
@@ -887,6 +940,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func selectTask(at index: Int) {
+        guard !isPersistenceBlocked else { return }
         guard tasks.indices.contains(index), !tasks[index].isCompleted else { return }
         activeTaskIndex = index
         if pausedSession != nil {
@@ -950,6 +1004,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func requestPresetChange(name: String, minutes: Int) {
+        guard !isPersistenceBlocked else { return }
         guard minutes > 0 else { return }
         if name == "Focus" {
             switchToFocus(minutes: minutes)
@@ -968,12 +1023,14 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func setCustomDuration(minutes: Int, seconds: Int) {
+        guard !isPersistenceBlocked else { return }
         let safeM = max(0, min(minutes, 360))
         let safeS = max(0, min(seconds, 59))
         requestModeOrPresetChange(name: "Custom", minutes: safeM, seconds: safeS, mode: "Custom Timer", isBreak: false)
     }
 
     public func switchToBreak(minutes: Int = 5) {
+        guard !isPersistenceBlocked else { return }
         let breakName = (minutes == 15) ? "Long Break" : "Short Break"
         // If we are already in this exact Break preset, do nothing
         if isBreakPreset && activeMode == "Pomodoro" && activePreset == breakName { return }
@@ -991,6 +1048,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func switchToFocus(minutes: Int = 25) {
+        guard !isPersistenceBlocked else { return }
         // If we are already in Focus with this duration, do nothing
         if isFocusPreset && activeMode == "Pomodoro" && (activePreset == "Focus" && totalTime == minutes * 60) { return }
 
@@ -1007,6 +1065,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func applyPendingPreset() {
+        guard !isPersistenceBlocked else { return }
         guard let pending = pendingPreset else { return }
         requestPresetChange(name: pending.name, minutes: pending.minutes)
         pendingPreset = nil
@@ -1017,11 +1076,13 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func applyPreset(name: String, minutes: Int) {
+        guard !isPersistenceBlocked else { return }
         let isBreak = (name == "Short Break" || name == "Long Break" || name == "Break")
         applyPresetDirectly(name: name, minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: isBreak)
     }
 
     public func skipSession() {
+        guard !isPersistenceBlocked else { return }
         recordActiveSessionSegment()
         stopTimer()
         fractionalRemaining = nil
@@ -1161,6 +1222,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func adjustCustomDuration(by minutes: Int) {
+        guard !isPersistenceBlocked else { return }
         guard !isTimerRunning else { return }
         let currentTotal = totalTime
         let newTotal = min(max(currentTotal + minutes * 60, 5), 360 * 60)

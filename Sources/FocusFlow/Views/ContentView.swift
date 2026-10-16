@@ -29,6 +29,9 @@ public struct ContentView: View {
                     } else if viewModel.didRecoverFromBackup && viewModel.showRecoveryNotice {
                         recoverySuccessBanner
                     }
+                    if viewModel.isSaveFailed {
+                        saveFailureBanner
+                    }
 
                     ZStack {
                         if sidebarSelection == .focusTimer {
@@ -208,6 +211,45 @@ public struct ContentView: View {
             Rectangle()
                 .frame(height: 1)
                 .foregroundColor(Color.green.opacity(0.4)),
+            alignment: .bottom
+        )
+    }
+
+    @ViewBuilder
+    private var saveFailureBanner: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Changes Not Saved")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(.white)
+                Text(viewModel.saveErrorMessage ?? "Recent changes may not have been saved due to a storage error.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.85))
+            }
+            Spacer()
+            Button {
+                viewModel.retrySave()
+            } label: {
+                Text("Retry")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Color.orange.opacity(0.6))
+                    .cornerRadius(6)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color.orange.opacity(0.25))
+        .overlay(
+            Rectangle()
+                .frame(height: 1)
+                .foregroundColor(Color.orange.opacity(0.4)),
             alignment: .bottom
         )
     }
