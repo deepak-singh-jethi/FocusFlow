@@ -76,6 +76,13 @@ public struct MenuBarCompanionView: View {
     public var body: some View {
         VStack(spacing: 12) {
             headerRow
+
+            if viewModel.isPersistenceBlocked {
+                storageErrorBanner
+            } else if viewModel.didRecoverFromBackup && viewModel.showRecoveryNotice {
+                recoverySuccessBanner
+            }
+
             modeSegmentedControl
 
             if selectedMode == .timer {
@@ -899,5 +906,49 @@ public struct MenuBarCompanionView: View {
     // MARK: - Window Management Helper
     private func openAndFocusMainWindow() {
         FocusFlowAppDelegate.shared?.showMainWindow()
+    }
+
+    // MARK: - Storage Safety Banners
+    @ViewBuilder
+    private var storageErrorBanner: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(.yellow)
+            Text("Storage Error — Saving Blocked")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.white)
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.red.opacity(0.28), in: RoundedRectangle(cornerRadius: 6))
+        .help("Saved data could not be loaded. Saving is blocked to protect your existing file.")
+    }
+
+    @ViewBuilder
+    private var recoverySuccessBanner: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "checkmark.shield.fill")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(.green)
+            Text("Recovered From Backup")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.white)
+            Spacer()
+            Button {
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                    viewModel.dismissRecoveryNotice()
+                }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.white.opacity(0.6))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.green.opacity(0.22), in: RoundedRectangle(cornerRadius: 6))
     }
 }

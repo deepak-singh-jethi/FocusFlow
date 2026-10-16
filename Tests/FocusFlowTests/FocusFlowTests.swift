@@ -14,6 +14,15 @@ final class FocusFlowTests: XCTestCase {
 
     private func cleanup(url: URL) {
         try? FileManager.default.removeItem(at: url)
+        let backup = url.appendingPathExtension("bak")
+        try? FileManager.default.removeItem(at: backup)
+        let parentDir = url.deletingLastPathComponent()
+        let baseName = url.deletingPathExtension().lastPathComponent
+        if let contents = try? FileManager.default.contentsOfDirectory(at: parentDir, includingPropertiesForKeys: nil) {
+            for item in contents where item.lastPathComponent.contains(baseName) {
+                try? FileManager.default.removeItem(at: item)
+            }
+        }
     }
 
     // MARK: - Task Model Tests
@@ -1579,5 +1588,474 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(vm2.stopwatchTime, 4530)
         XCTAssertEqual(vm2.stopwatchFractional, 4530.25)
         XCTAssertEqual(vm2.stopwatchTimeString, "01:15:30", "Stopwatch display must show HH:mm:ss when recovered beyond 1 hour")
+    }
+
+    // MARK: - Priority 1: Data Safety & Corruption Protection Tests
+
+    // 1. Fresh installation with neither primary nor backup — normal initialization and saving.
+    @MainActor
+    func testFreshInstallationWithoutFilesInitializesDefaultsAndSaves() throws {
+        let testDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: testDir) }
+
+        let primaryURL = testDir.appendingPathComponent("focusflow_data.json")
+        let backupURL = primaryURL.appendingPathExtension("bak")
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: primaryURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backupURL.path))
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let loadResult = storage.loadDetailed()
+        XCTAssertEqual(loadResult, .freshInstall)
+
+        let vm = TimerViewModel(storage: storage)
+        XCTAssertFalse(vm.isPersistenceBlocked)
+        XCTAssertFalse(vm.didRecoverFromBackup)
+        XCTAssertEqual(vm.tasks.count, 4) // Default 4 tasks
+        XCTAssertNil(vm.storageErrorMessage)
+
+        // Save and verify both primary and backup files are created with valid decodable data
+        vm.persistData(force: true)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: primaryURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backupURL.path))
+
+        let primaryData = try storage.decodeData(from: primaryURL)
+        let backupData = try storage.decodeData(from: backupURL)
+        XCTAssertEqual(primaryData.tasks.count, 4)
+        XCTAssertEqual(backupData.tasks.count, 4)
+    }
+
+    // 2. Existing valid JSON — normal loading with all data unchanged.
+    @MainActor
+    func testExistingValidJSONLoadsNormallyWithAllDataUnchanged() throws {
+        let testDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: testDir) }
+
+        let primaryURL = testDir.appendingPathComponent("focusflow_data.json")
+
+        let originalTask = FocusTask(title: "Specific Valid Task", estimatedMinutes: 50, timeSpentSeconds: 1200)
+        let originalData = FocusAppData(
+            tasks: [originalTask],
+            focusedSeconds: 1800,
+            completedSessions: 4,
+            notes: ["Important architecture note"],
+            dailyGoalHours: 6,
+            totalSessions: 8,
+            autoStartNextSession: true,
+            activePreset: "Focus"
+        )
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(originalData)
+        try data.write(to: primaryURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let result = storage.loadDetailed()
+        guard case .success(let loaded) = result else {
+            XCTFail("Expected .success but got \(result)")
+            return
+        }
+        XCTAssertEqual(loaded.tasks.count, 1)
+        XCTAssertEqual(loaded.tasks.first?.title, "Specific Valid Task")
+        XCTAssertEqual(loaded.completedSessions, 4)
+
+        let vm = TimerViewModel(storage: storage)
+        XCTAssertFalse(vm.isPersistenceBlocked)
+        XCTAssertFalse(vm.didRecoverFromBackup)
+        XCTAssertEqual(vm.tasks.count, 1)
+        XCTAssertEqual(vm.tasks.first?.title, "Specific Valid Task")
+        XCTAssertEqual(vm.completedSessions, 4)
+        XCTAssertEqual(vm.notes, ["Important architecture note"])
+    }
+
+    // 3. Backup creation after a successful save — backup is valid and decodable.
+    @MainActor
+    func testBackupCreationAfterSuccessfulSave() throws {
+        let testDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: testDir) }
+
+        let primaryURL = testDir.appendingPathComponent("focusflow_data.json")
+        let backupURL = primaryURL.appendingPathExtension("bak")
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+        vm.addTask(title: "Task for backup verification", expectedMinutes: 20)
+        vm.persistData(force: true)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backupURL.path))
+        let backupData = try storage.decodeData(from: backupURL)
+        XCTAssertTrue(backupData.tasks.contains { $0.title == "Task for backup verification" })
+    }
+
+    // 4. Corrupted primary with valid backup — data recovers successfully, including tasks, statistics, paused timer, stopwatch elapsed time and laps.
+    @MainActor
+    func testCorruptedPrimaryWithValidBackupRecoversSuccessfully() throws {
+        let testDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: testDir) }
+
+        let primaryURL = testDir.appendingPathComponent("focusflow_data.json")
+        let backupURL = primaryURL.appendingPathExtension("bak")
+
+        // Corrupted primary bytes
+        let corruptedBytes = Data("{\"tasks\": [CORRUPTED_JSON_MALFORMED...".utf8)
+        try corruptedBytes.write(to: primaryURL)
+
+        // Valid backup with tasks, statistics, paused timer, stopwatch elapsed time and laps
+        let task = FocusTask(title: "Backed Up Task", estimatedMinutes: 35, timeSpentSeconds: 600)
+        let sessionRec = FocusSessionRecord(startTime: Date().addingTimeInterval(-1800), endTime: Date(), durationSeconds: 1800, mode: "Focus")
+        let pausedTimer = PausedTimerSession(activePreset: "Focus", activeMode: "Pomodoro", totalTime: 1500, timeRemaining: 750, preciseProgress: 0.5)
+        let lap1 = StopwatchLap(lapNumber: 1, lapDuration: 45.0, totalTime: 45.0)
+        let lap2 = StopwatchLap(lapNumber: 2, lapDuration: 30.0, totalTime: 75.0)
+
+        let backupPayload = FocusAppData(
+            tasks: [task],
+            focusedSeconds: 1800,
+            completedSessions: 3,
+            notes: ["Backup note"],
+            dailyGoalHours: 5,
+            totalSessions: 6,
+            autoStartNextSession: false,
+            activePreset: "Focus",
+            sessionRecords: [sessionRec],
+            laps: [lap1, lap2],
+            pausedSession: pausedTimer,
+            stopwatchElapsedSeconds: 75.0
+        )
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let backupData = try encoder.encode(backupPayload)
+        try backupData.write(to: backupURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+
+        XCTAssertTrue(vm.didRecoverFromBackup)
+        XCTAssertFalse(vm.isPersistenceBlocked)
+        XCTAssertNotNil(vm.recoveryNoticeMessage)
+
+        // Verify all restored state
+        XCTAssertEqual(vm.tasks.count, 1)
+        XCTAssertEqual(vm.tasks.first?.title, "Backed Up Task")
+        XCTAssertEqual(vm.completedSessions, 3)
+        XCTAssertEqual(vm.notes, ["Backup note"])
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.laps.count, 2)
+        XCTAssertEqual(vm.stopwatchTime, 75)
+        XCTAssertEqual(vm.stopwatchFractional, 75.0)
+        XCTAssertNotNil(vm.pausedSession)
+        XCTAssertEqual(vm.timeRemaining, 750)
+
+        // Verify diagnostic file was created and contains the original corrupted bytes byte-for-byte
+        let contents = try FileManager.default.contentsOfDirectory(at: testDir, includingPropertiesForKeys: nil)
+        let diagFiles = contents.filter { $0.lastPathComponent.contains("corrupted") }
+        XCTAssertEqual(diagFiles.count, 1)
+        if let diag = diagFiles.first {
+            let diagBytes = try Data(contentsOf: diag)
+            XCTAssertEqual(diagBytes, corruptedBytes)
+        }
+
+        // Verify primaryURL was restored with valid data
+        let restoredPrimary = try storage.decodeData(from: primaryURL)
+        XCTAssertEqual(restoredPrimary.tasks.first?.title, "Backed Up Task")
+
+        // Verify backupURL still exists
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backupURL.path))
+    }
+
+    // 5. Corrupted primary with no backup — no overwrite, no data loss and persistence blocked.
+    @MainActor
+    func testCorruptedPrimaryWithNoBackupBlocksPersistenceAndPreservesBytes() throws {
+        let testDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: testDir) }
+
+        let primaryURL = testDir.appendingPathComponent("focusflow_data.json")
+        let backupURL = primaryURL.appendingPathExtension("bak")
+
+        let corruptedBytes = Data("<<<MALFORMED PRIMARY DATA>>>".utf8)
+        try corruptedBytes.write(to: primaryURL)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backupURL.path))
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+
+        XCTAssertTrue(vm.isPersistenceBlocked)
+        XCTAssertFalse(vm.didRecoverFromBackup)
+        XCTAssertNotNil(vm.storageErrorMessage)
+        // Must NOT replace existing data with default tasks
+        XCTAssertTrue(vm.tasks.isEmpty)
+
+        // Attempt to persist
+        vm.persistData(force: true)
+
+        // Corrupted file must remain 100% byte-for-byte identical
+        let afterBytes = try Data(contentsOf: primaryURL)
+        XCTAssertEqual(afterBytes, corruptedBytes)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backupURL.path))
+    }
+
+    // 6. Corrupted primary and corrupted backup — both original files preserved and persistence blocked.
+    @MainActor
+    func testCorruptedPrimaryAndCorruptedBackupPreservesBothAndBlocksPersistence() throws {
+        let testDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: testDir) }
+
+        let primaryURL = testDir.appendingPathComponent("focusflow_data.json")
+        let backupURL = primaryURL.appendingPathExtension("bak")
+
+        let primaryCorrupted = Data("<<<CORRUPTED PRIMARY>>>".utf8)
+        let backupCorrupted = Data("<<<CORRUPTED BACKUP>>>".utf8)
+        try primaryCorrupted.write(to: primaryURL)
+        try backupCorrupted.write(to: backupURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+
+        XCTAssertTrue(vm.isPersistenceBlocked)
+        XCTAssertFalse(vm.didRecoverFromBackup)
+        XCTAssertNotNil(vm.storageErrorMessage)
+        XCTAssertTrue(vm.tasks.isEmpty)
+
+        // Attempt to persist
+        vm.persistData(force: true)
+
+        // Both files must be preserved byte-for-byte
+        XCTAssertEqual(try Data(contentsOf: primaryURL), primaryCorrupted)
+        XCTAssertEqual(try Data(contentsOf: backupURL), backupCorrupted)
+    }
+
+    // 7. Primary missing but valid backup present — recovery instead of fresh-install initialization.
+    @MainActor
+    func testPrimaryMissingWithValidBackupRecoversData() throws {
+        let testDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: testDir) }
+
+        let primaryURL = testDir.appendingPathComponent("focusflow_data.json")
+        let backupURL = primaryURL.appendingPathExtension("bak")
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: primaryURL.path))
+
+        let task = FocusTask(title: "Task in Orphan Backup", estimatedMinutes: 40)
+        let backupPayload = FocusAppData(tasks: [task], focusedSeconds: 900, completedSessions: 2)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(backupPayload)
+        try data.write(to: backupURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+
+        XCTAssertTrue(vm.didRecoverFromBackup)
+        XCTAssertFalse(vm.isPersistenceBlocked)
+        XCTAssertEqual(vm.tasks.count, 1)
+        XCTAssertEqual(vm.tasks.first?.title, "Task in Orphan Backup")
+
+        // Primary should now be restored
+        XCTAssertTrue(FileManager.default.fileExists(atPath: primaryURL.path))
+        let restored = try storage.decodeData(from: primaryURL)
+        XCTAssertEqual(restored.tasks.first?.title, "Task in Orphan Backup")
+    }
+
+    // 8. Intentionally empty tasks array — valid and preserved.
+    @MainActor
+    func testIntentionallyEmptyTasksArrayIsValidAndPreserved() throws {
+        let testDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: testDir) }
+
+        let primaryURL = testDir.appendingPathComponent("focusflow_data.json")
+
+        let emptyTasksPayload = FocusAppData(tasks: [], focusedSeconds: 600, completedSessions: 1)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(emptyTasksPayload).write(to: primaryURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+
+        XCTAssertFalse(vm.isPersistenceBlocked)
+        XCTAssertFalse(vm.didRecoverFromBackup)
+        XCTAssertTrue(vm.tasks.isEmpty)
+        XCTAssertEqual(vm.completedSessions, 1)
+    }
+
+    // 9. Legacy JSON without newer optional fields — still loads correctly.
+    @MainActor
+    func testLegacyJSONWithoutNewerOptionalFieldsLoadsCorrectly() throws {
+        let testDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: testDir) }
+
+        let primaryURL = testDir.appendingPathComponent("focusflow_data.json")
+
+        let legacyJSON = """
+        {
+            "tasks": [{"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Minimal Task", "estimatedMinutes": 15, "timeSpentSeconds": 0, "isLocked": false, "isCompleted": false, "icon": "star.fill", "iconColorName": "orange"}],
+            "focusedSeconds": 300,
+            "completedSessions": 1
+        }
+        """
+        try legacyJSON.data(using: .utf8)?.write(to: primaryURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+
+        XCTAssertFalse(vm.isPersistenceBlocked)
+        XCTAssertEqual(vm.tasks.count, 1)
+        XCTAssertEqual(vm.tasks.first?.title, "Minimal Task")
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertEqual(vm.laps.count, 0)
+        XCTAssertNil(vm.pausedSession)
+        XCTAssertEqual(vm.stopwatchTime, 0)
+    }
+
+    // 10. Multiple consecutive saves — backup remains valid and never contains corrupted data.
+    @MainActor
+    func testMultipleConsecutiveSavesMaintainsValidBackup() throws {
+        let testDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: testDir) }
+
+        let primaryURL = testDir.appendingPathComponent("focusflow_data.json")
+        let backupURL = primaryURL.appendingPathExtension("bak")
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+
+        // Save 1
+        vm.tasks = [FocusTask(title: "Save 1 Task", estimatedMinutes: 10)]
+        vm.persistData(force: true)
+        let backup1 = try storage.decodeData(from: backupURL)
+        XCTAssertEqual(backup1.tasks.first?.title, "Save 1 Task")
+
+        // Save 2
+        vm.tasks = [FocusTask(title: "Save 2 Task", estimatedMinutes: 20)]
+        vm.persistData(force: true)
+        let primary2 = try storage.decodeData(from: primaryURL)
+        let backup2 = try storage.decodeData(from: backupURL)
+        XCTAssertEqual(primary2.tasks.first?.title, "Save 2 Task")
+        XCTAssertEqual(backup2.tasks.first?.title, "Save 1 Task")
+
+        // Save 3
+        vm.tasks = [FocusTask(title: "Save 3 Task", estimatedMinutes: 30)]
+        vm.persistData(force: true)
+        let primary3 = try storage.decodeData(from: primaryURL)
+        let backup3 = try storage.decodeData(from: backupURL)
+        XCTAssertEqual(primary3.tasks.first?.title, "Save 3 Task")
+        XCTAssertEqual(backup3.tasks.first?.title, "Save 2 Task")
+    }
+
+    // 11. Simulated backup/write failure — previously valid data is not destroyed.
+    @MainActor
+    func testSimulatedBackupAndWriteFailureDoesNotDestroyPreviouslyValidData() throws {
+        let testDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: testDir) }
+
+        let primaryURL = testDir.appendingPathComponent("focusflow_data.json")
+        let backupURL = primaryURL.appendingPathExtension("bak")
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let initialData = FocusAppData(tasks: [FocusTask(title: "Initial Valid Data", estimatedMinutes: 25)], focusedSeconds: 1500)
+        try storage.save(initialData)
+
+        let originalPrimaryBytes = try Data(contentsOf: primaryURL)
+        let originalBackupBytes = try Data(contentsOf: backupURL)
+
+        // 1. Simulate backup failure during subsequent save
+        storage.simulateBackupFailure = true
+        let modifiedData = FocusAppData(tasks: [FocusTask(title: "Unsafe Data", estimatedMinutes: 99)])
+        XCTAssertThrowsError(try storage.save(modifiedData)) { error in
+            guard case StorageError.backupFailed = error else {
+                XCTFail("Expected backupFailed but got \(error)")
+                return
+            }
+        }
+
+        // Verify original files are intact
+        XCTAssertEqual(try Data(contentsOf: primaryURL), originalPrimaryBytes)
+        XCTAssertEqual(try Data(contentsOf: backupURL), originalBackupBytes)
+
+        // 2. Simulate write failure during subsequent save
+        storage.simulateBackupFailure = false
+        storage.simulateWriteFailure = true
+        XCTAssertThrowsError(try storage.save(modifiedData)) { error in
+            guard case StorageError.writeFailed = error else {
+                XCTFail("Expected writeFailed but got \(error)")
+                return
+            }
+        }
+
+        // Verify previously valid data is still preserved
+        let recoveredData = try storage.decodeData(from: primaryURL)
+        XCTAssertEqual(recoveredData.tasks.first?.title, "Initial Valid Data")
+    }
+
+    // 12. An attempted forced save after unrecoverable load failure — must still be blocked.
+    @MainActor
+    func testAttemptedForcedSaveAfterUnrecoverableLoadFailureIsBlocked() throws {
+        let testDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: testDir) }
+
+        let primaryURL = testDir.appendingPathComponent("focusflow_data.json")
+
+        let corruptedBytes = Data("CORRUPTED_NON_RECOVERABLE_DATA_12345".utf8)
+        try corruptedBytes.write(to: primaryURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+        XCTAssertTrue(vm.isPersistenceBlocked)
+
+        // Attempt forced save on ViewModel
+        vm.persistData(force: true)
+        XCTAssertEqual(try Data(contentsOf: primaryURL), corruptedBytes)
+
+        // Attempt direct save on Storage
+        let dummyPayload = FocusAppData(tasks: [FocusTask(title: "Overwrite Attempt")])
+        XCTAssertThrowsError(try storage.save(dummyPayload)) { error in
+            guard case StorageError.persistenceBlocked = error else {
+                XCTFail("Expected persistenceBlocked but got \(error)")
+                return
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: primaryURL), corruptedBytes)
+    }
+
+    // 13. Prevent edits that would appear saved while persistence is blocked.
+    @MainActor
+    func testEditsAreBlockedWhilePersistenceIsBlocked() throws {
+        let testDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: testDir) }
+
+        let primaryURL = testDir.appendingPathComponent("focusflow_data.json")
+        try Data("malformed json bytes".utf8).write(to: primaryURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+        XCTAssertTrue(vm.isPersistenceBlocked)
+
+        // User attempts to add task
+        vm.addTask(title: "New Task That Should Not Be Added")
+        XCTAssertTrue(vm.tasks.isEmpty)
+
+        // User attempts to save a note
+        vm.noteDraft = "Draft note that should not be saved"
+        vm.saveNote()
+        XCTAssertTrue(vm.notes.isEmpty)
+
+        // User attempts to record a lap
+        vm.recordLap()
+        XCTAssertTrue(vm.laps.isEmpty)
     }
 }

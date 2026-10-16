@@ -23,84 +23,92 @@ public struct ContentView: View {
             HStack(spacing: 0) {
                 sidebar
 
-                ZStack {
-                    if sidebarSelection == .focusTimer {
-                        DashboardTimerView(
-                            viewModel: viewModel,
-                            gradient: accentGradient,
-                            clockStyle: $clockStyle,
-                            isFocusState: $isFocusState,
-                            showingWorkspace: $showingWorkspace,
-                            isStopwatchMode: false,
-                            onSwitchToStopwatch: {
-                                withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
-                                    sidebarSelection = .stopwatch
-                                }
-                            }
-                        )
-                        .transition(.asymmetric(
-                            insertion: .opacity.combined(with: .scale(scale: 0.985)),
-                            removal: .opacity
-                        ))
-                    } else if sidebarSelection == .stopwatch {
-                        DashboardTimerView(
-                            viewModel: viewModel,
-                            gradient: accentGradient,
-                            clockStyle: $clockStyle,
-                            isFocusState: $isFocusState,
-                            showingWorkspace: $showingWorkspace,
-                            isStopwatchMode: true,
-                            onSwitchToTimer: {
-                                withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
-                                    sidebarSelection = .focusTimer
-                                }
-                            }
-                        )
-                        .transition(.asymmetric(
-                            insertion: .opacity.combined(with: .scale(scale: 0.985)),
-                            removal: .opacity
-                        ))
-                    } else {
-                        VStack(spacing: 0) {
-                            // Persistent Mini Bar if Focus Timer is running or active
-                            if viewModel.isTimerRunning || viewModel.timeRemaining < viewModel.totalTime || viewModel.hasPreservedSession {
-                                PersistentCrossModeMiniBar(viewModel: viewModel, type: .focusTimer) {
-                                    withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
-                                        viewModel.restorePreservedSessionIfNeeded()
-                                        sidebarSelection = .focusTimer
-                                    }
-                                }
-                                .padding(.horizontal, 24)
-                                .padding(.top, 14)
-                                .padding(.bottom, 6)
-                                .transition(.move(edge: .top).combined(with: .opacity))
-                            }
+                VStack(spacing: 0) {
+                    if viewModel.isPersistenceBlocked {
+                        storageErrorBanner
+                    } else if viewModel.didRecoverFromBackup && viewModel.showRecoveryNotice {
+                        recoverySuccessBanner
+                    }
 
-                            // Persistent Mini Bar if Stopwatch is running or has elapsed time
-                            if viewModel.isStopwatchRunning || viewModel.stopwatchTime > 0 {
-                                PersistentCrossModeMiniBar(viewModel: viewModel, type: .stopwatch) {
+                    ZStack {
+                        if sidebarSelection == .focusTimer {
+                            DashboardTimerView(
+                                viewModel: viewModel,
+                                gradient: accentGradient,
+                                clockStyle: $clockStyle,
+                                isFocusState: $isFocusState,
+                                showingWorkspace: $showingWorkspace,
+                                isStopwatchMode: false,
+                                onSwitchToStopwatch: {
                                     withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
                                         sidebarSelection = .stopwatch
                                     }
                                 }
-                                .padding(.horizontal, 24)
-                                .padding(.top, (viewModel.isTimerRunning || viewModel.timeRemaining < viewModel.totalTime || viewModel.hasPreservedSession) ? 4 : 14)
-                                .padding(.bottom, 6)
-                                .transition(.move(edge: .top).combined(with: .opacity))
-                            }
+                            )
+                            .transition(.asymmetric(
+                                insertion: .opacity.combined(with: .scale(scale: 0.985)),
+                                removal: .opacity
+                            ))
+                        } else if sidebarSelection == .stopwatch {
+                            DashboardTimerView(
+                                viewModel: viewModel,
+                                gradient: accentGradient,
+                                clockStyle: $clockStyle,
+                                isFocusState: $isFocusState,
+                                showingWorkspace: $showingWorkspace,
+                                isStopwatchMode: true,
+                                onSwitchToTimer: {
+                                    withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
+                                        sidebarSelection = .focusTimer
+                                    }
+                                }
+                            )
+                            .transition(.asymmetric(
+                                insertion: .opacity.combined(with: .scale(scale: 0.985)),
+                                removal: .opacity
+                            ))
+                        } else {
+                            VStack(spacing: 0) {
+                                // Persistent Mini Bar if Focus Timer is running or active
+                                if viewModel.isTimerRunning || viewModel.timeRemaining < viewModel.totalTime || viewModel.hasPreservedSession {
+                                    PersistentCrossModeMiniBar(viewModel: viewModel, type: .focusTimer) {
+                                        withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
+                                            viewModel.restorePreservedSessionIfNeeded()
+                                            sidebarSelection = .focusTimer
+                                        }
+                                    }
+                                    .padding(.horizontal, 24)
+                                    .padding(.top, 14)
+                                    .padding(.bottom, 6)
+                                    .transition(.move(edge: .top).combined(with: .opacity))
+                                }
 
-                            selectedPage
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                // Persistent Mini Bar if Stopwatch is running or has elapsed time
+                                if viewModel.isStopwatchRunning || viewModel.stopwatchTime > 0 {
+                                    PersistentCrossModeMiniBar(viewModel: viewModel, type: .stopwatch) {
+                                        withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
+                                            sidebarSelection = .stopwatch
+                                        }
+                                    }
+                                    .padding(.horizontal, 24)
+                                    .padding(.top, (viewModel.isTimerRunning || viewModel.timeRemaining < viewModel.totalTime || viewModel.hasPreservedSession) ? 4 : 14)
+                                    .padding(.bottom, 6)
+                                    .transition(.move(edge: .top).combined(with: .opacity))
+                                }
+
+                                selectedPage
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            }
+                            .transition(.asymmetric(
+                                insertion: .opacity.combined(with: .scale(scale: 0.985)),
+                                removal: .opacity
+                            ))
                         }
-                        .transition(.asymmetric(
-                            insertion: .opacity.combined(with: .scale(scale: 0.985)),
-                            removal: .opacity
-                        ))
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(bgMain)
+                    .clipped()
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(bgMain)
-                .clipped()
             }
             .animation(.spring(response: 0.38, dampingFraction: 0.82), value: sidebarSelection)
 
@@ -137,5 +145,70 @@ public struct ContentView: View {
         case .insights: InsightsView(viewModel: viewModel)
         default: SettingsView(viewModel: viewModel)
         }
+    }
+
+    @ViewBuilder
+    private var storageErrorBanner: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(.yellow)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Saved Data Protection Alert")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(.white)
+                Text("Saved data could not be loaded because the save file is corrupted or unreadable. Automatic saving is blocked to protect your existing file.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.85))
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color.red.opacity(0.28))
+        .overlay(
+            Rectangle()
+                .frame(height: 1)
+                .foregroundColor(Color.red.opacity(0.5)),
+            alignment: .bottom
+        )
+    }
+
+    @ViewBuilder
+    private var recoverySuccessBanner: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: "checkmark.shield.fill")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(.green)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Data Recovered Successfully")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(.white)
+                Text(viewModel.recoveryNoticeMessage ?? "Saved data was safely recovered from your local backup.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.85))
+            }
+            Spacer()
+            Button {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    viewModel.dismissRecoveryNotice()
+                }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.white.opacity(0.6))
+                    .padding(4)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color.green.opacity(0.22))
+        .overlay(
+            Rectangle()
+                .frame(height: 1)
+                .foregroundColor(Color.green.opacity(0.4)),
+            alignment: .bottom
+        )
     }
 }

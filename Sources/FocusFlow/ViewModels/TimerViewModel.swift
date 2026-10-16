@@ -147,9 +147,21 @@ public class TimerViewModel: ObservableObject {
 
     // Master Power-Efficient Timer Engine (10Hz / 100ms interval for 80% lower CPU wakeups)
     private var timerSubscription: AnyCancellable?
-    private let storage: FocusStorageService
+    public let storage: FocusStorageService
     private var isLoadingPersistedData = false
     private var lastPersistTime: Date = .distantPast
+
+    // Storage Safety & Recovery State
+    @Published public private(set) var storageLoadResult: StorageLoadResult = .freshInstall
+    @Published public private(set) var isPersistenceBlocked: Bool = false
+    @Published public private(set) var didRecoverFromBackup: Bool = false
+    @Published public private(set) var storageErrorMessage: String? = nil
+    @Published public private(set) var recoveryNoticeMessage: String? = nil
+    @Published public var showRecoveryNotice: Bool = false
+
+    public func dismissRecoveryNotice() {
+        showRecoveryNotice = false
+    }
 
     // Active Timer Mode: "Pomodoro" or "Custom Timer"
     @Published public var activeMode: String = "Pomodoro"
@@ -192,12 +204,69 @@ public class TimerViewModel: ObservableObject {
             recalculateFocusMetrics()
         }
 
-        guard let saved = storage.load() else {
-            // First run on a fresh machine (no storage file yet) -> Keep default initial tasks
-            recalculateFocusMetrics()
-            return
-        }
+        let result = storage.loadDetailed()
+        self.storageLoadResult = result
 
+        switch result {
+        case .freshInstall:
+            self.isPersistenceBlocked = false
+            self.didRecoverFromBackup = false
+            self.storageErrorMessage = nil
+            self.recoveryNoticeMessage = nil
+            self.showRecoveryNotice = false
+            // First run on a fresh machine (no storage file yet) -> Keep default initial tasks
+            return
+
+        case .success(let saved):
+            self.isPersistenceBlocked = false
+            self.didRecoverFromBackup = false
+            self.storageErrorMessage = nil
+            self.recoveryNoticeMessage = nil
+            self.showRecoveryNotice = false
+            applyLoadedData(saved)
+
+        case .recovered(let saved, let backupURL, let diagURL):
+            self.isPersistenceBlocked = false
+            self.didRecoverFromBackup = true
+            self.storageErrorMessage = nil
+            if let diag = diagURL {
+                self.recoveryNoticeMessage = "Saved data recovered from backup (\(backupURL.lastPathComponent)). Diagnostic file: \(diag.lastPathComponent)."
+            } else {
+                self.recoveryNoticeMessage = "Saved data recovered from backup (\(backupURL.lastPathComponent))."
+            }
+            self.showRecoveryNotice = true
+            applyLoadedData(saved)
+
+        case .unrecoverable(let error):
+            self.isPersistenceBlocked = true
+            self.didRecoverFromBackup = false
+            self.storageErrorMessage = "Data Protection Alert: Saved data could not be loaded because the save file is corrupted or unreadable. Automatic saving is blocked to protect your existing file.\n(\(error.description))"
+            self.recoveryNoticeMessage = nil
+            self.showRecoveryNotice = false
+            clearDataForStorageError()
+        }
+    }
+
+    private func clearDataForStorageError() {
+        self.tasks = []
+        self.sessionRecords = []
+        self.legacyLifetimeFocusedSeconds = nil
+        self.completedSessions = 0
+        self.notes = []
+        self.laps = []
+        self.preservedSession = nil
+        self.pausedSession = nil
+        self.stopwatchFractional = nil
+        self.stopwatchTime = 0
+        self.preciseStopwatchProgress = 0.0
+        self.isStopwatchRunning = false
+        self.stopwatchStartDate = nil
+        self.isTimerRunning = false
+        self.targetEndDate = nil
+        self.fractionalRemaining = nil
+    }
+
+    private func applyLoadedData(_ saved: FocusAppData) {
         // Existing saved file -> Faithfully restore tasks, even if intentionally empty!
         self.tasks = saved.tasks
         self.sessionRecords = saved.sessionRecords
@@ -273,6 +342,10 @@ public class TimerViewModel: ObservableObject {
 
     public func persistData(force: Bool = false) {
         guard !isLoadingPersistedData else { return }
+        guard !isPersistenceBlocked else {
+            print("[TimerViewModel] Persistence blocked: Storage error state active.")
+            return
+        }
 
         let now = Date()
         // Throttle disk writes to avoid repeated writes during UI animations or high frequency changes
@@ -310,7 +383,11 @@ public class TimerViewModel: ObservableObject {
             pausedSession: pausedSession,
             stopwatchElapsedSeconds: currentStopwatchElapsed
         )
-        storage.save(payload)
+        do {
+            try storage.save(payload)
+        } catch {
+            print("[TimerViewModel] Failed to persist data: \(error)")
+        }
     }
 
     // MARK: - Date-Aware Analytics Recalculation (Priority 2)
@@ -718,6 +795,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func recordLap() {
+        guard !isPersistenceBlocked else { return }
         let currentTotal: TimeInterval
         if isStopwatchRunning, let start = stopwatchStartDate {
             currentTotal = max(0, Date().timeIntervalSince(start))
@@ -741,6 +819,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func removeLap(at index: Int) {
+        guard !isPersistenceBlocked else { return }
         guard laps.indices.contains(index) else { return }
         laps.remove(at: index)
         persistData()
@@ -798,6 +877,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func addTask(title: String = "New Task", expectedMinutes: Int = 25) {
+        guard !isPersistenceBlocked else { return }
         let newTask = FocusTask(title: title, estimatedMinutes: expectedMinutes, icon: "checkmark.circle", iconColor: .cyan)
         tasks.append(newTask)
         if tasks.count == 1 || !tasks.indices.contains(activeTaskIndex) || tasks[activeTaskIndex].isCompleted {
@@ -816,6 +896,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func toggleTaskCompletion(at index: Int) {
+        guard !isPersistenceBlocked else { return }
         guard tasks.indices.contains(index) else { return }
         tasks[index].isCompleted.toggle()
         if activeTaskIndex == index && tasks[index].isCompleted {
@@ -828,6 +909,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func removeTask(at index: Int) {
+        guard !isPersistenceBlocked else { return }
         guard tasks.indices.contains(index) else { return }
         tasks.remove(at: index)
         if tasks.isEmpty {
@@ -844,12 +926,14 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func resetTaskTime(at index: Int) {
+        guard !isPersistenceBlocked else { return }
         guard tasks.indices.contains(index) else { return }
         tasks[index].timeSpentSeconds = 0
         persistData()
     }
 
     public func saveNote() {
+        guard !isPersistenceBlocked else { return }
         let trimmed = noteDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         notes.insert(trimmed, at: 0)
@@ -859,6 +943,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func deleteNote(at index: Int) {
+        guard !isPersistenceBlocked else { return }
         guard notes.indices.contains(index) else { return }
         notes.remove(at: index)
         persistData()
