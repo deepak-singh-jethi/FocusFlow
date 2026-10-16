@@ -32,8 +32,8 @@ FocusFlow is a native macOS productivity application crafted in Swift, SwiftUI, 
 - **Weekly Analytics**: Detailed day-by-day distribution of completed focus sessions and hours logged.
 
 ### Ambient Soundscapes
-- **Audio Generator**: Native `AVAudioPlayer` playback with multi-channel support for Rain, Ocean, and Forest recordings.
-- **Smooth Playback**: Background audio with cross-fading and adjustable volume controls.
+- **Bundled Recordings**: Plays bundled Rain, Ocean, and Forest MP3 recordings using `AVAudioPlayer`.
+- **Playback Controls**: Supports adjustable volume and smooth crossfades when switching between soundscapes.
 
 ### Native macOS Integration & Menu-Bar Companion
 - **Dual Presentation**: Full desktop application workspace and companion menu-bar popover (`MenuBarExtra`).
@@ -43,7 +43,7 @@ FocusFlow is a native macOS productivity application crafted in Swift, SwiftUI, 
 
 ### Durability, Backup & Recovery
 - **Persistent Storage**: Automatic local JSON persistence in `~/Library/Application Support/FocusFlow/focusflow_data.json`.
-- **Automatic Backup Rotation**: Safe write-before-replace atomic saves and automatic backup creation (`focusflow_data.backup.json`).
+- **Automatic Backup Rotation**: Safe write-before-replace atomic saves and automatic backup creation (`focusflow_data.json.bak`).
 - **Disaster Recovery**: Automatic restoration from valid backup if primary storage file encounters data corruption.
 - **Save-Failure Notifications**: Published storage error state with visible warnings and non-destructive retry flow.
 - **Session Continuity**: Paused timers, running stopwatch offsets, and elapsed session segments survive application quit and relaunch.
@@ -153,7 +153,7 @@ FocusFlow is continuously validated via GitHub Actions on macOS 14:
 
 1. **Stopwatch Lap Deletion**: Deleting intermediate laps from the laps list may lead to inconsistent split duration calculations for subsequent laps.
 2. **Persistence Write Consolidation**: Multiple rapid actions can schedule overlapping delayed writes that would benefit from debounced consolidation.
-3. **Midnight Boundary Accounting**: Focus time accumulated during sessions spanning across midnight is currently attributed to the starting calendar day rather than splitting across days.
+3. **Midnight Boundary Accounting**: When an active focus session spans midnight, the live daily focus total may incorrectly include elapsed time from the previous day. Only the portion overlapping the current local calendar day should be counted.
 
 ---
 

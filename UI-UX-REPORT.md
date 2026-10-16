@@ -82,6 +82,5 @@ Subsequent design and interaction iterations between October 14 and October 16, 
 
 ## Remaining Product Work
 
-- **Soundscape Licensing**: Soundscapes utilize user-supplied MP3 recordings (`Rain.mp3`, `Ocean.mp3`, `Forest.mp3`) located in `Assets/Soundscapes`. Redistribution terms must be formally verified prior to commercial distribution.
 - **Commercial Distribution**: Developer ID signing, Hardened Runtime configuration, and Apple Gatekeeper notarization remain pending for public commercial release.
 - **Visual Micro-Interactions**: Future iterations can further refine lap split calculation presentation and transition animations across clock faces.

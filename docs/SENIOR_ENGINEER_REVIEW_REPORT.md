@@ -28,7 +28,7 @@ Between October 14 and October 16, 2026, FocusFlow underwent substantial archite
 - **Comprehensive Data Coverage**: All tasks, accumulated focus seconds, completed sessions, user notes, active settings, and preserved timer states are serialized on state mutations and application lifecycle events.
 
 ### 3. Automatic Backup & Safe Disaster Recovery
-- **Atomic Backup Rotation**: Saves use an atomic write-before-replace strategy and maintain a verified backup file (`focusflow_data.backup.json`).
+- **Atomic Backup Rotation**: Saves use an atomic write-before-replace strategy and maintain a verified backup file (`focusflow_data.json.bak`).
 - **Corruption Detection & Automatic Recovery**: When primary JSON data cannot be decoded (e.g., unexpected termination or file truncation), `FocusStorageService` inspects the backup file. If valid, the backup data is automatically restored without user intervention.
 - **Corrupted Byte Preservation**: If both primary and backup files are damaged, files are preserved for forensics and saving is blocked (`isPersistenceBlocked = true`) to prevent silent overwrite of corrupt data.
 
@@ -146,7 +146,7 @@ FocusFlow (Current Modular Structure)
 - **Original Problem (October 14):**
   Tasks, completed sessions, logged seconds, and notes were held exclusively in in-memory `@Published` properties, resetting on application restart.
 - **October 16 Resolution:**
-  Implemented [`FocusStorageService`](../Sources/FocusFlow/Services/FocusStorageService.swift), persisting data to `~/Library/Application Support/FocusFlow/focusflow_data.json` with an atomic backup rotation strategy (`focusflow_data.backup.json`) and automated disaster recovery from corruption.
+  Implemented [`FocusStorageService`](../Sources/FocusFlow/Services/FocusStorageService.swift), persisting data to `~/Library/Application Support/FocusFlow/focusflow_data.json` with an atomic backup rotation strategy (`focusflow_data.json.bak`) and automated disaster recovery from corruption.
 
 ---
 
