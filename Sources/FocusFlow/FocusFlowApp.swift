@@ -6,13 +6,19 @@ import AppKit
 public final class FocusFlowAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     public static var shared: FocusFlowAppDelegate?
 
-    public let viewModel = TimerViewModel()
+    public let viewModel: TimerViewModel
     public let audioPlayer = AmbientAudioPlayer()
     public var mainWindow: NSWindow?
 
     public override init() {
+        self.viewModel = TimerViewModel()
         super.init()
         Self.shared = self
+    }
+
+    public init(viewModel: TimerViewModel) {
+        self.viewModel = viewModel
+        super.init()
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {

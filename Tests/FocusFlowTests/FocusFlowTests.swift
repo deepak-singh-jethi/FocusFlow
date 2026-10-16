@@ -1229,7 +1229,13 @@ final class FocusFlowTests: XCTestCase {
     // 10. Normal window close does not stop the countdown.
     @MainActor
     func testNormalWindowCloseDoesNotStopCountdown() {
-        let appDelegate = FocusFlowAppDelegate()
+        let (isolatedVM, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let previousShared = FocusFlowAppDelegate.shared
+        let appDelegate = FocusFlowAppDelegate(viewModel: isolatedVM)
+        XCTAssertTrue(FocusFlowAppDelegate.shared === previousShared, "Test initialization of AppDelegate must not modify FocusFlowAppDelegate.shared")
+
         appDelegate.viewModel.applyPresetDirectly(name: "Focus", minutes: 25)
         appDelegate.viewModel.startTimer()
         XCTAssertTrue(appDelegate.viewModel.isTimerRunning)
@@ -1244,6 +1250,10 @@ final class FocusFlowTests: XCTestCase {
         let shouldClose = appDelegate.windowShouldClose(dummyWindow)
         XCTAssertFalse(shouldClose, "windowShouldClose must return false to keep application active in menu bar")
         XCTAssertTrue(appDelegate.viewModel.isTimerRunning, "Closing main window must NOT stop active timer countdown")
+
+        // Stop the test timer safely after verification
+        appDelegate.viewModel.stopTimer()
+        XCTAssertFalse(appDelegate.viewModel.isTimerRunning)
     }
 
     // 11. Termination processing is synchronous, and repeated calls cannot double-count focus time.
