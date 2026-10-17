@@ -110,6 +110,9 @@ public struct InsightsView: View {
             .frame(maxWidth: .infinity)
         }
         .scrollIndicators(.hidden)
+        .onAppear {
+            viewModel.recalculateFocusMetrics()
+        }
     }
 
     private func insightCard(title: String, value: String, icon: String) -> some View {

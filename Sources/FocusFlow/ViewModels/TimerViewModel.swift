@@ -236,6 +236,14 @@ public class TimerViewModel: ObservableObject {
 
     // Master Power-Efficient Timer Engine (10Hz / 100ms interval for 80% lower CPU wakeups)
     private var timerSubscription: AnyCancellable?
+    private var dateChangeCancellables = Set<AnyCancellable>()
+    private var midnightRefreshTimer: Timer?
+    public var reportingCalendar: Calendar = .current {
+        didSet {
+            recalculateFocusMetrics()
+            scheduleNextMidnightRefresh()
+        }
+    }
     public let storage: FocusStorageService
     private var isLoadingPersistedData = false
     private var lastPersistTime: Date = .distantPast
@@ -273,6 +281,11 @@ public class TimerViewModel: ObservableObject {
         self.storage = storage
         loadPersistedData()
         NotificationService.shared.requestAuthorization()
+        setupDateChangeMonitoring()
+    }
+
+    deinit {
+        midnightRefreshTimer?.invalidate()
     }
 
     public private(set) var hasTerminated: Bool = false
@@ -662,41 +675,134 @@ public class TimerViewModel: ObservableObject {
     }
 
     // MARK: - Date-Aware Analytics Recalculation (Priority 2)
-    public func recalculateFocusMetrics(calendar: Calendar = .current, now: Date = Date()) {
+    public func recalculateFocusMetrics(calendar: Calendar? = nil, now: Date = Date()) {
+        let cal = calendar ?? reportingCalendar
         let activeElapsed: Int
+        let activeStart: Date?
         if isTimerRunning, isFocusPreset, let start = sessionSegmentStartDate {
             activeElapsed = max(0, Int(now.timeIntervalSince(start)))
+            activeStart = start
         } else {
             activeElapsed = 0
+            activeStart = nil
         }
 
-        // 1. Today's focus time (calculated strictly from dated records overlapping today)
-        let recordsToday = sessionRecords.reduce(0) { $0 + $1.duration(on: now, calendar: calendar) }
-        self.todayFocusedSeconds = recordsToday + activeElapsed
+        let startOfToday = cal.startOfDay(for: now)
+        guard let endOfToday = cal.date(byAdding: .day, value: 1, to: startOfToday) else {
+            return
+        }
 
-        // 2. Weekly focus time (calculated across the past 7 days)
-        let startOfToday = calendar.startOfDay(for: now)
-        let sevenDaysAgo = calendar.date(byAdding: .day, value: -6, to: startOfToday) ?? startOfToday
+        // 1. Today's focus time (calculated strictly from dated records overlapping today + active running segment on today)
+        let recordsToday = sessionRecords.reduce(0) { $0 + $1.duration(on: now, calendar: cal) }
+        let activeToday: Int
+        if activeElapsed > 0, let start = activeStart {
+            activeToday = FocusIntervalAllocator.allocatedDuration(
+                recordStart: start,
+                recordEnd: now,
+                durationSeconds: activeElapsed,
+                intervalStart: startOfToday,
+                intervalEnd: endOfToday
+            )
+        } else {
+            activeToday = 0
+        }
+        self.todayFocusedSeconds = recordsToday + activeToday
+
+        // 2. Weekly focus time (calculated across the past 7 days: [startOfToday - 6 days, endOfToday])
+        let sevenDaysAgo = cal.date(byAdding: .day, value: -6, to: startOfToday) ?? startOfToday
         let recordsWeekly = sessionRecords.reduce(0) { total, record in
-            let effectiveStart = max(record.startTime, sevenDaysAgo)
-            let effectiveEnd = min(record.endTime, now)
-            if effectiveEnd > effectiveStart {
-                let totalSpan = max(1.0, record.endTime.timeIntervalSince(record.startTime))
-                let overlap = effectiveEnd.timeIntervalSince(effectiveStart)
-                let ratio = min(1.0, max(0.0, overlap / totalSpan))
-                return total + Int(round(Double(record.durationSeconds) * ratio))
-            }
-            return total
+            total + record.duration(from: sevenDaysAgo, to: endOfToday)
         }
-        self.weeklyFocusedSeconds = recordsWeekly + activeElapsed
+        let activeWeekly: Int
+        if activeElapsed > 0, let start = activeStart {
+            activeWeekly = FocusIntervalAllocator.allocatedDuration(
+                recordStart: start,
+                recordEnd: now,
+                durationSeconds: activeElapsed,
+                intervalStart: sevenDaysAgo,
+                intervalEnd: endOfToday
+            )
+        } else {
+            activeWeekly = 0
+        }
+        self.weeklyFocusedSeconds = recordsWeekly + activeWeekly
 
-        // 3. Lifetime focus time (all dated records + any legacy unassigned historical total)
+        // 3. Lifetime focus time (all dated records + any legacy unassigned historical total + active running segment)
         let recordsLifetime = sessionRecords.reduce(0) { $0 + $1.durationSeconds }
         let legacy = legacyLifetimeFocusedSeconds ?? 0
         self.lifetimeFocusedSeconds = recordsLifetime + legacy + activeElapsed
 
         // Maintain focusedSeconds for direct backward-compatible binding
         self.focusedSeconds = self.todayFocusedSeconds
+    }
+
+    // MARK: - Date Change & Midnight Lifecycle Monitoring
+    public func handleDateOrLifecycleChange(now: Date = Date()) {
+        recalculateFocusMetrics(now: now)
+        scheduleNextMidnightRefresh()
+    }
+
+    private func setupDateChangeMonitoring() {
+        dateChangeCancellables.removeAll()
+
+        NotificationCenter.default.publisher(for: .NSCalendarDayChanged)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.handleDateOrLifecycleChange()
+                }
+            }
+            .store(in: &dateChangeCancellables)
+
+        NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.handleDateOrLifecycleChange()
+                }
+            }
+            .store(in: &dateChangeCancellables)
+
+        NotificationCenter.default.publisher(for: Notification.Name("NSSystemClockDidChangeNotification"))
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.handleDateOrLifecycleChange()
+                }
+            }
+            .store(in: &dateChangeCancellables)
+
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.handleDateOrLifecycleChange()
+                }
+            }
+            .store(in: &dateChangeCancellables)
+
+        scheduleNextMidnightRefresh()
+    }
+
+    private func scheduleNextMidnightRefresh() {
+        midnightRefreshTimer?.invalidate()
+        midnightRefreshTimer = nil
+
+        let now = Date()
+        guard let nextMidnight = reportingCalendar.nextDate(
+            after: now,
+            matching: DateComponents(hour: 0, minute: 0, second: 0),
+            matchingPolicy: .nextTime
+        ) else {
+            return
+        }
+
+        let fireDate = nextMidnight.addingTimeInterval(0.05)
+        let timer = Timer(fire: fireDate, interval: 0, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                self.recalculateFocusMetrics()
+                self.scheduleNextMidnightRefresh()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        midnightRefreshTimer = timer
     }
 
     private func creditTaskTime(taskId: UUID?, seconds: Int) {

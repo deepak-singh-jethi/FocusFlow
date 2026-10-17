@@ -26,21 +26,81 @@ public struct FocusSessionRecord: Codable, Identifiable, Equatable {
     }
 
     /// Computes how many seconds of this session fall within the specified calendar day.
-    /// Accurately accounts for midnight transitions using proportional date interval overlap.
+    /// Accurately accounts for midnight transitions using cumulative boundary allocation.
     public func duration(on date: Date, calendar: Calendar = .current) -> Int {
         let dayStart = calendar.startOfDay(for: date)
         guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else {
             return 0
         }
-        let effectiveStart = max(startTime, dayStart)
-        let effectiveEnd = min(endTime, dayEnd)
-        if effectiveEnd > effectiveStart {
-            let totalSpan = max(1.0, endTime.timeIntervalSince(startTime))
-            let overlap = effectiveEnd.timeIntervalSince(effectiveStart)
-            let ratio = min(1.0, max(0.0, overlap / totalSpan))
-            return Int(round(Double(durationSeconds) * ratio))
+        return duration(from: dayStart, to: dayEnd)
+    }
+
+    /// Computes how many seconds of this record fall within the specified date interval.
+    /// Uses cumulative boundary allocation to guarantee exact integer conservation and zero rounding drift.
+    public func duration(from intervalStart: Date, to intervalEnd: Date) -> Int {
+        FocusIntervalAllocator.allocatedDuration(
+            recordStart: startTime,
+            recordEnd: endTime,
+            durationSeconds: durationSeconds,
+            intervalStart: intervalStart,
+            intervalEnd: intervalEnd
+        )
+    }
+}
+
+// MARK: - Cumulative-Boundary Focus Interval Allocator
+public enum FocusIntervalAllocator {
+    /// Allocates recorded duration across a query interval [intervalStart, intervalEnd].
+    /// Uses cumulative boundary allocation to guarantee exact integer conservation and zero rounding drift
+    /// across any sequence of adjacent, non-overlapping partitions.
+    public static func allocatedDuration(
+        recordStart: Date,
+        recordEnd: Date,
+        durationSeconds: Int,
+        intervalStart: Date,
+        intervalEnd: Date
+    ) -> Int {
+        guard durationSeconds > 0 else { return 0 }
+        guard intervalEnd > intervalStart else { return 0 }
+
+        // Malformed record timestamps (zero or negative wall-clock duration)
+        if recordEnd <= recordStart {
+            if recordStart >= intervalStart && recordStart < intervalEnd {
+                return durationSeconds
+            }
+            return 0
         }
-        return 0
+
+        let span = recordEnd.timeIntervalSince(recordStart)
+        guard span > 0 else { return 0 }
+
+        let cumEnd = cumulativeSeconds(at: intervalEnd, recordStart: recordStart, recordEnd: recordEnd, span: span, totalDuration: durationSeconds)
+        let cumStart = cumulativeSeconds(at: intervalStart, recordStart: recordStart, recordEnd: recordEnd, span: span, totalDuration: durationSeconds)
+
+        return max(0, cumEnd - cumStart)
+    }
+
+    /// Monotonically non-decreasing cumulative allocation function C(t).
+    /// For t <= recordStart: returns 0.
+    /// For t >= recordEnd: returns totalDuration.
+    /// For t in (recordStart, recordEnd): returns Int(round(totalDuration * ((t - recordStart) / span))).
+    public static func cumulativeSeconds(
+        at date: Date,
+        recordStart: Date,
+        recordEnd: Date,
+        span: TimeInterval,
+        totalDuration: Int
+    ) -> Int {
+        if date <= recordStart {
+            return 0
+        }
+        if date >= recordEnd {
+            return totalDuration
+        }
+        let elapsed = date.timeIntervalSince(recordStart)
+        let ratio = max(0.0, min(1.0, elapsed / span))
+        let cum = Int(round(Double(totalDuration) * ratio))
+        return max(0, min(totalDuration, cum))
     }
 }
 

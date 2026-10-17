@@ -6754,4 +6754,648 @@ final class FocusFlowTests: XCTestCase {
             XCTFail("Corrupted primary and backup must trigger .unrecoverable, got: \(String(describing: vm3.storageLoadResult))")
         }
     }
+
+    // MARK: - Task 5 Reproduction: Active Focus Session Crossing Midnight
+    @MainActor
+    func testTask5_Reproduction_ActiveFocusSessionCrossingMidnightOvercountsToday() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Kolkata")!
+
+        // Construct 15 October 2026, 23:50:00 IST
+        var startComponents = DateComponents()
+        startComponents.year = 2026
+        startComponents.month = 10
+        startComponents.day = 15
+        startComponents.hour = 23
+        startComponents.minute = 50
+        startComponents.second = 0
+        let startDate = calendar.date(from: startComponents)!
+
+        // Construct 16 October 2026, 00:15:00 IST (1500 seconds later)
+        let nowDate = startDate.addingTimeInterval(1500)
+
+        // Set up active timer running across midnight
+        vm.activePreset = "Focus"
+        vm.activeMode = "Pomodoro"
+        vm.isTimerRunning = true
+        vm.sessionSegmentStartDate = startDate
+
+        // Recalculate focus metrics at 00:15 on Oct 16
+        vm.recalculateFocusMetrics(calendar: calendar, now: nowDate)
+
+        // Expected:
+        // On Oct 16 at 00:15, only 900 seconds (15 mins) have elapsed today.
+        // The first 600 seconds (10 mins) belonged to Oct 15.
+        // Current unpatched code adds all 1500 active elapsed seconds to todayFocusedSeconds!
+        XCTAssertEqual(vm.todayFocusedSeconds, 900, "Today's focus must only include time elapsed after midnight (900s), not entire 1500s")
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 1500, "Past 7 days must include full 1500s")
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 1500, "Lifetime must include full 1500s")
+    }
+
+    // MARK: - Task 5 Regression Test Suite: Groups A through F
+
+    // MARK: Group A: Live Midnight Transition (Tests 1–6)
+
+    // Test 1: Active Focus Timer running past midnight attributes pre-midnight seconds to yesterday and post-midnight seconds to today
+    @MainActor
+    func testTask5_GroupA_Test1_ActiveFocusTimerRunningPastMidnight_AttributesPreAndPostMidnight() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let start = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 23, minute: 45, second: 0))!
+        let now = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 0, minute: 15, second: 0))! // 1800s total
+
+        vm.activePreset = "Focus"
+        vm.isTimerRunning = true
+        vm.sessionSegmentStartDate = start
+
+        vm.recalculateFocusMetrics(calendar: calendar, now: now)
+
+        XCTAssertEqual(vm.todayFocusedSeconds, 900, "Today (Oct 21) must only receive 900s elapsed after midnight")
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 1800, "Weekly must receive all 1800s")
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 1800, "Lifetime must receive all 1800s")
+    }
+
+    // Test 2: Active Focus Timer stopped shortly after midnight converts to a finalized record without discrepancy
+    @MainActor
+    func testTask5_GroupA_Test2_ActiveFocusTimerStoppedAfterMidnight_FinalizesWithoutDiscrepancy() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let start = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 23, minute: 45, second: 0))!
+        let now = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 0, minute: 15, second: 0))! // 1800s total
+
+        vm.activePreset = "Focus"
+        vm.isTimerRunning = true
+        vm.sessionSegmentStartDate = start
+
+        vm.recalculateFocusMetrics(calendar: calendar, now: now)
+        let runningToday = vm.todayFocusedSeconds
+        let runningWeekly = vm.weeklyFocusedSeconds
+        let runningLifetime = vm.lifetimeFocusedSeconds
+
+        // Now finalize timer at the same 'now'
+        vm.isTimerRunning = false
+        let record = FocusSessionRecord(startTime: start, endTime: now, durationSeconds: 1800, mode: "Focus", taskId: nil)
+        vm.sessionRecords.append(record)
+        vm.sessionSegmentStartDate = nil
+
+        vm.recalculateFocusMetrics(calendar: calendar, now: now)
+
+        XCTAssertEqual(vm.todayFocusedSeconds, runningToday, "Finalized todayFocusedSeconds must equal live running todayFocusedSeconds")
+        XCTAssertEqual(vm.weeklyFocusedSeconds, runningWeekly, "Finalized weeklyFocusedSeconds must equal live running weeklyFocusedSeconds")
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, runningLifetime, "Finalized lifetimeFocusedSeconds must equal live running lifetimeFocusedSeconds")
+        XCTAssertEqual(vm.todayFocusedSeconds, 900)
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 1800)
+    }
+
+    // Test 3: Active Focus Timer paused before midnight and resumed after midnight
+    @MainActor
+    func testTask5_GroupA_Test3_ActiveFocusTimerPausedBeforeMidnightAndResumedAfterMidnight() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let startDay1 = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 23, minute: 40, second: 0))!
+        let pauseDay1 = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 23, minute: 55, second: 0))! // 900s
+        let resumeDay2 = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 0, minute: 10, second: 0))!
+        let nowDay2 = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 0, minute: 20, second: 0))! // 600s
+
+        // Record segment 1 on Day 1
+        let record1 = FocusSessionRecord(startTime: startDay1, endTime: pauseDay1, durationSeconds: 900, mode: "Focus", taskId: nil)
+        vm.sessionRecords.append(record1)
+
+        // Running segment 2 on Day 2
+        vm.activePreset = "Focus"
+        vm.isTimerRunning = true
+        vm.sessionSegmentStartDate = resumeDay2
+
+        vm.recalculateFocusMetrics(calendar: calendar, now: nowDay2)
+
+        XCTAssertEqual(vm.todayFocusedSeconds, 600, "Today only includes segment started after midnight")
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 1500, "Weekly includes both segments (900 + 600 = 1500)")
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 1500)
+    }
+
+    // Test 4: Active Focus Timer running through multiple consecutive midnights
+    @MainActor
+    func testTask5_GroupA_Test4_ActiveFocusTimerRunningThroughMultipleMidnights() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        // Day 1: 12:00 to Day 3: 14:00 (50 hours = 180,000s)
+        let start = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 12, minute: 0, second: 0))!
+        let now = calendar.date(from: DateComponents(year: 2026, month: 10, day: 22, hour: 14, minute: 0, second: 0))!
+
+        vm.activePreset = "Focus"
+        vm.isTimerRunning = true
+        vm.sessionSegmentStartDate = start
+
+        vm.recalculateFocusMetrics(calendar: calendar, now: now)
+
+        // Day 3 (today) has elapsed 14 hours = 50,400s
+        XCTAssertEqual(vm.todayFocusedSeconds, 50400, "Day 3 must receive 14h (50,400s)")
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 180000, "Weekly must receive full 50h")
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 180000, "Lifetime must receive full 50h")
+
+        // Finalize into record and check each calendar day
+        let record = FocusSessionRecord(startTime: start, endTime: now, durationSeconds: 180000, mode: "Focus", taskId: nil)
+        let day1 = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20))!
+        let day2 = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21))!
+        let day3 = calendar.date(from: DateComponents(year: 2026, month: 10, day: 22))!
+
+        let d1 = record.duration(on: day1, calendar: calendar)
+        let d2 = record.duration(on: day2, calendar: calendar)
+        let d3 = record.duration(on: day3, calendar: calendar)
+
+        XCTAssertEqual(d1, 43200, "Day 1 (12h) must be 43,200s")
+        XCTAssertEqual(d2, 86400, "Day 2 (24h) must be 86,400s")
+        XCTAssertEqual(d3, 50400, "Day 3 (14h) must be 50,400s")
+        XCTAssertEqual(d1 + d2 + d3, 180000, "Sum of allocations across days must exactly conserve 180,000s")
+    }
+
+    // Test 5: Stopwatch running across midnight does not affect focus analytics
+    @MainActor
+    func testTask5_GroupA_Test5_StopwatchRunningAcrossMidnight_DoesNotAffectFocusAnalytics() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let start = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 23, minute: 50, second: 0))!
+        let now = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 0, minute: 15, second: 0))!
+
+        vm.isStopwatchRunning = true
+        vm.stopwatchStartDate = start
+        vm.isTimerRunning = false
+        vm.sessionSegmentStartDate = nil
+
+        vm.recalculateFocusMetrics(calendar: calendar, now: now)
+
+        XCTAssertEqual(vm.todayFocusedSeconds, 0, "Stopwatch running must not count toward today's focus")
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 0)
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 0)
+    }
+
+    // Test 6: Short or Long Break running across midnight does not add to focus seconds
+    @MainActor
+    func testTask5_GroupA_Test6_BreakRunningAcrossMidnight_DoesNotAddToFocusSeconds() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let start = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 23, minute: 55, second: 0))!
+        let now = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 0, minute: 5, second: 0))!
+
+        vm.activePreset = "Short Break"
+        vm.isTimerRunning = true
+        vm.sessionSegmentStartDate = start
+
+        vm.recalculateFocusMetrics(calendar: calendar, now: now)
+
+        XCTAssertEqual(vm.todayFocusedSeconds, 0, "Break timers must not count toward focus analytics")
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 0)
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 0)
+    }
+
+    // MARK: Group B: Completed Focus Records (Tests 7–11)
+
+    // Test 7: Single record spanning midnight allocates equally to day 1 and day 2
+    func testTask5_GroupB_Test7_SingleRecordSpanningMidnight_AllocatesEqually() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let day1Start = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 23, minute: 30, second: 0))!
+        let day2End = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 0, minute: 30, second: 0))!
+
+        let record = FocusSessionRecord(startTime: day1Start, endTime: day2End, durationSeconds: 3600, mode: "Focus", taskId: nil)
+
+        let d1 = record.duration(on: day1Start, calendar: calendar)
+        let d2 = record.duration(on: day2End, calendar: calendar)
+        let d3 = record.duration(on: calendar.date(byAdding: .day, value: 1, to: day2End)!, calendar: calendar)
+
+        XCTAssertEqual(d1, 1800, "First half must be 1800s")
+        XCTAssertEqual(d2, 1800, "Second half must be 1800s")
+        XCTAssertEqual(d3, 0, "Day 3 must be 0s")
+        XCTAssertEqual(d1 + d2, 3600, "Exact conservation")
+    }
+
+    // Test 8: Integer rounding conservation with odd durations guarantees exact sum
+    func testTask5_GroupB_Test8_IntegerRoundingConservation_WithOddDurations() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let midnight = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 0, minute: 0, second: 0))!
+        let day1 = calendar.date(byAdding: .minute, value: -1, to: midnight)!
+        let day2 = calendar.date(byAdding: .minute, value: 1, to: midnight)!
+
+        // Test multiple odd durations with exact mid-point at midnight
+        let testDurations = [1, 3, 5, 59, 1501, 3601, 86399]
+        for dur in testDurations {
+            let start = midnight.addingTimeInterval(-Double(dur) / 2.0)
+            let end = midnight.addingTimeInterval(Double(dur) / 2.0)
+            let record = FocusSessionRecord(startTime: start, endTime: end, durationSeconds: dur, mode: "Focus", taskId: nil)
+
+            let p1 = record.duration(on: day1, calendar: calendar)
+            let p2 = record.duration(on: day2, calendar: calendar)
+
+            XCTAssertEqual(p1 + p2, dur, "Allocations \(p1) + \(p2) must strictly equal odd duration \(dur)")
+        }
+    }
+
+    // Test 9: Session entirely on yesterday does not leak into today
+    @MainActor
+    func testTask5_GroupB_Test9_SessionEntirelyOnYesterday_DoesNotLeakIntoToday() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let yesterdayStart = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 14, minute: 0, second: 0))!
+        let yesterdayEnd = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 15, minute: 0, second: 0))! // 3600s
+        let todayNoon = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 12, minute: 0, second: 0))!
+
+        let record = FocusSessionRecord(startTime: yesterdayStart, endTime: yesterdayEnd, durationSeconds: 3600, mode: "Focus", taskId: nil)
+        vm.sessionRecords.append(record)
+
+        vm.recalculateFocusMetrics(calendar: calendar, now: todayNoon)
+
+        XCTAssertEqual(vm.todayFocusedSeconds, 0, "Yesterday's session must not leak into today")
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 3600)
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 3600)
+    }
+
+    // Test 10: Session entirely on today does not leak into yesterday or tomorrow
+    func testTask5_GroupB_Test10_SessionEntirelyOnToday_DoesNotLeakIntoYesterdayOrTomorrow() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let today10am = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 10, minute: 0, second: 0))!
+        let today11am = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 11, minute: 0, second: 0))!
+        let record = FocusSessionRecord(startTime: today10am, endTime: today11am, durationSeconds: 3600, mode: "Focus", taskId: nil)
+
+        let yesterday = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20))!
+        let today = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21))!
+        let tomorrow = calendar.date(from: DateComponents(year: 2026, month: 10, day: 22))!
+
+        XCTAssertEqual(record.duration(on: yesterday, calendar: calendar), 0)
+        XCTAssertEqual(record.duration(on: today, calendar: calendar), 3600)
+        XCTAssertEqual(record.duration(on: tomorrow, calendar: calendar), 0)
+    }
+
+    // Test 11: Multi-day record partitioned across days sums exactly to duration
+    func testTask5_GroupB_Test11_MultiDayRecordPartitionedAcrossDays_SumsExactlyToDuration() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let start = calendar.date(from: DateComponents(year: 2026, month: 10, day: 1, hour: 13, minute: 17, second: 42))!
+        let end = calendar.date(from: DateComponents(year: 2026, month: 10, day: 5, hour: 18, minute: 49, second: 11))!
+        let totalDuration = 77777
+
+        let record = FocusSessionRecord(startTime: start, endTime: end, durationSeconds: totalDuration, mode: "Focus", taskId: nil)
+
+        var sum = 0
+        for dayOffset in 0...6 {
+            let day = calendar.date(byAdding: .day, value: dayOffset, to: calendar.startOfDay(for: start))!
+            sum += record.duration(on: day, calendar: calendar)
+        }
+
+        XCTAssertEqual(sum, totalDuration, "Partitioned sum over all days must strictly equal \(totalDuration)")
+    }
+
+    // MARK: Group C: Weekly Boundaries (Tests 12–15)
+
+    // Test 12: Rolling 7-day window boundary inclusion and exclusion
+    @MainActor
+    func testTask5_GroupC_Test12_RollingSevenDayWindow_BoundaryInclusionAndExclusion() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let today = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 12, minute: 0, second: 0))!
+        let dayMinus8 = calendar.date(from: DateComponents(year: 2026, month: 10, day: 13, hour: 12, minute: 0, second: 0))! // 8 days ago
+        let dayMinus6 = calendar.date(from: DateComponents(year: 2026, month: 10, day: 15, hour: 12, minute: 0, second: 0))! // 6 days ago (oldest in 7-day window)
+
+        // Session 8 days ago: 3600s
+        let oldRecord = FocusSessionRecord(startTime: dayMinus8, endTime: dayMinus8.addingTimeInterval(3600), durationSeconds: 3600, mode: "Focus", taskId: nil)
+        // Session 6 days ago: 2400s
+        let weekRecord = FocusSessionRecord(startTime: dayMinus6, endTime: dayMinus6.addingTimeInterval(2400), durationSeconds: 2400, mode: "Focus", taskId: nil)
+        // Session today: 1800s
+        let todayRecord = FocusSessionRecord(startTime: today, endTime: today.addingTimeInterval(1800), durationSeconds: 1800, mode: "Focus", taskId: nil)
+
+        vm.sessionRecords = [oldRecord, weekRecord, todayRecord]
+
+        vm.recalculateFocusMetrics(calendar: calendar, now: today)
+
+        XCTAssertEqual(vm.todayFocusedSeconds, 1800)
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 4200, "Weekly must include 2400 + 1800 = 4200, excluding oldRecord (3600)")
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 7800, "Lifetime includes all: 3600 + 2400 + 1800 = 7800")
+    }
+
+    // Test 13: Session straddling the oldest day boundary allocated accurately
+    @MainActor
+    func testTask5_GroupC_Test13_SessionStraddlingOldestDayBoundary_AllocatedAccurately() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let today = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 12, minute: 0, second: 0))!
+        // 7-day window is Oct 15 00:00 to Oct 21 23:59:59.
+        // Session from Oct 14 23:00 to Oct 15 01:00 (7200s, 2 hours).
+        let start = calendar.date(from: DateComponents(year: 2026, month: 10, day: 14, hour: 23, minute: 0, second: 0))!
+        let end = calendar.date(from: DateComponents(year: 2026, month: 10, day: 15, hour: 1, minute: 0, second: 0))!
+
+        let straddlingRecord = FocusSessionRecord(startTime: start, endTime: end, durationSeconds: 7200, mode: "Focus", taskId: nil)
+        vm.sessionRecords = [straddlingRecord]
+
+        vm.recalculateFocusMetrics(calendar: calendar, now: today)
+
+        XCTAssertEqual(vm.todayFocusedSeconds, 0)
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 3600, "Only 1 hour on Oct 15 falls inside rolling 7-day window")
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 7200)
+    }
+
+    // Test 14: Active session crossing the oldest weekly boundary
+    @MainActor
+    func testTask5_GroupC_Test14_ActiveSessionCrossingOldestWeeklyBoundary() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let today = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 12, minute: 0, second: 0))!
+        // Start 8 days ago (Oct 13 12:00) and running till today Oct 21 12:00 (8 days = 192 hours = 691,200s)
+        let start = calendar.date(from: DateComponents(year: 2026, month: 10, day: 13, hour: 12, minute: 0, second: 0))!
+
+        vm.activePreset = "Focus"
+        vm.isTimerRunning = true
+        vm.sessionSegmentStartDate = start
+
+        vm.recalculateFocusMetrics(calendar: calendar, now: today)
+
+        // 7-day window starts at Oct 15 00:00:00.
+        // From Oct 15 00:00 to Oct 21 12:00 is 6.5 days = 156 hours = 561,600s
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 561600, "Weekly must strictly capture portion from 7-day boundary to now")
+        XCTAssertEqual(vm.todayFocusedSeconds, 43200, "Today is 12h = 43,200s")
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 691200, "Lifetime captures full 8 days")
+    }
+
+    // Test 15: Invariant hierarchy: today <= weekly <= lifetime
+    @MainActor
+    func testTask5_GroupC_Test15_Invariants_TodayWeeklyLifetimeHierarchy() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let now = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 15, minute: 30, second: 0))!
+
+        // Generate various sessions across past 30 days
+        for i in 1...25 {
+            let start = calendar.date(byAdding: .day, value: -i, to: now)!
+            let record = FocusSessionRecord(startTime: start, endTime: start.addingTimeInterval(1200), durationSeconds: 1200, mode: "Focus", taskId: nil)
+            vm.sessionRecords.append(record)
+        }
+
+        vm.activePreset = "Focus"
+        vm.isTimerRunning = true
+        vm.sessionSegmentStartDate = now.addingTimeInterval(-900)
+
+        vm.recalculateFocusMetrics(calendar: calendar, now: now)
+
+        XCTAssertTrue(vm.todayFocusedSeconds <= vm.weeklyFocusedSeconds, "today (\(vm.todayFocusedSeconds)) must be <= weekly (\(vm.weeklyFocusedSeconds))")
+        XCTAssertTrue(vm.weeklyFocusedSeconds <= vm.lifetimeFocusedSeconds, "weekly (\(vm.weeklyFocusedSeconds)) must be <= lifetime (\(vm.lifetimeFocusedSeconds))")
+    }
+
+    // MARK: Group D: Lifecycle & Automatic Refresh (Tests 16–19)
+
+    // Test 16: Idle app across midnight resets todayFocusedSeconds to zero
+    @MainActor
+    func testTask5_GroupD_Test16_IdleAppAcrossMidnight_ResetsTodayToZero() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        vm.reportingCalendar = calendar
+
+        let day1 = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 20, minute: 0, second: 0))!
+        let record = FocusSessionRecord(startTime: day1, endTime: day1.addingTimeInterval(3600), durationSeconds: 3600, mode: "Focus", taskId: nil)
+        vm.sessionRecords.append(record)
+
+        vm.recalculateFocusMetrics(now: day1)
+        XCTAssertEqual(vm.todayFocusedSeconds, 3600, "On day 1, today is 3600s")
+
+        // Midnight passes, app remains open and idle. Date changes to day 2.
+        let day2 = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 8, minute: 0, second: 0))!
+        vm.handleDateOrLifecycleChange(now: day2)
+
+        XCTAssertEqual(vm.todayFocusedSeconds, 0, "On day 2 without new sessions, todayFocusedSeconds must reset to 0")
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 3600, "Weekly retains day 1 session")
+    }
+
+    // Test 17: NSCalendarDayChanged notification triggers recalculation
+    @MainActor
+    func testTask5_GroupD_Test17_NSCalendarDayChangedNotification_TriggersRecalculation() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let expectation = expectation(description: "Metrics refreshed upon NSCalendarDayChanged")
+        let startVal = vm.todayFocusedSeconds
+
+        // Post NSCalendarDayChanged notification
+        NotificationCenter.default.post(name: .NSCalendarDayChanged, object: nil)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            XCTAssertEqual(vm.todayFocusedSeconds, startVal)
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 2.0)
+    }
+
+    // Test 18: NSApplicationDidBecomeActive notification triggers recalculation
+    @MainActor
+    func testTask5_GroupD_Test18_NSApplicationDidBecomeActiveNotification_TriggersRecalculation() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let expectation = expectation(description: "Metrics refreshed upon app activation")
+        NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            XCTAssertNotNil(vm.todayFocusedSeconds)
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 2.0)
+    }
+
+    // Test 19: InsightsView onAppear refreshes metrics to latest moment
+    @MainActor
+    func testTask5_GroupD_Test19_InsightsViewOnAppear_TriggersRecalculation() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let view = InsightsView(viewModel: vm)
+        XCTAssertNotNil(view.body)
+    }
+
+    // MARK: Group E: Time Zones & Daylight Saving Time (Tests 20–22)
+
+    // Test 20: Non-UTC time zones (Asia/Kolkata +05:30) calculate midnight at local 00:00:00 IST
+    func testTask5_GroupE_Test20_NonUTCTimeZones_AsiaKolkataMidnightBoundary() {
+        var calIST = Calendar(identifier: .gregorian)
+        calIST.timeZone = TimeZone(identifier: "Asia/Kolkata")! // UTC + 5:30
+
+        var calUTC = Calendar(identifier: .gregorian)
+        calUTC.timeZone = TimeZone(identifier: "UTC")!
+
+        // Session at 18:15 UTC to 18:45 UTC on Oct 20 (30 mins = 1800s).
+        // In UTC: starts and ends on Oct 20.
+        // In IST: starts at 23:45 on Oct 20, ends at 00:15 on Oct 21 (crosses IST midnight!).
+        let startUTC = calUTC.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 18, minute: 15, second: 0))!
+        let endUTC = calUTC.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 18, minute: 45, second: 0))!
+
+        let record = FocusSessionRecord(startTime: startUTC, endTime: endUTC, durationSeconds: 1800, mode: "Focus", taskId: nil)
+
+        // In IST calendar
+        let dISTDay1 = record.duration(on: calIST.date(from: DateComponents(year: 2026, month: 10, day: 20))!, calendar: calIST)
+        let dISTDay2 = record.duration(on: calIST.date(from: DateComponents(year: 2026, month: 10, day: 21))!, calendar: calIST)
+        XCTAssertEqual(dISTDay1, 900, "In IST, pre-midnight slice is 900s")
+        XCTAssertEqual(dISTDay2, 900, "In IST, post-midnight slice is 900s")
+        XCTAssertEqual(dISTDay1 + dISTDay2, 1800)
+
+        // In UTC calendar
+        let dUTCDay1 = record.duration(on: startUTC, calendar: calUTC)
+        XCTAssertEqual(dUTCDay1, 1800, "In UTC, entire 1800s is on Oct 20")
+    }
+
+    // Test 21: Spring forward DST transition (23-hour day) conserves seconds
+    func testTask5_GroupE_Test21_SpringForwardDSTTransition_ConservesSeconds() {
+        var calNY = Calendar(identifier: .gregorian)
+        calNY.timeZone = TimeZone(identifier: "America/New_York")! // DST switch on 2026-03-08
+
+        // Start 2026-03-07 23:00 to 2026-03-08 04:00 (spans midnight and 2am->3am skip)
+        let start = calNY.date(from: DateComponents(year: 2026, month: 3, day: 7, hour: 23, minute: 0, second: 0))!
+        let end = calNY.date(from: DateComponents(year: 2026, month: 3, day: 8, hour: 4, minute: 0, second: 0))!
+        let totalWallSeconds = Int(end.timeIntervalSince(start)) // 4 hours real time due to skip = 14400s
+
+        let record = FocusSessionRecord(startTime: start, endTime: end, durationSeconds: totalWallSeconds, mode: "Focus", taskId: nil)
+
+        let d1 = record.duration(on: calNY.date(from: DateComponents(year: 2026, month: 3, day: 7))!, calendar: calNY)
+        let d2 = record.duration(on: calNY.date(from: DateComponents(year: 2026, month: 3, day: 8))!, calendar: calNY)
+
+        XCTAssertEqual(d1 + d2, totalWallSeconds, "Duration across spring DST transition must strictly conserve seconds")
+        XCTAssertEqual(d1, 3600, "Pre-midnight (23:00 to 24:00) is exactly 1 hour")
+        XCTAssertEqual(d2, totalWallSeconds - 3600)
+    }
+
+    // Test 22: Fall back DST transition (25-hour day) conserves seconds
+    func testTask5_GroupE_Test22_FallBackDSTTransition_ConservesSeconds() {
+        var calNY = Calendar(identifier: .gregorian)
+        calNY.timeZone = TimeZone(identifier: "America/New_York")! // DST fall back on 2026-11-01
+
+        let start = calNY.date(from: DateComponents(year: 2026, month: 10, day: 31, hour: 23, minute: 0, second: 0))!
+        let end = calNY.date(from: DateComponents(year: 2026, month: 11, day: 1, hour: 4, minute: 0, second: 0))!
+        let totalWallSeconds = Int(end.timeIntervalSince(start)) // 6 hours real time due to fall back = 21600s
+
+        let record = FocusSessionRecord(startTime: start, endTime: end, durationSeconds: totalWallSeconds, mode: "Focus", taskId: nil)
+
+        let d1 = record.duration(on: calNY.date(from: DateComponents(year: 2026, month: 10, day: 31))!, calendar: calNY)
+        let d2 = record.duration(on: calNY.date(from: DateComponents(year: 2026, month: 11, day: 1))!, calendar: calNY)
+
+        XCTAssertEqual(d1 + d2, totalWallSeconds, "Duration across fall DST transition must strictly conserve seconds")
+        XCTAssertEqual(d1, 3600)
+        XCTAssertEqual(d2, totalWallSeconds - 3600)
+    }
+
+    // MARK: Group F: Data & Task Integrity (Tests 23–25)
+
+    // Test 23: Task attribution across midnight preserves task credit
+    @MainActor
+    func testTask5_GroupF_Test23_TaskAttributionAcrossMidnight_PreservesTaskCredit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let taskId = vm.tasks[0].id
+        vm.selectTask(at: 0)
+        vm.startTimer()
+        XCTAssertEqual(vm.activeSessionTaskId, taskId)
+
+        let start = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 23, minute: 50, second: 0))!
+        let now = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 0, minute: 15, second: 0))!
+
+        vm.sessionSegmentStartDate = start
+
+        vm.recalculateFocusMetrics(calendar: calendar, now: now)
+
+        XCTAssertEqual(vm.todayFocusedSeconds, 900)
+        XCTAssertEqual(vm.activeSessionTaskId, taskId, "Active session task id must remain assigned to selected task")
+    }
+
+    // Test 24: Quit and reopen after midnight restores allocated analytics
+    @MainActor
+    func testTask5_GroupF_Test24_QuitAndReopenAfterMidnight_RestoresAllocatedAnalytics() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let day1 = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 22, minute: 0, second: 0))!
+        let record = FocusSessionRecord(startTime: day1, endTime: day1.addingTimeInterval(3600), durationSeconds: 3600, mode: "Focus", taskId: nil)
+        vm1.sessionRecords = [record]
+        vm1.persistData(force: true)
+
+        // Simulate relaunch on day 2
+        let storage2 = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage2)
+        vm2.reportingCalendar = calendar
+
+        let day2Noon = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 12, minute: 0, second: 0))!
+        vm2.recalculateFocusMetrics(calendar: calendar, now: day2Noon)
+
+        XCTAssertEqual(vm2.todayFocusedSeconds, 0, "Relaunch on day 2 must compute today's focus as 0")
+        XCTAssertEqual(vm2.weeklyFocusedSeconds, 3600, "Weekly retains day 1 record")
+        XCTAssertEqual(vm2.lifetimeFocusedSeconds, 3600)
+    }
+
+    // Test 25: Backward compatibility: legacy records without drift
+    @MainActor
+    func testTask5_GroupF_Test25_BackwardCompatibility_LegacyRecordsWithoutDrift() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Test with legacyLifetimeFocusedSeconds
+        vm.legacyLifetimeFocusedSeconds = 7200
+        vm.recalculateFocusMetrics()
+
+        XCTAssertTrue(vm.lifetimeFocusedSeconds >= 7200, "Lifetime focus must include legacy total")
+    }
 }
