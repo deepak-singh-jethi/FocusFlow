@@ -10,6 +10,15 @@ public final class FocusFlowAppDelegate: NSObject, NSApplicationDelegate, NSWind
     public let audioPlayer = AmbientAudioPlayer()
     public var mainWindow: NSWindow?
 
+    /// Tracks whether a close request was received while the window was in native macOS Full Screen mode
+    public private(set) var isPendingCloseAfterFullScreenExit: Bool = false
+
+    /// Counter for native fullscreen exit requests triggered by close actions
+    public private(set) var fullScreenExitInitiatedCount: Int = 0
+
+    /// Injectable hook to intercept or override fullscreen exit during tests. Defaults to nil (calls `sender.toggleFullScreen(nil)`).
+    public var fullScreenExitAction: ((NSWindow) -> Void)? = nil
+
     public override init() {
         self.viewModel = TimerViewModel()
         super.init()
@@ -34,8 +43,44 @@ public final class FocusFlowAppDelegate: NSObject, NSApplicationDelegate, NSWind
     }
 
     public func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if sender.styleMask.contains(.fullScreen) {
+            guard !isPendingCloseAfterFullScreenExit else {
+                return false
+            }
+            isPendingCloseAfterFullScreenExit = true
+            fullScreenExitInitiatedCount += 1
+
+            if let customAction = fullScreenExitAction {
+                customAction(sender)
+            } else {
+                if sender.contentViewController == nil {
+                    let fallbackVC = NSViewController()
+                    fallbackVC.view = NSView()
+                    sender.contentViewController = fallbackVC
+                }
+                sender.toggleFullScreen(nil)
+            }
+            return false
+        }
+
+        isPendingCloseAfterFullScreenExit = false
         sender.orderOut(nil)
         return false
+    }
+
+    public func windowDidExitFullScreen(_ notification: Notification) {
+        guard let window = (notification.object as? NSWindow) ?? mainWindow else { return }
+        if isPendingCloseAfterFullScreenExit {
+            isPendingCloseAfterFullScreenExit = false
+            window.orderOut(nil)
+        }
+    }
+
+    public func windowDidFailToExitFullScreen(_ window: NSWindow) {
+        if isPendingCloseAfterFullScreenExit {
+            isPendingCloseAfterFullScreenExit = false
+            window.orderOut(nil)
+        }
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
@@ -43,6 +88,7 @@ public final class FocusFlowAppDelegate: NSObject, NSApplicationDelegate, NSWind
     }
 
     public func showMainWindow() {
+        isPendingCloseAfterFullScreenExit = false
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
 

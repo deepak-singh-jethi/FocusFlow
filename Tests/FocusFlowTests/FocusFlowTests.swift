@@ -7991,4 +7991,284 @@ final class FocusFlowTests: XCTestCase {
         let expectedDay2Midnight = calUTC.date(from: DateComponents(year: 2026, month: 10, day: 23, hour: 0, minute: 0, second: 0))!.addingTimeInterval(0.05)
         XCTAssertEqual(vm.scheduledMidnightFireDate, expectedDay2Midnight, "After midnight refresh, next midnight must advance to subsequent day")
     }
+
+    // MARK: - Native macOS Full-Screen Window Close Safety Tests
+
+    // Regression Requirement 1: Normal window red-close behavior remains unchanged (orders out immediately, returns false).
+    @MainActor
+    func testFullScreenClose_NormalWindow_HidesImmediatelyAndPreservesMenuBar() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let appDelegate = FocusFlowAppDelegate(viewModel: vm)
+        let normalWindow = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 600, height: 400),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        normalWindow.makeKeyAndOrderFront(nil)
+        XCTAssertTrue(normalWindow.isVisible)
+        XCTAssertFalse(normalWindow.styleMask.contains(.fullScreen))
+
+        let shouldClose = appDelegate.windowShouldClose(normalWindow)
+        XCTAssertFalse(shouldClose, "Must return false to prevent window destruction and keep menu bar app active")
+        XCTAssertFalse(normalWindow.isVisible, "Normal window must be ordered out immediately on close")
+        XCTAssertFalse(appDelegate.isPendingCloseAfterFullScreenExit, "Pending fullscreen close flag must remain false for normal window")
+    }
+
+    // Regression Requirement 2 & 3: Closing a fullscreen window does not hide it before exit, and pending close is processed after exit.
+    @MainActor
+    func testFullScreenClose_FullScreenWindow_DoesNotHidePrematurelyAndClosesAfterExit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let appDelegate = FocusFlowAppDelegate(viewModel: vm)
+        var exitActionCalled = false
+        appDelegate.fullScreenExitAction = { window in
+            exitActionCalled = true
+        }
+
+        let fsWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled, .closable, .resizable, .fullScreen],
+            backing: .buffered,
+            defer: false
+        )
+        fsWindow.makeKeyAndOrderFront(nil)
+        XCTAssertTrue(fsWindow.isVisible)
+        XCTAssertTrue(fsWindow.styleMask.contains(.fullScreen))
+
+        // 1. User clicks red close button while in fullscreen
+        let shouldClose = appDelegate.windowShouldClose(fsWindow)
+        XCTAssertFalse(shouldClose, "windowShouldClose must return false to avoid window destruction")
+        XCTAssertTrue(fsWindow.isVisible, "Fullscreen window must NOT be ordered out prematurely before exit completes (prevents black screen)")
+        XCTAssertTrue(appDelegate.isPendingCloseAfterFullScreenExit, "Pending close flag must be set")
+        XCTAssertTrue(exitActionCalled, "Native fullscreen exit must be initiated")
+        XCTAssertEqual(appDelegate.fullScreenExitInitiatedCount, 1)
+
+        // 2. macOS completes the fullscreen exit transition
+        let exitNotification = Notification(name: NSWindow.didExitFullScreenNotification, object: fsWindow)
+        appDelegate.windowDidExitFullScreen(exitNotification)
+
+        XCTAssertFalse(appDelegate.isPendingCloseAfterFullScreenExit, "Pending close flag must be cleared after exit")
+        XCTAssertFalse(fsWindow.isVisible, "Window must be ordered out once fullscreen exit has completed")
+    }
+
+    // Regression Requirement 4: Ordinary fullscreen exit without a close request keeps the window visible.
+    @MainActor
+    func testFullScreenClose_OrdinaryExitWithoutCloseRequest_LeavesWindowVisible() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let appDelegate = FocusFlowAppDelegate(viewModel: vm)
+        let fsWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled, .closable, .resizable, .fullScreen],
+            backing: .buffered,
+            defer: false
+        )
+        fsWindow.makeKeyAndOrderFront(nil)
+        XCTAssertTrue(fsWindow.isVisible)
+
+        // Ordinary exit (green button or Control+Command+F) -> no windowShouldClose called
+        XCTAssertFalse(appDelegate.isPendingCloseAfterFullScreenExit)
+
+        let exitNotification = Notification(name: NSWindow.didExitFullScreenNotification, object: fsWindow)
+        appDelegate.windowDidExitFullScreen(exitNotification)
+
+        XCTAssertTrue(fsWindow.isVisible, "Window must remain visible when user exits fullscreen normally without requesting close")
+        XCTAssertFalse(appDelegate.isPendingCloseAfterFullScreenExit)
+    }
+
+    // Regression Requirement 5: Repeated close requests do not cause double transitions.
+    @MainActor
+    func testFullScreenClose_RepeatedCloseRequests_DoNotCauseDoubleTransitions() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let appDelegate = FocusFlowAppDelegate(viewModel: vm)
+        var exitCallCount = 0
+        appDelegate.fullScreenExitAction = { _ in
+            exitCallCount += 1
+        }
+
+        let fsWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled, .closable, .resizable, .fullScreen],
+            backing: .buffered,
+            defer: false
+        )
+        fsWindow.makeKeyAndOrderFront(nil)
+
+        // User clicks close multiple times while transition is in flight
+        let close1 = appDelegate.windowShouldClose(fsWindow)
+        let close2 = appDelegate.windowShouldClose(fsWindow)
+        let close3 = appDelegate.windowShouldClose(fsWindow)
+
+        XCTAssertFalse(close1)
+        XCTAssertFalse(close2)
+        XCTAssertFalse(close3)
+        XCTAssertEqual(exitCallCount, 1, "Native exit must only be triggered once despite repeated close clicks")
+        XCTAssertEqual(appDelegate.fullScreenExitInitiatedCount, 1)
+        XCTAssertTrue(fsWindow.isVisible, "Window must remain visible during in-flight transition")
+
+        // Exit finishes
+        appDelegate.windowDidExitFullScreen(Notification(name: NSWindow.didExitFullScreenNotification, object: fsWindow))
+        XCTAssertFalse(fsWindow.isVisible)
+        XCTAssertFalse(appDelegate.isPendingCloseAfterFullScreenExit)
+    }
+
+    // Regression Requirement 6: Closing and reopening the main window works (including reopening during in-flight exit).
+    @MainActor
+    func testFullScreenClose_ReopeningMainWindow_RestoresVisibilityAndClearsPendingClose() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let appDelegate = FocusFlowAppDelegate(viewModel: vm)
+        appDelegate.fullScreenExitAction = { _ in }
+        appDelegate.showMainWindow()
+        guard let window = appDelegate.mainWindow else {
+            XCTFail("Main window must be created")
+            return
+        }
+        XCTAssertTrue(window.isVisible)
+
+        // Close it normally
+        _ = appDelegate.windowShouldClose(window)
+        XCTAssertFalse(window.isVisible)
+
+        // Reopen from menu bar / app delegate
+        appDelegate.showMainWindow()
+        XCTAssertTrue(window.isVisible, "Main window must become visible again upon showMainWindow")
+
+        // Now simulate entering fullscreen and requesting close
+        let fsWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled, .closable, .resizable, .fullScreen],
+            backing: .buffered,
+            defer: false
+        )
+        fsWindow.makeKeyAndOrderFront(nil)
+        appDelegate.mainWindow = fsWindow
+        _ = appDelegate.windowShouldClose(fsWindow)
+        XCTAssertTrue(appDelegate.isPendingCloseAfterFullScreenExit)
+
+        // Before exit completes, user reopens from menu bar companion
+        appDelegate.showMainWindow()
+        XCTAssertFalse(appDelegate.isPendingCloseAfterFullScreenExit, "showMainWindow must cancel pending close")
+
+        // Fullscreen exit finishes later
+        appDelegate.windowDidExitFullScreen(Notification(name: NSWindow.didExitFullScreenNotification, object: fsWindow))
+        XCTAssertTrue(fsWindow.isVisible, "Window must remain visible because user reopened it before exit completed")
+    }
+
+    // Regression Requirement 7: Running Focus Timer continues after window close (both normal and fullscreen).
+    @MainActor
+    func testFullScreenClose_RunningFocusTimerContinuesAfterWindowClose() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let appDelegate = FocusFlowAppDelegate(viewModel: vm)
+        appDelegate.fullScreenExitAction = { _ in }
+        appDelegate.viewModel.applyPresetDirectly(name: "Focus", minutes: 25)
+        appDelegate.viewModel.startTimer()
+        XCTAssertTrue(appDelegate.viewModel.isTimerRunning)
+
+        let fsWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled, .closable, .resizable, .fullScreen],
+            backing: .buffered,
+            defer: false
+        )
+        fsWindow.makeKeyAndOrderFront(nil)
+
+        // Close fullscreen window
+        _ = appDelegate.windowShouldClose(fsWindow)
+        XCTAssertTrue(appDelegate.viewModel.isTimerRunning, "Timer countdown must continue when fullscreen window close is initiated")
+
+        appDelegate.windowDidExitFullScreen(Notification(name: NSWindow.didExitFullScreenNotification, object: fsWindow))
+        XCTAssertFalse(fsWindow.isVisible)
+        XCTAssertTrue(appDelegate.viewModel.isTimerRunning, "Timer countdown must continue after fullscreen window is hidden")
+    }
+
+    // Regression Requirement 8: Running Stopwatch continues after window close.
+    @MainActor
+    func testFullScreenClose_RunningStopwatchContinuesAfterWindowClose() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let appDelegate = FocusFlowAppDelegate(viewModel: vm)
+        appDelegate.fullScreenExitAction = { _ in }
+        appDelegate.viewModel.startStopwatch()
+        XCTAssertTrue(appDelegate.viewModel.isStopwatchRunning)
+
+        let fsWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled, .closable, .resizable, .fullScreen],
+            backing: .buffered,
+            defer: false
+        )
+        fsWindow.makeKeyAndOrderFront(nil)
+
+        _ = appDelegate.windowShouldClose(fsWindow)
+        XCTAssertTrue(appDelegate.viewModel.isStopwatchRunning)
+
+        appDelegate.windowDidExitFullScreen(Notification(name: NSWindow.didExitFullScreenNotification, object: fsWindow))
+        XCTAssertFalse(fsWindow.isVisible)
+        XCTAssertTrue(appDelegate.viewModel.isStopwatchRunning, "Stopwatch must continue running after fullscreen window is hidden")
+    }
+
+    // Regression Requirement 9: Window close does not trigger app termination or corrupt persisted timer state.
+    @MainActor
+    func testFullScreenClose_DoesNotTriggerAppTerminationOrCorruptPersistedState() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let appDelegate = FocusFlowAppDelegate(viewModel: vm)
+        appDelegate.fullScreenExitAction = { _ in }
+        appDelegate.viewModel.applyPresetDirectly(name: "Focus", minutes: 25)
+        appDelegate.viewModel.startTimer()
+
+        let fsWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled, .closable, .resizable, .fullScreen],
+            backing: .buffered,
+            defer: false
+        )
+        fsWindow.makeKeyAndOrderFront(nil)
+
+        _ = appDelegate.windowShouldClose(fsWindow)
+        appDelegate.windowDidExitFullScreen(Notification(name: NSWindow.didExitFullScreenNotification, object: fsWindow))
+
+        XCTAssertFalse(appDelegate.viewModel.hasTerminated, "Window close must not trigger app termination")
+        XCTAssertFalse(appDelegate.viewModel.isPersistenceBlocked, "Persistence must remain unblocked")
+        XCTAssertNil(appDelegate.viewModel.storageErrorMessage)
+    }
+
+    // Regression Requirement 10: Failed fullscreen exit handles cleanup gracefully.
+    @MainActor
+    func testFullScreenClose_FailedExit_CleansUpPendingState() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let appDelegate = FocusFlowAppDelegate(viewModel: vm)
+        appDelegate.fullScreenExitAction = { _ in }
+        let fsWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled, .closable, .resizable, .fullScreen],
+            backing: .buffered,
+            defer: false
+        )
+        fsWindow.makeKeyAndOrderFront(nil)
+
+        _ = appDelegate.windowShouldClose(fsWindow)
+        XCTAssertTrue(appDelegate.isPendingCloseAfterFullScreenExit)
+
+        // AppKit reports failure to exit fullscreen
+        appDelegate.windowDidFailToExitFullScreen(fsWindow)
+
+        XCTAssertFalse(appDelegate.isPendingCloseAfterFullScreenExit, "Failed exit must reset pending close flag")
+        XCTAssertFalse(fsWindow.isVisible, "Window must be hidden as fallback")
+    }
 }
