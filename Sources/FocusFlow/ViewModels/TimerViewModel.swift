@@ -22,6 +22,8 @@ public class TimerViewModel: ObservableObject {
             if pausedSession != nil {
                 pausedSession?.currentSession = currentSession
             }
+            guard !isLoadingPersistedData else { return }
+            persistData()
         }
     }
     private var isRevertingBlockedSetting = false
@@ -44,8 +46,40 @@ public class TimerViewModel: ObservableObject {
     private var fractionalRemaining: TimeInterval?
 
     // Custom Duration States
-    @Published public var customMinutes: Int = 25
-    @Published public var customSeconds: Int = 0
+    @Published public var customMinutes: Int = 25 {
+        didSet {
+            guard !isLoadingPersistedData else { return }
+            let safeM = max(0, min(customMinutes, 360))
+            if safeM != customMinutes { customMinutes = safeM; return }
+            let total = safeM * 60 + customSeconds
+            customDurationSeconds = max(5, total)
+            if activePreset == "Custom" || activeMode == "Custom Timer" {
+                if !isTimerRunning && (pausedSession == nil) {
+                    totalTime = customDurationSeconds
+                    timeRemaining = customDurationSeconds
+                    preciseProgress = 1.0
+                }
+            }
+            persistData()
+        }
+    }
+    @Published public var customSeconds: Int = 0 {
+        didSet {
+            guard !isLoadingPersistedData else { return }
+            let safeS = max(0, min(customSeconds, 59))
+            if safeS != customSeconds { customSeconds = safeS; return }
+            let total = customMinutes * 60 + safeS
+            customDurationSeconds = max(5, total)
+            if activePreset == "Custom" || activeMode == "Custom Timer" {
+                if !isTimerRunning && (pausedSession == nil) {
+                    totalTime = customDurationSeconds
+                    timeRemaining = customDurationSeconds
+                    preciseProgress = 1.0
+                }
+            }
+            persistData()
+        }
+    }
     public private(set) var customDurationSeconds: Int = 25 * 60
 
     // Preset & Modes
@@ -94,7 +128,14 @@ public class TimerViewModel: ObservableObject {
         FocusTask(title: "Core Development & Refactor", estimatedMinutes: 45, timeSpentSeconds: 0, icon: "laptopcomputer", iconColor: .purple),
         FocusTask(title: "Inbox & Team Follow-ups", estimatedMinutes: 15, timeSpentSeconds: 0, icon: "tray.fill", iconColor: .teal)
     ]
-    @Published public var activeTaskIndex: Int = 0
+    @Published public var activeTaskIndex: Int = 0 {
+        didSet {
+            guard !isLoadingPersistedData else { return }
+            if pausedSession != nil {
+                pausedSession?.activeTaskIndex = activeTaskIndex
+            }
+        }
+    }
     @Published public var completedSessions: Int = 0
     @Published public var notes: [String] = []
     @Published public var dailyGoalHours: Int = 4 {
@@ -216,7 +257,12 @@ public class TimerViewModel: ObservableObject {
     }
 
     // Active Timer Mode: "Pomodoro" or "Custom Timer"
-    @Published public var activeMode: String = "Pomodoro"
+    @Published public var activeMode: String = "Pomodoro" {
+        didSet {
+            guard !isLoadingPersistedData else { return }
+            persistData()
+        }
+    }
     public var isRunning: Bool { isTimerRunning || isStopwatchRunning }
 
     public init(storage: FocusStorageService = .shared) {
@@ -346,7 +392,7 @@ public class TimerViewModel: ObservableObject {
         self.completedSessions = saved.completedSessions
         self.notes = saved.notes
         self.dailyGoalHours = saved.dailyGoalHours
-        self.totalSessions = saved.totalSessions
+        self.totalSessions = max(1, saved.totalSessions)
         self.autoStartNextSession = saved.autoStartNextSession
         self.activePreset = saved.activePreset
         self.laps = saved.laps
@@ -385,23 +431,49 @@ public class TimerViewModel: ObservableObject {
         self.isStopwatchRunning = false
         self.stopwatchStartDate = nil
 
+        // Task Selection Restoration
+        if let savedTaskId = saved.selectedTaskId,
+           let foundIndex = self.tasks.firstIndex(where: { $0.id == savedTaskId }),
+           !self.tasks[foundIndex].isCompleted {
+            self.activeTaskIndex = foundIndex
+        } else if let paused = saved.pausedSession,
+                  self.tasks.indices.contains(paused.activeTaskIndex),
+                  !self.tasks[paused.activeTaskIndex].isCompleted {
+            self.activeTaskIndex = paused.activeTaskIndex
+        } else if let firstEligible = self.tasks.firstIndex(where: { !$0.isCompleted }) {
+            self.activeTaskIndex = firstEligible
+        } else {
+            self.activeTaskIndex = 0
+        }
+
         if let paused = saved.pausedSession {
+            // Highest Priority: Existing Paused Timer Session
             self.activePreset = paused.activePreset
             self.activeMode = paused.activeMode
             self.isBreakSession = paused.isBreakSession
-            self.totalTime = paused.totalTime
-            self.timeRemaining = paused.timeRemaining
-            self.currentSession = paused.currentSession
-            if self.tasks.indices.contains(paused.activeTaskIndex) {
-                self.activeTaskIndex = paused.activeTaskIndex
-            }
+            self.totalTime = max(5, paused.totalTime)
+            self.timeRemaining = max(1, min(paused.timeRemaining, self.totalTime))
+            self.currentSession = min(max(1, paused.currentSession), max(1, self.totalSessions))
+            self.pausedSession?.activeTaskIndex = self.activeTaskIndex
+
             if paused.activeMode == "Custom Timer" || paused.activePreset == "Custom" {
                 self.customMinutes = paused.customMinutes
                 self.customSeconds = paused.customSeconds
-                self.customDurationSeconds = paused.totalTime
+                self.customDurationSeconds = max(5, paused.totalTime)
+            } else if let m = saved.configuredCustomMinutes, let s = saved.configuredCustomSeconds {
+                let safeM = max(0, min(m, 360))
+                let safeS = max(0, min(s, 59))
+                self.customMinutes = safeM
+                self.customSeconds = safeS
+                self.customDurationSeconds = max(5, safeM * 60 + safeS)
+            } else {
+                self.customMinutes = 25
+                self.customSeconds = 0
+                self.customDurationSeconds = 25 * 60
             }
-            if paused.totalTime > 0 {
-                self.preciseProgress = min(max(Double(paused.timeRemaining) / Double(paused.totalTime), 0.0), 1.0)
+
+            if self.totalTime > 0 {
+                self.preciseProgress = min(max(Double(self.timeRemaining) / Double(self.totalTime), 0.0), 1.0)
             } else {
                 self.preciseProgress = paused.preciseProgress
             }
@@ -410,25 +482,59 @@ public class TimerViewModel: ObservableObject {
             self.fractionalRemaining = nil
             self.activeSessionTaskId = nil
         } else {
-            if self.activePreset == "Short Break" || self.activePreset == "Break" {
-                self.isBreakSession = true
-                self.totalTime = 5 * 60
-                self.timeRemaining = 5 * 60
-                self.preciseProgress = 1.0
-            } else if self.activePreset == "Long Break" {
-                self.isBreakSession = true
-                self.totalTime = 15 * 60
-                self.timeRemaining = 15 * 60
-                self.preciseProgress = 1.0
-            } else if self.activePreset == "Focus" {
-                self.isBreakSession = false
-                self.totalTime = 25 * 60
-                self.timeRemaining = 25 * 60
-                self.preciseProgress = 1.0
+            // Top-Level Idle Configuration or Legacy Defaults
+            let savedMode = saved.activeMode ?? (saved.activePreset == "Custom" ? "Custom Timer" : "Pomodoro")
+            self.activeMode = savedMode
+
+            let isBreak: Bool
+            if let savedIsBreak = saved.configuredIsBreakSession {
+                isBreak = savedIsBreak
+            } else {
+                isBreak = (saved.activePreset == "Short Break" || saved.activePreset == "Long Break" || saved.activePreset == "Break")
             }
+            self.isBreakSession = isBreak
+
+            let savedTotalSessions = max(1, self.totalSessions)
+            if let savedCurrent = saved.configuredCurrentSession {
+                self.currentSession = min(max(1, savedCurrent), savedTotalSessions)
+            } else {
+                self.currentSession = min(max(1, self.currentSession), savedTotalSessions)
+            }
+
+            let customM = max(0, min(saved.configuredCustomMinutes ?? 25, 360))
+            let customS = max(0, min(saved.configuredCustomSeconds ?? 0, 59))
+            self.customMinutes = customM
+            self.customSeconds = customS
+            let computedCustom = customM * 60 + customS
+            self.customDurationSeconds = (computedCustom > 0) ? computedCustom : 25 * 60
+
+            let resolvedTotal: Int
+            if let savedTotal = saved.configuredTotalTime, savedTotal > 0 {
+                resolvedTotal = savedTotal
+            } else if saved.activePreset == "Short Break" || saved.activePreset == "Break" {
+                resolvedTotal = 5 * 60
+            } else if saved.activePreset == "Long Break" {
+                resolvedTotal = 15 * 60
+            } else if saved.activePreset == "Custom" || savedMode == "Custom Timer" {
+                resolvedTotal = self.customDurationSeconds
+            } else {
+                resolvedTotal = 25 * 60
+            }
+
+            self.totalTime = max(5, resolvedTotal)
+            self.timeRemaining = self.totalTime
+            self.preciseProgress = 1.0
+
+            if self.activePreset == "Custom" || savedMode == "Custom Timer" {
+                self.customDurationSeconds = self.totalTime
+                self.customMinutes = self.totalTime / 60
+                self.customSeconds = self.totalTime % 60
+            }
+
             self.isTimerRunning = false
             self.targetEndDate = nil
             self.fractionalRemaining = nil
+            self.activeSessionTaskId = nil
         }
     }
 
@@ -459,6 +565,13 @@ public class TimerViewModel: ObservableObject {
             currentStopwatchElapsed = max(0.0, TimeInterval(stopwatchTime))
         }
 
+        let currentSelectedTaskId: UUID?
+        if tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted {
+            currentSelectedTaskId = tasks[activeTaskIndex].id
+        } else {
+            currentSelectedTaskId = nil
+        }
+
         let payload = FocusAppData(
             tasks: tasks,
             focusedSeconds: todayFocusedSeconds,
@@ -476,7 +589,14 @@ public class TimerViewModel: ObservableObject {
             pausedSession: pausedSession,
             stopwatchElapsedSeconds: currentStopwatchElapsed,
             lastRecordedLapElapsedSeconds: lastRecordedLapElapsedSeconds,
-            nextLapNumber: nextLapNumber
+            nextLapNumber: nextLapNumber,
+            selectedTaskId: currentSelectedTaskId,
+            activeMode: activeMode,
+            configuredTotalTime: totalTime,
+            configuredCustomMinutes: customMinutes,
+            configuredCustomSeconds: customSeconds,
+            configuredCurrentSession: currentSession,
+            configuredIsBreakSession: isBreakSession
         )
         do {
             try storage.save(payload)

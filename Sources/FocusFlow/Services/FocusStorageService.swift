@@ -197,6 +197,14 @@ public struct FocusAppData: Codable, Equatable {
     public var stopwatchElapsedSeconds: TimeInterval
     public var lastRecordedLapElapsedSeconds: TimeInterval?
     public var nextLapNumber: Int?
+    // Task 4: Idle Timer Configuration & Selection Persistence
+    public var selectedTaskId: UUID?
+    public var activeMode: String?
+    public var configuredTotalTime: Int?
+    public var configuredCustomMinutes: Int?
+    public var configuredCustomSeconds: Int?
+    public var configuredCurrentSession: Int?
+    public var configuredIsBreakSession: Bool?
 
     enum CodingKeys: String, CodingKey {
         case tasks
@@ -216,6 +224,14 @@ public struct FocusAppData: Codable, Equatable {
         case stopwatchElapsedSeconds
         case lastRecordedLapElapsedSeconds
         case nextLapNumber
+        // Task 4 Keys
+        case selectedTaskId
+        case activeMode
+        case configuredTotalTime
+        case configuredCustomMinutes
+        case configuredCustomSeconds
+        case configuredCurrentSession
+        case configuredIsBreakSession
     }
 
     public init(
@@ -235,7 +251,14 @@ public struct FocusAppData: Codable, Equatable {
         pausedSession: PausedTimerSession? = nil,
         stopwatchElapsedSeconds: TimeInterval = 0.0,
         lastRecordedLapElapsedSeconds: TimeInterval? = nil,
-        nextLapNumber: Int? = nil
+        nextLapNumber: Int? = nil,
+        selectedTaskId: UUID? = nil,
+        activeMode: String? = nil,
+        configuredTotalTime: Int? = nil,
+        configuredCustomMinutes: Int? = nil,
+        configuredCustomSeconds: Int? = nil,
+        configuredCurrentSession: Int? = nil,
+        configuredIsBreakSession: Bool? = nil
     ) {
         self.tasks = tasks
         self.focusedSeconds = focusedSeconds
@@ -266,6 +289,13 @@ public struct FocusAppData: Codable, Equatable {
         } else {
             self.nextLapNumber = nil
         }
+        self.selectedTaskId = selectedTaskId
+        self.activeMode = activeMode
+        self.configuredTotalTime = configuredTotalTime
+        self.configuredCustomMinutes = configuredCustomMinutes
+        self.configuredCustomSeconds = configuredCustomSeconds
+        self.configuredCurrentSession = configuredCurrentSession
+        self.configuredIsBreakSession = configuredIsBreakSession
     }
 
     public init(from decoder: Decoder) throws {
@@ -304,6 +334,14 @@ public struct FocusAppData: Codable, Equatable {
         } else {
             self.nextLapNumber = nil
         }
+
+        self.selectedTaskId = try container.decodeIfPresent(UUID.self, forKey: .selectedTaskId)
+        self.activeMode = try container.decodeIfPresent(String.self, forKey: .activeMode)
+        self.configuredTotalTime = try container.decodeIfPresent(Int.self, forKey: .configuredTotalTime)
+        self.configuredCustomMinutes = try container.decodeIfPresent(Int.self, forKey: .configuredCustomMinutes)
+        self.configuredCustomSeconds = try container.decodeIfPresent(Int.self, forKey: .configuredCustomSeconds)
+        self.configuredCurrentSession = try container.decodeIfPresent(Int.self, forKey: .configuredCurrentSession)
+        self.configuredIsBreakSession = try container.decodeIfPresent(Bool.self, forKey: .configuredIsBreakSession)
 
         // Backward compatibility migration:
         // If sessionRecords is empty and legacyLifetimeFocusedSeconds was nil,

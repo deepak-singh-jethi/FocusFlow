@@ -5646,4 +5646,671 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(vm2.tasks[0].timeSpentSeconds, 30, "Task must retain exactly 30s upon relaunch")
         XCTAssertEqual(vm2.stopwatchTime, 90, "Stopwatch elapsed time must survive relaunch")
     }
+
+    // MARK: - Task 4: Restart-State Persistence Regression Tests (22 Tests)
+
+    // Test 1: Idle Custom Timer 45:30 survives Quit/Reopen
+    @MainActor
+    func testTask4_01_IdleCustomTimer4530SurvivesRestart() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.setCustomDuration(minutes: 45, seconds: 30)
+        XCTAssertEqual(vm1.activePreset, "Custom")
+        XCTAssertEqual(vm1.activeMode, "Custom Timer")
+        XCTAssertEqual(vm1.totalTime, 2730)
+        XCTAssertEqual(vm1.timeRemaining, 2730)
+        XCTAssertEqual(vm1.timerTimeString, "45:30")
+        XCTAssertEqual(vm1.customMinutes, 45)
+        XCTAssertEqual(vm1.customSeconds, 30)
+        XCTAssertFalse(vm1.isTimerRunning)
+
+        vm1.handleAppTermination()
+
+        // Inspect raw saved JSON on disk
+        let savedBytes = try? Data(contentsOf: tempURL)
+        XCTAssertNotNil(savedBytes)
+        if let bytes = savedBytes, let json = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] {
+            XCTAssertEqual(json["activePreset"] as? String, "Custom")
+            XCTAssertEqual(json["activeMode"] as? String, "Custom Timer")
+            XCTAssertEqual(json["configuredTotalTime"] as? Int, 2730)
+            XCTAssertEqual(json["configuredCustomMinutes"] as? Int, 45)
+            XCTAssertEqual(json["configuredCustomSeconds"] as? Int, 30)
+        }
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.activePreset, "Custom")
+        XCTAssertEqual(vm2.activeMode, "Custom Timer")
+        XCTAssertEqual(vm2.totalTime, 2730)
+        XCTAssertEqual(vm2.timeRemaining, 2730)
+        XCTAssertEqual(vm2.timerTimeString, "45:30")
+        XCTAssertEqual(vm2.customMinutes, 45)
+        XCTAssertEqual(vm2.customSeconds, 30)
+        XCTAssertFalse(vm2.isTimerRunning)
+    }
+
+    // Test 2: Idle selected Task C survives restart with exactly the same UUID
+    @MainActor
+    func testTask4_02_IdleSelectedTaskCSurvivesRestartWithSameUUID() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        while !vm1.tasks.isEmpty { vm1.removeTask(at: 0) }
+        vm1.addTask(title: "Task A", expectedMinutes: 25)
+        vm1.addTask(title: "Task B", expectedMinutes: 25)
+        vm1.addTask(title: "Task C", expectedMinutes: 25)
+
+        let taskCId = vm1.tasks[2].id
+        vm1.selectTask(at: 2)
+        XCTAssertEqual(vm1.activeTaskIndex, 2)
+        XCTAssertEqual(vm1.tasks[vm1.activeTaskIndex].id, taskCId)
+
+        vm1.handleAppTermination()
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.tasks.count, 3)
+        XCTAssertEqual(vm2.activeTaskIndex, 2)
+        XCTAssertEqual(vm2.tasks[vm2.activeTaskIndex].id, taskCId)
+        XCTAssertEqual(vm2.tasks[vm2.activeTaskIndex].title, "Task C")
+        XCTAssertFalse(vm2.tasks[2].isCompleted)
+        XCTAssertEqual(vm2.tasks[2].timeSpentSeconds, 0)
+    }
+
+    // Test 3: Selection survives when the selected task is not at index zero
+    @MainActor
+    func testTask4_03_SelectionSurvivesWhenTaskNotAtIndexZero() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        XCTAssertTrue(vm1.tasks.count >= 4)
+        let targetIndex = 3
+        let targetId = vm1.tasks[targetIndex].id
+
+        vm1.selectTask(at: targetIndex)
+        XCTAssertEqual(vm1.activeTaskIndex, targetIndex)
+
+        vm1.handleAppTermination()
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.activeTaskIndex, targetIndex)
+        XCTAssertEqual(vm2.tasks[vm2.activeTaskIndex].id, targetId)
+    }
+
+    // Test 4: Intentionally empty tasks remain empty
+    @MainActor
+    func testTask4_04_IntentionallyEmptyTasksRemainEmpty() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        while !vm1.tasks.isEmpty { vm1.removeTask(at: 0) }
+        XCTAssertTrue(vm1.tasks.isEmpty)
+
+        vm1.handleAppTermination()
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertTrue(vm2.tasks.isEmpty)
+        XCTAssertEqual(vm2.activeTaskIndex, 0)
+        XCTAssertNil(vm2.activeSessionTaskId)
+    }
+
+    // Test 5: All-completed tasks do not restore an invalid active assignment
+    @MainActor
+    func testTask4_05_AllCompletedTasksDoNotRestoreInvalidActiveAssignment() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        for i in 0..<vm1.tasks.count {
+            if !vm1.tasks[i].isCompleted {
+                vm1.toggleTaskCompletion(at: i)
+            }
+        }
+        XCTAssertTrue(vm1.tasks.allSatisfy(\.isCompleted))
+
+        vm1.handleAppTermination()
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertTrue(vm2.tasks.allSatisfy(\.isCompleted))
+        XCTAssertNil(vm2.activeSessionTaskId)
+
+        // Starting stopwatch must NOT credit any completed task
+        vm2.startStopwatch()
+        vm2.stopwatchStartDate = vm2.stopwatchStartDate?.addingTimeInterval(-60.0)
+        vm2.stopStopwatch()
+
+        for task in vm2.tasks {
+            XCTAssertEqual(task.timeSpentSeconds, 0, "No completed task should receive stopwatch time")
+        }
+    }
+
+    // Test 6: Saved selected task missing from collection is handled safely
+    @MainActor
+    func testTask4_06_SavedSelectedTaskMissingFromCollectionHandledSafely() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t4_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let primaryURL = tempDir.appendingPathComponent("focusflow_data.json")
+        let task1 = FocusTask(title: "Task 1", estimatedMinutes: 25)
+        let missingUUID = UUID()
+
+        let data = FocusAppData(
+            tasks: [task1],
+            selectedTaskId: missingUUID,
+            activeMode: "Pomodoro"
+        )
+        let bytes = try JSONEncoder().encode(data)
+        try bytes.write(to: primaryURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm.tasks.count, 1)
+        XCTAssertEqual(vm.activeTaskIndex, 0)
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].id, task1.id)
+    }
+
+    // Test 7: Selected task marked completed in saved data is handled safely
+    @MainActor
+    func testTask4_07_SelectedTaskMarkedCompletedInSavedDataHandledSafely() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t4_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let primaryURL = tempDir.appendingPathComponent("focusflow_data.json")
+        let task1 = FocusTask(title: "Task 1", estimatedMinutes: 25, isCompleted: false)
+        let task2 = FocusTask(title: "Task 2", estimatedMinutes: 25, isCompleted: true)
+
+        let data = FocusAppData(
+            tasks: [task1, task2],
+            selectedTaskId: task2.id,
+            activeMode: "Pomodoro"
+        )
+        let bytes = try JSONEncoder().encode(data)
+        try bytes.write(to: primaryURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+
+        // task2 is completed, so fallback must safely select task1 (first uncompleted)
+        XCTAssertEqual(vm.activeTaskIndex, 0)
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].id, task1.id)
+        XCTAssertFalse(vm.tasks[vm.activeTaskIndex].isCompleted)
+    }
+
+    // Test 8: Pomodoro session 3 of 4 survives idle restart
+    @MainActor
+    func testTask4_08_PomodoroSession3of4SurvivesIdleRestart() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.totalSessions = 4
+        vm1.currentSession = 3
+        XCTAssertEqual(vm1.currentSession, 3)
+        XCTAssertEqual(vm1.totalSessions, 4)
+
+        vm1.handleAppTermination()
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.currentSession, 3)
+        XCTAssertEqual(vm2.totalSessions, 4)
+        XCTAssertEqual(vm2.completedSessions, 0, "No new completed session counted on restart")
+    }
+
+    // Test 9: Short Break idle configuration survives restart
+    @MainActor
+    func testTask4_09_ShortBreakIdleConfigurationSurvivesRestart() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.switchToBreak(minutes: 5)
+        XCTAssertEqual(vm1.activePreset, "Short Break")
+        XCTAssertTrue(vm1.isBreakSession)
+        XCTAssertEqual(vm1.totalTime, 300)
+        XCTAssertEqual(vm1.timeRemaining, 300)
+
+        vm1.handleAppTermination()
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.activePreset, "Short Break")
+        XCTAssertTrue(vm2.isBreakSession)
+        XCTAssertEqual(vm2.totalTime, 300)
+        XCTAssertEqual(vm2.timeRemaining, 300)
+        XCTAssertEqual(vm2.timerTimeString, "05:00")
+        XCTAssertFalse(vm2.isTimerRunning)
+    }
+
+    // Test 10: Long Break idle configuration survives restart
+    @MainActor
+    func testTask4_10_LongBreakIdleConfigurationSurvivesRestart() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.switchToBreak(minutes: 15)
+        XCTAssertEqual(vm1.activePreset, "Long Break")
+        XCTAssertTrue(vm1.isBreakSession)
+        XCTAssertEqual(vm1.totalTime, 900)
+        XCTAssertEqual(vm1.timeRemaining, 900)
+
+        vm1.handleAppTermination()
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.activePreset, "Long Break")
+        XCTAssertTrue(vm2.isBreakSession)
+        XCTAssertEqual(vm2.totalTime, 900)
+        XCTAssertEqual(vm2.timeRemaining, 900)
+        XCTAssertEqual(vm2.timerTimeString, "15:00")
+        XCTAssertFalse(vm2.isTimerRunning)
+    }
+
+    // Test 11: Running Custom Timer normal Quit restores as paused with correct remaining duration
+    @MainActor
+    func testTask4_11_RunningCustomTimerNormalQuitRestoresAsPaused() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.setCustomDuration(minutes: 45, seconds: 0)
+        vm1.startTimer()
+        XCTAssertTrue(vm1.isTimerRunning)
+
+        // Elapsed 100 seconds
+        vm1.targetEndDate = vm1.targetEndDate?.addingTimeInterval(-100.0)
+
+        vm1.handleAppTermination()
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.activePreset, "Custom")
+        XCTAssertEqual(vm2.activeMode, "Custom Timer")
+        XCTAssertEqual(vm2.totalTime, 2700)
+        XCTAssertEqual(vm2.timeRemaining, 2600)
+        XCTAssertFalse(vm2.isTimerRunning)
+        XCTAssertNotNil(vm2.pausedSession)
+    }
+
+    // Test 12: Already-paused timer is not overwritten by new idle fields
+    @MainActor
+    func testTask4_12_AlreadyPausedTimerNotOverwrittenByNewIdleFields() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.applyPreset(name: "Focus", minutes: 25)
+        vm1.startTimer()
+        vm1.targetEndDate = vm1.targetEndDate?.addingTimeInterval(-300.0)
+        vm1.stopTimer()
+
+        XCTAssertEqual(vm1.timeRemaining, 1200)
+        XCTAssertNotNil(vm1.pausedSession)
+
+        vm1.handleAppTermination()
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.timeRemaining, 1200, "Paused time remaining must NOT be overwritten by 1500 idle duration")
+        XCTAssertEqual(vm2.totalTime, 1500)
+        XCTAssertFalse(vm2.isTimerRunning)
+        XCTAssertNotNil(vm2.pausedSession)
+    }
+
+    // Test 13: Preserved background session continues to restore correctly
+    @MainActor
+    func testTask4_13_PreservedBackgroundSessionContinuesToRestoreCorrectly() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.preservedSession = PreservedTimerSession(
+            activePreset: "Focus",
+            activeMode: "Pomodoro",
+            isBreakSession: false,
+            totalTime: 1500,
+            timeRemaining: 900,
+            preciseProgress: 0.6,
+            customMinutes: 25,
+            customSeconds: 0,
+            currentSession: 1,
+            activeTaskIndex: 0
+        )
+
+        vm1.handleAppTermination()
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertNotNil(vm2.preservedSession)
+        XCTAssertEqual(vm2.preservedSession?.timeRemaining, 900)
+        XCTAssertEqual(vm2.preservedSession?.activePreset, "Focus")
+    }
+
+    // Test 14: Legacy JSON with new fields missing decodes successfully
+    @MainActor
+    func testTask4_14_LegacyJSONWithNewFieldsMissingDecodesSuccessfully() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t4_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let primaryURL = tempDir.appendingPathComponent("focusflow_data.json")
+        let legacyJSON = """
+        {
+            "tasks": [
+                {
+                    "id": "A1B2C3D4-E5F6-7890-ABCD-EF1234567890",
+                    "title": "Legacy Task",
+                    "estimatedMinutes": 25,
+                    "timeSpentSeconds": 0,
+                    "isCompleted": false,
+                    "isLocked": false,
+                    "icon": "star.fill",
+                    "iconColorName": "orange"
+                }
+            ],
+            "focusedSeconds": 0,
+            "completedSessions": 0,
+            "notes": [],
+            "dailyGoalHours": 4,
+            "totalSessions": 4,
+            "autoStartNextSession": false,
+            "activePreset": "Focus",
+            "clockStyle": "Digital",
+            "sessionRecords": [],
+            "laps": [],
+            "stopwatchElapsedSeconds": 0.0
+        }
+        """
+        try legacyJSON.data(using: .utf8)?.write(to: primaryURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+
+        XCTAssertFalse(vm.isPersistenceBlocked)
+        XCTAssertEqual(vm.tasks.count, 1)
+        XCTAssertEqual(vm.tasks[0].title, "Legacy Task")
+        XCTAssertEqual(vm.activeTaskIndex, 0)
+        XCTAssertEqual(vm.activePreset, "Focus")
+        XCTAssertEqual(vm.activeMode, "Pomodoro")
+        XCTAssertEqual(vm.totalTime, 1500)
+        XCTAssertEqual(vm.timeRemaining, 1500)
+    }
+
+    // Test 15: Legacy Focus and Break configurations retain appropriate defaults
+    @MainActor
+    func testTask4_15_LegacyFocusAndBreakConfigurationsRetainAppropriateDefaults() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t4_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Short Break legacy
+        let shortBreakJSON = """
+        {
+            "tasks": [],
+            "focusedSeconds": 0,
+            "completedSessions": 0,
+            "notes": [],
+            "dailyGoalHours": 4,
+            "totalSessions": 4,
+            "autoStartNextSession": false,
+            "activePreset": "Short Break",
+            "clockStyle": "Digital",
+            "sessionRecords": [],
+            "laps": [],
+            "stopwatchElapsedSeconds": 0.0
+        }
+        """
+        let shortBreakURL = tempDir.appendingPathComponent("focusflow_data.json")
+        try shortBreakJSON.data(using: .utf8)?.write(to: shortBreakURL)
+
+        let storage1 = FocusStorageService(storageURL: shortBreakURL)
+        let vm1 = TimerViewModel(storage: storage1)
+
+        XCTAssertEqual(vm1.activePreset, "Short Break")
+        XCTAssertEqual(vm1.totalTime, 300)
+        XCTAssertEqual(vm1.timeRemaining, 300)
+        XCTAssertTrue(vm1.isBreakSession)
+
+        // Long Break legacy
+        let longBreakJSON = """
+        {
+            "tasks": [],
+            "focusedSeconds": 0,
+            "completedSessions": 0,
+            "notes": [],
+            "dailyGoalHours": 4,
+            "totalSessions": 4,
+            "autoStartNextSession": false,
+            "activePreset": "Long Break",
+            "clockStyle": "Digital",
+            "sessionRecords": [],
+            "laps": [],
+            "stopwatchElapsedSeconds": 0.0
+        }
+        """
+        try longBreakJSON.data(using: .utf8)?.write(to: shortBreakURL)
+
+        let storage2 = FocusStorageService(storageURL: shortBreakURL)
+        let vm2 = TimerViewModel(storage: storage2)
+
+        XCTAssertEqual(vm2.activePreset, "Long Break")
+        XCTAssertEqual(vm2.totalTime, 900)
+        XCTAssertEqual(vm2.timeRemaining, 900)
+        XCTAssertTrue(vm2.isBreakSession)
+    }
+
+    // Test 16: Invalid or out-of-range saved durations/session numbers are handled safely
+    @MainActor
+    func testTask4_16_InvalidOrOutOfRangeSavedDurationsAndSessionsHandledSafely() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t4_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let primaryURL = tempDir.appendingPathComponent("focusflow_data.json")
+        let malformedData = FocusAppData(
+            totalSessions: -2,
+            configuredTotalTime: -100,
+            configuredCustomMinutes: 9999,
+            configuredCustomSeconds: 888,
+            configuredCurrentSession: -5
+        )
+        let bytes = try JSONEncoder().encode(malformedData)
+        try bytes.write(to: primaryURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+
+        XCTAssertGreaterThanOrEqual(vm.totalTime, 5)
+        XCTAssertGreaterThanOrEqual(vm.currentSession, 1)
+        XCTAssertLessThanOrEqual(vm.customMinutes, 360)
+        XCTAssertLessThanOrEqual(vm.customSeconds, 59)
+    }
+
+    // Test 17: Task switching and unassigned focus-time attribution remain correct after restore
+    @MainActor
+    func testTask4_17_TaskSwitchingAndUnassignedAttributionCorrectAfterRestore() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        while !vm1.tasks.isEmpty { vm1.removeTask(at: 0) }
+        vm1.addTask(title: "Task Alpha", expectedMinutes: 25)
+        vm1.addTask(title: "Task Beta", expectedMinutes: 25)
+        vm1.selectTask(at: 1)
+        XCTAssertEqual(vm1.activeTaskIndex, 1)
+
+        vm1.handleAppTermination()
+
+        // Reopen
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.activeTaskIndex, 1)
+        let betaId = vm2.tasks[1].id
+        let alphaId = vm2.tasks[0].id
+
+        vm2.startTimer()
+        vm2.sessionSegmentStartDate = vm2.sessionSegmentStartDate?.addingTimeInterval(-50.0)
+        vm2.targetEndDate = vm2.targetEndDate?.addingTimeInterval(-50.0)
+
+        // Switch to Task Alpha
+        vm2.selectTask(at: 0)
+        XCTAssertEqual(vm2.sessionRecords.count, 1)
+        XCTAssertEqual(vm2.sessionRecords[0].taskId, betaId)
+        XCTAssertEqual(vm2.sessionRecords[0].durationSeconds, 50)
+
+        vm2.sessionSegmentStartDate = vm2.sessionSegmentStartDate?.addingTimeInterval(-40.0)
+        vm2.targetEndDate = vm2.targetEndDate?.addingTimeInterval(-40.0)
+        vm2.stopTimer()
+
+        XCTAssertEqual(vm2.sessionRecords.count, 2)
+        XCTAssertEqual(vm2.sessionRecords[1].taskId, alphaId)
+        XCTAssertEqual(vm2.sessionRecords[1].durationSeconds, 40)
+        XCTAssertEqual(vm2.tasks[1].timeSpentSeconds, 50)
+        XCTAssertEqual(vm2.tasks[0].timeSpentSeconds, 40)
+    }
+
+    // Test 18: Stopwatch elapsed time and lap checkpoints survive restart
+    @MainActor
+    func testTask4_18_StopwatchElapsedTimeAndLapsSurviveRestart() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.startStopwatch()
+        vm1.stopwatchStartDate = vm1.stopwatchStartDate?.addingTimeInterval(-20.0)
+        vm1.recordLap() // Lap 1 at 20s
+
+        vm1.stopwatchStartDate = vm1.stopwatchStartDate?.addingTimeInterval(-25.0)
+        vm1.recordLap() // Lap 2 at 45s (split 25s)
+        vm1.stopStopwatch()
+
+        XCTAssertEqual(vm1.stopwatchTime, 45)
+        XCTAssertEqual(vm1.laps.count, 2)
+
+        vm1.handleAppTermination()
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.stopwatchTime, 45)
+        XCTAssertEqual(vm2.laps.count, 2)
+        XCTAssertEqual(vm2.laps[1].lapNumber, 1)
+        XCTAssertEqual(vm2.laps[0].lapNumber, 2)
+        XCTAssertEqual(vm2.laps[0].lapDuration, 25.0, accuracy: 0.1)
+    }
+
+    // Test 19: Corrupted primary storage with valid backup retains existing recovery behavior
+    @MainActor
+    func testTask4_19_CorruptedPrimaryWithValidBackupRetainsRecoveryBehavior() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t4_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let primaryURL = tempDir.appendingPathComponent("focusflow_data.json")
+        let backupURL = primaryURL.appendingPathExtension("bak")
+
+        let validData = FocusAppData(
+            tasks: [FocusTask(title: "Backed Up Task", estimatedMinutes: 25)],
+            activePreset: "Custom",
+            activeMode: "Custom Timer",
+            configuredTotalTime: 3600,
+            configuredCustomMinutes: 60,
+            configuredCustomSeconds: 0
+        )
+        let validBytes = try JSONEncoder().encode(validData)
+        try validBytes.write(to: backupURL)
+        try Data("corrupted bytes".utf8).write(to: primaryURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+
+        XCTAssertFalse(vm.isPersistenceBlocked)
+        XCTAssertTrue(vm.didRecoverFromBackup)
+        XCTAssertEqual(vm.tasks.count, 1)
+        XCTAssertEqual(vm.tasks[0].title, "Backed Up Task")
+        XCTAssertEqual(vm.activePreset, "Custom")
+        XCTAssertEqual(vm.activeMode, "Custom Timer")
+        XCTAssertEqual(vm.totalTime, 3600)
+    }
+
+    // Test 20: Corrupted primary and backup continue to block unsafe saving
+    @MainActor
+    func testTask4_20_CorruptedPrimaryAndBackupBlockUnsafeSaving() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t4_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let primaryURL = tempDir.appendingPathComponent("focusflow_data.json")
+        let backupURL = primaryURL.appendingPathExtension("bak")
+
+        try Data("corrupted 1".utf8).write(to: primaryURL)
+        try Data("corrupted 2".utf8).write(to: backupURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+
+        XCTAssertTrue(vm.isPersistenceBlocked)
+        vm.addTask(title: "Should Be Blocked", expectedMinutes: 25)
+        XCTAssertTrue(vm.tasks.isEmpty)
+    }
+
+    // Test 21: Existing historical session records and completed-session totals remain unchanged by loading
+    @MainActor
+    func testTask4_21_ExistingHistoricalRecordsAndCompletedTotalsUnchangedByLoading() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let now = Date()
+        let records = [
+            FocusSessionRecord(startTime: now.addingTimeInterval(-3600), endTime: now.addingTimeInterval(-1800), durationSeconds: 1800, mode: "Pomodoro"),
+            FocusSessionRecord(startTime: now.addingTimeInterval(-1800), endTime: now, durationSeconds: 1800, mode: "Pomodoro")
+        ]
+        vm1.completedSessions = 7
+        vm1.sessionRecords = records
+        vm1.handleAppTermination()
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.completedSessions, 7)
+        XCTAssertEqual(vm2.sessionRecords.count, 2)
+        XCTAssertEqual(vm2.sessionRecords[0].durationSeconds, 1800)
+        XCTAssertEqual(vm2.sessionRecords[1].durationSeconds, 1800)
+    }
+
+    // Test 22: Fresh installation still shows the expected default app state
+    @MainActor
+    func testTask4_22_FreshInstallationShowsDefaultAppState() {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t4_fresh_\(UUID().uuidString)")
+        let nonExistentURL = tempDir.appendingPathComponent("focusflow_data.json")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let storage = FocusStorageService(storageURL: nonExistentURL)
+        let vm = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm.storageLoadResult, .freshInstall)
+        XCTAssertFalse(vm.isPersistenceBlocked)
+        XCTAssertEqual(vm.tasks.count, 4)
+        XCTAssertEqual(vm.activeTaskIndex, 0)
+        XCTAssertEqual(vm.currentSession, 1)
+        XCTAssertEqual(vm.totalSessions, 4)
+        XCTAssertEqual(vm.activePreset, "Focus")
+        XCTAssertEqual(vm.activeMode, "Pomodoro")
+        XCTAssertEqual(vm.totalTime, 1500)
+        XCTAssertEqual(vm.timeRemaining, 1500)
+        XCTAssertFalse(vm.isBreakSession)
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertFalse(vm.isStopwatchRunning)
+    }
 }
