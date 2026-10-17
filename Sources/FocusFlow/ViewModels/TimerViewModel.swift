@@ -873,11 +873,9 @@ public class TimerViewModel: ObservableObject {
 
         if let customScheduler = midnightTimerScheduler {
             midnightRefreshCancellable = customScheduler(fireDate) { [weak self] in
-                Task { @MainActor [weak self] in
-                    guard let self = self else { return }
-                    self.midnightRefreshCallbackCount += 1
-                    self.handleDateOrLifecycleChange()
-                }
+                guard let self = self else { return }
+                self.midnightRefreshCallbackCount += 1
+                self.handleDateOrLifecycleChange()
             }
             return
         }
