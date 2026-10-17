@@ -238,11 +238,33 @@ public class TimerViewModel: ObservableObject {
     private var timerSubscription: AnyCancellable?
     private var dateChangeCancellables = Set<AnyCancellable>()
     private var midnightRefreshTimer: Timer?
-    public var reportingCalendar: Calendar = .current {
-        didSet {
-            recalculateFocusMetrics()
-            scheduleNextMidnightRefresh()
+    public private(set) var scheduledMidnightFireDate: Date?
+
+    /// Injectable date/clock provider for deterministic testing (defaults to real-time `Date()`)
+    public var currentDateProvider: () -> Date = { Date() }
+
+    private var customReportingCalendar: Calendar?
+    public var reportingCalendar: Calendar {
+        get {
+            customReportingCalendar ?? .autoupdatingCurrent
         }
+        set {
+            customReportingCalendar = newValue
+            handleCalendarOrTimeZoneChange()
+        }
+    }
+
+    public var hasCustomReportingCalendar: Bool {
+        customReportingCalendar != nil
+    }
+
+    public func resetReportingCalendarToSystem() {
+        customReportingCalendar = nil
+        handleCalendarOrTimeZoneChange()
+    }
+
+    public var activeDateChangeObserverCount: Int {
+        dateChangeCancellables.count
     }
     public let storage: FocusStorageService
     private var isLoadingPersistedData = false
@@ -675,52 +697,55 @@ public class TimerViewModel: ObservableObject {
     }
 
     // MARK: - Date-Aware Analytics Recalculation (Priority 2)
-    public func recalculateFocusMetrics(calendar: Calendar? = nil, now: Date = Date()) {
+    public func recalculateFocusMetrics(calendar: Calendar? = nil, now: Date? = nil) {
         let cal = calendar ?? reportingCalendar
+        let effectiveNow = now ?? currentDateProvider()
+
         let activeElapsed: Int
         let activeStart: Date?
         if isTimerRunning, isFocusPreset, let start = sessionSegmentStartDate {
-            activeElapsed = max(0, Int(now.timeIntervalSince(start)))
+            activeElapsed = max(0, Int(effectiveNow.timeIntervalSince(start)))
             activeStart = start
         } else {
             activeElapsed = 0
             activeStart = nil
         }
 
-        let startOfToday = cal.startOfDay(for: now)
-        guard let endOfToday = cal.date(byAdding: .day, value: 1, to: startOfToday) else {
-            return
-        }
+        let startOfToday = cal.startOfDay(for: effectiveNow)
+        let effectiveTodayEnd = max(startOfToday, effectiveNow)
 
-        // 1. Today's focus time (calculated strictly from dated records overlapping today + active running segment on today)
-        let recordsToday = sessionRecords.reduce(0) { $0 + $1.duration(on: now, calendar: cal) }
+        // 1. Today's focus time (calculated strictly for time elapsed up to `effectiveNow` on today)
+        let recordsToday = sessionRecords.reduce(0) {
+            $0 + $1.duration(from: startOfToday, to: effectiveTodayEnd)
+        }
         let activeToday: Int
         if activeElapsed > 0, let start = activeStart {
             activeToday = FocusIntervalAllocator.allocatedDuration(
                 recordStart: start,
-                recordEnd: now,
+                recordEnd: effectiveNow,
                 durationSeconds: activeElapsed,
                 intervalStart: startOfToday,
-                intervalEnd: endOfToday
+                intervalEnd: effectiveTodayEnd
             )
         } else {
             activeToday = 0
         }
         self.todayFocusedSeconds = recordsToday + activeToday
 
-        // 2. Weekly focus time (calculated across the past 7 days: [startOfToday - 6 days, endOfToday])
+        // 2. Weekly focus time (calculated across the past 7 days up to `effectiveNow`: [startOfToday - 6 days, effectiveWeeklyEnd])
         let sevenDaysAgo = cal.date(byAdding: .day, value: -6, to: startOfToday) ?? startOfToday
+        let effectiveWeeklyEnd = max(sevenDaysAgo, effectiveNow)
         let recordsWeekly = sessionRecords.reduce(0) { total, record in
-            total + record.duration(from: sevenDaysAgo, to: endOfToday)
+            total + record.duration(from: sevenDaysAgo, to: effectiveWeeklyEnd)
         }
         let activeWeekly: Int
         if activeElapsed > 0, let start = activeStart {
             activeWeekly = FocusIntervalAllocator.allocatedDuration(
                 recordStart: start,
-                recordEnd: now,
+                recordEnd: effectiveNow,
                 durationSeconds: activeElapsed,
                 intervalStart: sevenDaysAgo,
-                intervalEnd: endOfToday
+                intervalEnd: effectiveWeeklyEnd
             )
         } else {
             activeWeekly = 0
@@ -737,12 +762,28 @@ public class TimerViewModel: ObservableObject {
     }
 
     // MARK: - Date Change & Midnight Lifecycle Monitoring
-    public func handleDateOrLifecycleChange(now: Date = Date()) {
-        recalculateFocusMetrics(now: now)
-        scheduleNextMidnightRefresh()
+    public func handleDateOrLifecycleChange(now: Date? = nil) {
+        let effectiveNow = now ?? currentDateProvider()
+        recalculateFocusMetrics(now: effectiveNow)
+        scheduleNextMidnightRefresh(now: effectiveNow)
     }
 
-    private func setupDateChangeMonitoring() {
+    public func handleSystemTimeZoneChange(newCalendar: Calendar? = nil) {
+        if let custom = newCalendar {
+            customReportingCalendar = custom
+        }
+        let effectiveNow = currentDateProvider()
+        recalculateFocusMetrics(now: effectiveNow)
+        scheduleNextMidnightRefresh(now: effectiveNow)
+    }
+
+    private func handleCalendarOrTimeZoneChange() {
+        let effectiveNow = currentDateProvider()
+        recalculateFocusMetrics(now: effectiveNow)
+        scheduleNextMidnightRefresh(now: effectiveNow)
+    }
+
+    public func setupDateChangeMonitoring() {
         dateChangeCancellables.removeAll()
 
         NotificationCenter.default.publisher(for: .NSCalendarDayChanged)
@@ -761,7 +802,15 @@ public class TimerViewModel: ObservableObject {
             }
             .store(in: &dateChangeCancellables)
 
-        NotificationCenter.default.publisher(for: Notification.Name("NSSystemClockDidChangeNotification"))
+        NotificationCenter.default.publisher(for: .NSSystemTimeZoneDidChange)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.handleSystemTimeZoneChange()
+                }
+            }
+            .store(in: &dateChangeCancellables)
+
+        NotificationCenter.default.publisher(for: .NSSystemClockDidChange)
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
                     self?.handleDateOrLifecycleChange()
@@ -780,13 +829,14 @@ public class TimerViewModel: ObservableObject {
         scheduleNextMidnightRefresh()
     }
 
-    private func scheduleNextMidnightRefresh() {
+    public func scheduleNextMidnightRefresh(now: Date? = nil) {
         midnightRefreshTimer?.invalidate()
         midnightRefreshTimer = nil
+        scheduledMidnightFireDate = nil
 
-        let now = Date()
+        let effectiveNow = now ?? currentDateProvider()
         guard let nextMidnight = reportingCalendar.nextDate(
-            after: now,
+            after: effectiveNow,
             matching: DateComponents(hour: 0, minute: 0, second: 0),
             matchingPolicy: .nextTime
         ) else {
@@ -794,11 +844,12 @@ public class TimerViewModel: ObservableObject {
         }
 
         let fireDate = nextMidnight.addingTimeInterval(0.05)
+        scheduledMidnightFireDate = fireDate
+
         let timer = Timer(fire: fireDate, interval: 0, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
-                self.recalculateFocusMetrics()
-                self.scheduleNextMidnightRefresh()
+                self.handleDateOrLifecycleChange()
             }
         }
         RunLoop.main.add(timer, forMode: .common)
