@@ -238,15 +238,28 @@ public class TimerViewModel: ObservableObject {
     private var timerSubscription: AnyCancellable?
     private var dateChangeCancellables = Set<AnyCancellable>()
     private var midnightRefreshTimer: Timer?
+    private var midnightRefreshCancellable: AnyCancellable?
     public private(set) var scheduledMidnightFireDate: Date?
 
     /// Injectable date/clock provider for deterministic testing (defaults to real-time `Date()`)
     public var currentDateProvider: () -> Date = { Date() }
 
+    /// Injectable system calendar provider (defaults to `Calendar.autoupdatingCurrent`)
+    public var systemCalendarProvider: () -> Calendar = { .autoupdatingCurrent }
+
+    /// Counter for times `handleSystemTimeZoneChange` has executed
+    public private(set) var timeZoneChangeHandledCount: Int = 0
+
+    /// Counter for times the midnight timer callback has executed
+    public private(set) var midnightRefreshCallbackCount: Int = 0
+
+    /// Optional custom scheduler seam for midnight refresh timers. If nil, standard RunLoop.main timer is used.
+    public var midnightTimerScheduler: ((Date, @escaping @MainActor () -> Void) -> AnyCancellable?)? = nil
+
     private var customReportingCalendar: Calendar?
     public var reportingCalendar: Calendar {
         get {
-            customReportingCalendar ?? .autoupdatingCurrent
+            customReportingCalendar ?? systemCalendarProvider()
         }
         set {
             customReportingCalendar = newValue
@@ -308,6 +321,7 @@ public class TimerViewModel: ObservableObject {
 
     deinit {
         midnightRefreshTimer?.invalidate()
+        midnightRefreshCancellable?.cancel()
     }
 
     public private(set) var hasTerminated: Bool = false
@@ -768,11 +782,12 @@ public class TimerViewModel: ObservableObject {
         scheduleNextMidnightRefresh(now: effectiveNow)
     }
 
-    public func handleSystemTimeZoneChange(newCalendar: Calendar? = nil) {
+    public func handleSystemTimeZoneChange(newCalendar: Calendar? = nil, now: Date? = nil) {
         if let custom = newCalendar {
             customReportingCalendar = custom
         }
-        let effectiveNow = currentDateProvider()
+        timeZoneChangeHandledCount += 1
+        let effectiveNow = now ?? currentDateProvider()
         recalculateFocusMetrics(now: effectiveNow)
         scheduleNextMidnightRefresh(now: effectiveNow)
     }
@@ -829,26 +844,55 @@ public class TimerViewModel: ObservableObject {
         scheduleNextMidnightRefresh()
     }
 
-    public func scheduleNextMidnightRefresh(now: Date? = nil) {
-        midnightRefreshTimer?.invalidate()
-        midnightRefreshTimer = nil
-        scheduledMidnightFireDate = nil
-
-        let effectiveNow = now ?? currentDateProvider()
-        guard let nextMidnight = reportingCalendar.nextDate(
-            after: effectiveNow,
+    /// Determines the next local-midnight deadline (with 0.05s dispatch buffer) for a supplied calendar and reference date.
+    public func nextMidnightDate(after date: Date? = nil, calendar: Calendar? = nil) -> Date? {
+        let cal = calendar ?? reportingCalendar
+        let referenceDate = date ?? currentDateProvider()
+        guard let nextMidnight = cal.nextDate(
+            after: referenceDate,
             matching: DateComponents(hour: 0, minute: 0, second: 0),
             matchingPolicy: .nextTime
         ) else {
+            return nil
+        }
+        return nextMidnight.addingTimeInterval(0.05)
+    }
+
+    public func scheduleNextMidnightRefresh(now: Date? = nil) {
+        midnightRefreshTimer?.invalidate()
+        midnightRefreshTimer = nil
+        midnightRefreshCancellable?.cancel()
+        midnightRefreshCancellable = nil
+        scheduledMidnightFireDate = nil
+
+        let effectiveNow = now ?? currentDateProvider()
+        guard let fireDate = nextMidnightDate(after: effectiveNow, calendar: reportingCalendar) else {
+            return
+        }
+        scheduledMidnightFireDate = fireDate
+
+        if let customScheduler = midnightTimerScheduler {
+            midnightRefreshCancellable = customScheduler(fireDate) { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self = self else { return }
+                    self.midnightRefreshCallbackCount += 1
+                    self.handleDateOrLifecycleChange()
+                }
+            }
             return
         }
 
-        let fireDate = nextMidnight.addingTimeInterval(0.05)
-        scheduledMidnightFireDate = fireDate
+        // Production / RunLoop scheduling:
+        // Only arm a real RunLoop timer if the fireDate is strictly in the future of the real system clock.
+        // This prevents immediate timer callback loops when tests or callers supply simulated historical dates.
+        guard fireDate > Date() else {
+            return
+        }
 
         let timer = Timer(fire: fireDate, interval: 0, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
+                self.midnightRefreshCallbackCount += 1
                 self.handleDateOrLifecycleChange()
             }
         }

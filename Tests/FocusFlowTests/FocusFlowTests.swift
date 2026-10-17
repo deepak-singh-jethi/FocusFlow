@@ -7731,19 +7731,25 @@ final class FocusFlowTests: XCTestCase {
         let startUTC = calUTC.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 18, minute: 15, second: 0))!
         let endUTC = calUTC.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 18, minute: 45, second: 0))!
 
-        let record = FocusSessionRecord(startTime: startUTC, endTime: endUTC, durationSeconds: 1800, mode: "Focus", taskId: nil)
+        let recordId = UUID()
+        let taskId = UUID()
+        let record = FocusSessionRecord(id: recordId, startTime: startUTC, endTime: endUTC, durationSeconds: 1800, mode: "Focus", taskId: taskId)
         vm.sessionRecords.append(record)
+        let initialCompletedSessions = vm.completedSessions
 
         // In UTC at 20:00 UTC on Oct 20:
         let nowUTC = calUTC.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 20, minute: 0, second: 0))!
+        vm.currentDateProvider = { nowUTC }
         vm.reportingCalendar = calUTC
         vm.recalculateFocusMetrics(now: nowUTC)
 
         XCTAssertEqual(vm.todayFocusedSeconds, 1800, "Under UTC, entire 1800s belongs to Oct 20")
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 1800, "Weekly in UTC contains full 1800s")
 
         // Now simulate system time-zone change to Asia/Kolkata at the same absolute instant (20:00 UTC = 01:30 IST on Oct 21)
+        // CRITICAL: We do NOT call vm.recalculateFocusMetrics() afterward!
+        // handleSystemTimeZoneChange itself must update the published analytics and midnight schedule.
         vm.handleSystemTimeZoneChange(newCalendar: calKolkata)
-        vm.recalculateFocusMetrics(calendar: calKolkata, now: nowUTC)
 
         // In IST:
         // 18:15 UTC is 23:45 IST on Oct 20 (pre-midnight slice = 900s)
@@ -7754,9 +7760,16 @@ final class FocusFlowTests: XCTestCase {
 
         // Verify the underlying session record was NOT mutated
         XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords[0].id, recordId)
         XCTAssertEqual(vm.sessionRecords[0].startTime, startUTC)
         XCTAssertEqual(vm.sessionRecords[0].endTime, endUTC)
         XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 1800)
+        XCTAssertEqual(vm.sessionRecords[0].taskId, taskId)
+        XCTAssertEqual(vm.completedSessions, initialCompletedSessions)
+
+        // Verify next midnight deadline is recalculated for Asia/Kolkata
+        let expectedKolkataMidnight = calKolkata.date(from: DateComponents(year: 2026, month: 10, day: 22, hour: 0, minute: 0, second: 0))!.addingTimeInterval(0.05)
+        XCTAssertEqual(vm.scheduledMidnightFireDate, expectedKolkataMidnight)
     }
 
     // Scenario 15: Midnight refresh timer is rescheduled for the newly applicable local midnight
@@ -7792,5 +7805,190 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertNotNil(vm.scheduledMidnightFireDate)
         XCTAssertEqual(vm.scheduledMidnightFireDate, expectedKolkataMidnight, "Scheduled midnight under IST must target local midnight (18:30:00.05 UTC)")
         XCTAssertNotEqual(vm.scheduledMidnightFireDate, expectedUTCMidnight, "Midnight fire date must change when switching time zones")
+    }
+
+    // Scenario 16: Fixed historical simulated date does not trigger repeated immediate timer callbacks
+    @MainActor
+    func testTask5_Correction_Scenario16_PastSimulatedDate_DoesNotTriggerImmediateTimerCallbackLoop() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calUTC = Calendar(identifier: .gregorian)
+        calUTC.timeZone = TimeZone(identifier: "UTC")!
+        vm.reportingCalendar = calUTC
+
+        // Injected date in the past (e.g. 2020-01-01 12:00:00 UTC)
+        let pastDate = calUTC.date(from: DateComponents(year: 2020, month: 1, day: 1, hour: 12, minute: 0, second: 0))!
+        vm.currentDateProvider = { pastDate }
+
+        vm.scheduleNextMidnightRefresh(now: pastDate)
+
+        let expectedPastMidnight = calUTC.date(from: DateComponents(year: 2020, month: 1, day: 2, hour: 0, minute: 0, second: 0))!.addingTimeInterval(0.05)
+        XCTAssertEqual(vm.scheduledMidnightFireDate, expectedPastMidnight, "Intended midnight deadline must be accurately computed")
+
+        // Spin runloop briefly: because fireDate <= Date(), no timer was registered on RunLoop.main, so no callbacks fire
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertEqual(vm.midnightRefreshCallbackCount, 0, "No immediate timer callbacks may fire for past simulated dates")
+    }
+
+    // Scenario 17: A previously expired scheduled deadline cannot produce an uncontrolled rescheduling loop
+    @MainActor
+    func testTask5_Correction_Scenario17_ExpiredDeadline_CannotProduceReschedulingLoop() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calUTC = Calendar(identifier: .gregorian)
+        calUTC.timeZone = TimeZone(identifier: "UTC")!
+        vm.reportingCalendar = calUTC
+
+        let pastDate = calUTC.date(from: DateComponents(year: 2020, month: 6, day: 15, hour: 10, minute: 0, second: 0))!
+        vm.currentDateProvider = { pastDate }
+
+        // Trigger lifecycle change multiple times
+        for _ in 0..<5 {
+            vm.handleDateOrLifecycleChange()
+        }
+
+        let expectedMidnight = calUTC.date(from: DateComponents(year: 2020, month: 6, day: 16, hour: 0, minute: 0, second: 0))!.addingTimeInterval(0.05)
+        XCTAssertEqual(vm.scheduledMidnightFireDate, expectedMidnight)
+
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertEqual(vm.midnightRefreshCallbackCount, 0, "Repeated past lifecycle changes must not produce runloop callbacks")
+    }
+
+    // Scenario 18: Next midnight deadline calculation for UTC and Asia/Kolkata independently without timer side-effects
+    @MainActor
+    func testTask5_Correction_Scenario18_NextMidnightDateCalculation_UTCAndKolkataIndependent() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calUTC = Calendar(identifier: .gregorian)
+        calUTC.timeZone = TimeZone(identifier: "UTC")!
+
+        var calKolkata = Calendar(identifier: .gregorian)
+        calKolkata.timeZone = TimeZone(identifier: "Asia/Kolkata")! // UTC +5:30
+
+        let refInstant = calUTC.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 12, minute: 0, second: 0))!
+
+        // 1. UTC: Next midnight after Oct 21 12:00:00 UTC is Oct 22 00:00:00.05 UTC
+        let utcMidnight = vm.nextMidnightDate(after: refInstant, calendar: calUTC)
+        let expectedUTCMidnight = calUTC.date(from: DateComponents(year: 2026, month: 10, day: 22, hour: 0, minute: 0, second: 0))!.addingTimeInterval(0.05)
+        XCTAssertEqual(utcMidnight, expectedUTCMidnight)
+
+        // 2. Kolkata: Oct 21 12:00:00 UTC is Oct 21 17:30:00 IST.
+        // Next midnight in IST is Oct 22 00:00:00 IST = Oct 21 18:30:00.05 UTC.
+        let kolkataMidnight = vm.nextMidnightDate(after: refInstant, calendar: calKolkata)
+        let expectedKolkataMidnight = calKolkata.date(from: DateComponents(year: 2026, month: 10, day: 22, hour: 0, minute: 0, second: 0))!.addingTimeInterval(0.05)
+        XCTAssertEqual(kolkataMidnight, expectedKolkataMidnight)
+        XCTAssertNotEqual(utcMidnight, kolkataMidnight)
+    }
+
+    // Scenario 19: Actual NSSystemTimeZoneDidChange notification reaches subscriber, triggers handler, and updates metrics and schedule
+    @MainActor
+    func testTask5_Correction_Scenario19_ActualTimeZoneNotificationDelivery_ReachesSubscriberAndUpdatesMetrics() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calUTC = Calendar(identifier: .gregorian)
+        calUTC.timeZone = TimeZone(identifier: "UTC")!
+
+        var calKolkata = Calendar(identifier: .gregorian)
+        calKolkata.timeZone = TimeZone(identifier: "Asia/Kolkata")! // UTC +5:30
+
+        let startUTC = calUTC.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 18, minute: 15, second: 0))!
+        let endUTC = calUTC.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 18, minute: 45, second: 0))!
+        let nowUTC = calUTC.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 20, minute: 0, second: 0))!
+
+        let record = FocusSessionRecord(startTime: startUTC, endTime: endUTC, durationSeconds: 1800, mode: "Focus", taskId: nil)
+        vm.sessionRecords.append(record)
+
+        var dynamicSystemCalendar = calUTC
+        vm.systemCalendarProvider = { dynamicSystemCalendar }
+        vm.currentDateProvider = { nowUTC }
+
+        // Recalculate initially under UTC
+        vm.recalculateFocusMetrics(now: nowUTC)
+        XCTAssertEqual(vm.todayFocusedSeconds, 1800)
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 1800)
+        XCTAssertEqual(vm.timeZoneChangeHandledCount, 0)
+
+        // System time zone changes: update dynamic calendar to Kolkata and post actual notification
+        dynamicSystemCalendar = calKolkata
+        NotificationCenter.default.post(name: .NSSystemTimeZoneDidChange, object: nil)
+
+        // Run the main runloop briefly to let Combine / Task @MainActor execute
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+
+        // 1. Observer ran & handler called
+        XCTAssertEqual(vm.timeZoneChangeHandledCount, 1, "Notification must reach the registered subscriber and invoke the handler")
+
+        // 2. Handler recalculated metrics
+        XCTAssertEqual(vm.todayFocusedSeconds, 900, "Handler must recalculate today metrics for Kolkata")
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 1800, "Handler must recalculate weekly metrics for Kolkata")
+
+        // 3. Midnight schedule updated
+        let expectedKolkataMidnight = calKolkata.date(from: DateComponents(year: 2026, month: 10, day: 22, hour: 0, minute: 0, second: 0))!.addingTimeInterval(0.05)
+        XCTAssertEqual(vm.scheduledMidnightFireDate, expectedKolkataMidnight, "Midnight schedule must target new Kolkata midnight")
+    }
+
+    // Scenario 20: Repeated scheduling leaves no duplicate live timers
+    @MainActor
+    func testTask5_Correction_Scenario20_RepeatedScheduling_LeavesNoDuplicateTimers() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var activeCancellations = 0
+        var activeSchedules = 0
+
+        vm.midnightTimerScheduler = { fireDate, action in
+            activeSchedules += 1
+            return AnyCancellable {
+                activeCancellations += 1
+            }
+        }
+
+        // Schedule 10 times in a row
+        for _ in 0..<10 {
+            vm.scheduleNextMidnightRefresh()
+        }
+
+        XCTAssertEqual(activeSchedules, 10)
+        XCTAssertEqual(activeCancellations, 9, "9 previous timers must be cancelled, leaving strictly 1 active schedule")
+        XCTAssertNotNil(vm.scheduledMidnightFireDate)
+    }
+
+    // Scenario 21: Ordinary midnight refresh invokes handler and advances schedule to following day
+    @MainActor
+    func testTask5_Correction_Scenario21_OrdinaryMidnightRefresh_InvokesHandlerAndAdvancesSchedule() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calUTC = Calendar(identifier: .gregorian)
+        calUTC.timeZone = TimeZone(identifier: "UTC")!
+        vm.reportingCalendar = calUTC
+
+        var simDate = calUTC.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 23, minute: 59, second: 55))!
+        vm.currentDateProvider = { simDate }
+
+        var capturedAction: (@MainActor () -> Void)?
+        vm.midnightTimerScheduler = { fireDate, action in
+            capturedAction = action
+            return AnyCancellable { }
+        }
+
+        vm.scheduleNextMidnightRefresh(now: simDate)
+        let expectedDay1Midnight = calUTC.date(from: DateComponents(year: 2026, month: 10, day: 22, hour: 0, minute: 0, second: 0))!.addingTimeInterval(0.05)
+        XCTAssertEqual(vm.scheduledMidnightFireDate, expectedDay1Midnight)
+
+        // Simulate midnight arriving: clock advances past midnight to Oct 22 00:00:01 UTC
+        simDate = calUTC.date(from: DateComponents(year: 2026, month: 10, day: 22, hour: 0, minute: 0, second: 1))!
+        capturedAction?()
+
+        // Run runloop to let Task @MainActor execute
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+
+        XCTAssertEqual(vm.midnightRefreshCallbackCount, 1)
+        let expectedDay2Midnight = calUTC.date(from: DateComponents(year: 2026, month: 10, day: 23, hour: 0, minute: 0, second: 0))!.addingTimeInterval(0.05)
+        XCTAssertEqual(vm.scheduledMidnightFireDate, expectedDay2Midnight, "After midnight refresh, next midnight must advance to subsequent day")
     }
 }
