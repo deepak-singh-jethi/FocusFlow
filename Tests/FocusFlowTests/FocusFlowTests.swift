@@ -5387,4 +5387,263 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(vm.laps.first?.lapNumber, 1)
         XCTAssertEqual(vm.laps.first?.lapDuration, 10.0)
     }
+
+    // MARK: - Task 3 Final Correction Tests
+
+    // Test A — Primary Bug: Empty task list -> Stopwatch runs 100s -> Add Task A -> 50s -> Stop
+    @MainActor
+    func testTaskAttributionFinalCorrectionA_EmptyTaskListRunningStopwatchAddTaskDoesNotRetroactivelyAttribute() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // 1. Delete all tasks
+        while !vm.tasks.isEmpty {
+            vm.removeTask(at: 0)
+        }
+        XCTAssertTrue(vm.tasks.isEmpty)
+
+        // 2. Start Stopwatch
+        vm.startStopwatch()
+        XCTAssertTrue(vm.isStopwatchRunning)
+
+        // 3. Simulate 100 seconds of elapsed time without an active task
+        vm.stopwatchStartDate = vm.stopwatchStartDate?.addingTimeInterval(-100.0)
+
+        // 4. Add Task A
+        vm.addTask(title: "Task A", expectedMinutes: 25)
+
+        // Assert: Task A has 0 credited seconds immediately after creation
+        XCTAssertEqual(vm.tasks.count, 1)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 0, "Task A must have 0 credited seconds immediately upon creation")
+        XCTAssertTrue(vm.isStopwatchRunning, "Stopwatch must still be running")
+        XCTAssertEqual(vm.stopwatchTime, 100, "Stopwatch has settled 100 elapsed seconds")
+        XCTAssertEqual(vm.activeTaskIndex, 0, "New task is correctly selected")
+
+        // 5. Let Stopwatch run another 50 seconds
+        vm.stopwatchStartDate = vm.stopwatchStartDate?.addingTimeInterval(-50.0)
+        vm.stopStopwatch()
+
+        // Assert: Total elapsed = 150s, Task A time = 50s
+        XCTAssertEqual(vm.stopwatchTime, 150)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 50, "Task A must receive strictly the 50s elapsed after creation, not 150s")
+    }
+
+    // Test B — All Tasks Completed: Start Stopwatch when all tasks completed -> 100s -> Add Task -> 50s -> Stop
+    @MainActor
+    func testTaskAttributionFinalCorrectionB_AllTasksCompletedStopwatchRunsAddTaskDoesNotCreditPreviousTime() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        for i in 0..<vm.tasks.count {
+            vm.toggleTaskCompletion(at: i)
+        }
+        XCTAssertTrue(vm.tasks.allSatisfy { $0.isCompleted })
+
+        vm.startStopwatch()
+        vm.stopwatchStartDate = vm.stopwatchStartDate?.addingTimeInterval(-100.0)
+
+        vm.addTask(title: "Task E", expectedMinutes: 25)
+        let newIdx = vm.tasks.count - 1
+        XCTAssertEqual(vm.tasks[newIdx].timeSpentSeconds, 0, "New task must have 0s on creation")
+        XCTAssertEqual(vm.activeTaskIndex, newIdx)
+
+        vm.stopwatchStartDate = vm.stopwatchStartDate?.addingTimeInterval(-50.0)
+        vm.stopStopwatch()
+
+        XCTAssertEqual(vm.stopwatchTime, 150)
+        XCTAssertEqual(vm.tasks[newIdx].timeSpentSeconds, 50, "New task must receive only subsequent 50s")
+        for i in 0..<newIdx {
+            XCTAssertEqual(vm.tasks[i].timeSpentSeconds, 0, "Completed tasks must receive no extra seconds")
+        }
+    }
+
+    // Test C — Existing Active Task: Start Stopwatch on Task A -> 100s -> Add Task B without changing selection
+    @MainActor
+    func testTaskAttributionFinalCorrectionC_ExistingActiveTaskRemainsActiveWhenNewTaskAdded() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startStopwatch()
+        vm.stopwatchStartDate = vm.stopwatchStartDate?.addingTimeInterval(-100.0)
+
+        // Adding task when Task A is active and uncompleted should not change selection
+        vm.addTask(title: "Task Additional", expectedMinutes: 25)
+        XCTAssertEqual(vm.activeTaskIndex, 0, "Task A must remain active")
+        let addedIdx = vm.tasks.count - 1
+        XCTAssertEqual(vm.tasks[addedIdx].timeSpentSeconds, 0, "New task must have 0s")
+
+        vm.stopwatchStartDate = vm.stopwatchStartDate?.addingTimeInterval(-50.0)
+        vm.stopStopwatch()
+
+        XCTAssertEqual(vm.stopwatchTime, 150)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 150, "Task A must receive full 150s")
+        XCTAssertEqual(vm.tasks[addedIdx].timeSpentSeconds, 0, "New task receives no elapsed time")
+    }
+
+    // Test D — Focus Timer Only: Start Focus Timer unassigned -> 100s -> Add Task A -> 50s -> Stop
+    @MainActor
+    func testTaskAttributionFinalCorrectionD_FocusTimerUnassignedThenAddTaskSplitsCleanly() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        for i in 0..<vm.tasks.count {
+            vm.toggleTaskCompletion(at: i)
+        }
+        vm.startTimer()
+        XCTAssertNil(vm.activeSessionTaskId)
+
+        // 100s unassigned
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-100.0)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-100.0)
+
+        vm.addTask(title: "New Assigned Task", expectedMinutes: 25)
+        let newIdx = vm.tasks.count - 1
+        let newId = vm.tasks[newIdx].id
+        XCTAssertEqual(vm.activeSessionTaskId, newId)
+
+        // Verify unassigned segment finalized
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertNil(vm.sessionRecords[0].taskId, "First segment must have nil taskId")
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 100)
+
+        // Run 50s on new task
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-50.0)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-50.0)
+        vm.stopTimer()
+
+        XCTAssertEqual(vm.sessionRecords.count, 2)
+        XCTAssertEqual(vm.sessionRecords[1].taskId, newId)
+        XCTAssertEqual(vm.sessionRecords[1].durationSeconds, 50)
+        XCTAssertEqual(vm.tasks[newIdx].timeSpentSeconds, 50)
+        XCTAssertEqual(vm.todayFocusedSeconds, 150)
+    }
+
+    // Test E — Both Running: Focus Timer and Stopwatch unassigned -> Add Task A -> Continue
+    @MainActor
+    func testTaskAttributionFinalCorrectionE_SimultaneousTimerAndStopwatchAddTaskAttribution() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        for i in 0..<vm.tasks.count {
+            vm.toggleTaskCompletion(at: i)
+        }
+
+        vm.startTimer()
+        vm.startStopwatch()
+
+        // 80s elapsed unassigned
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-80.0)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-80.0)
+        vm.stopwatchStartDate = vm.stopwatchStartDate?.addingTimeInterval(-80.0)
+
+        vm.addTask(title: "Dual Task", expectedMinutes: 25)
+        let newIdx = vm.tasks.count - 1
+        let newId = vm.tasks[newIdx].id
+
+        XCTAssertEqual(vm.tasks[newIdx].timeSpentSeconds, 0, "No retroactive credit on creation")
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertNil(vm.sessionRecords[0].taskId)
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 80)
+
+        // 40s elapsed on new task
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-40.0)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-40.0)
+        vm.stopwatchStartDate = vm.stopwatchStartDate?.addingTimeInterval(-40.0)
+
+        vm.stopTimer()
+        vm.stopStopwatch()
+
+        XCTAssertEqual(vm.sessionRecords.count, 2)
+        XCTAssertEqual(vm.sessionRecords[1].taskId, newId)
+        XCTAssertEqual(vm.sessionRecords[1].durationSeconds, 40)
+        // 40s from timer + 40s from stopwatch = 80s total on Dual Task
+        XCTAssertEqual(vm.tasks[newIdx].timeSpentSeconds, 80)
+        XCTAssertEqual(vm.stopwatchTime, 120)
+    }
+
+    // Test F — Stopwatch Lap Integrity: Record lap before adding task -> Add Task A during stopwatch
+    @MainActor
+    func testTaskAttributionFinalCorrectionF_StopwatchLapIntegrityPreservedWhenAddingTask() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        while !vm.tasks.isEmpty {
+            vm.removeTask(at: 0)
+        }
+
+        vm.startStopwatch()
+        vm.stopwatchStartDate = vm.stopwatchStartDate?.addingTimeInterval(-20.0)
+        vm.recordLap() // Lap 1 at 20s
+
+        vm.stopwatchStartDate = vm.stopwatchStartDate?.addingTimeInterval(-15.0)
+        vm.recordLap() // Lap 2 at 35s (duration 15s)
+
+        // Add task while running
+        vm.addTask(title: "Lap Task", expectedMinutes: 25)
+
+        vm.stopwatchStartDate = vm.stopwatchStartDate?.addingTimeInterval(-10.0)
+        vm.recordLap() // Lap 3 at 45s (duration 10s)
+        vm.stopStopwatch()
+
+        XCTAssertEqual(vm.laps.count, 3)
+        XCTAssertEqual(vm.laps[2].lapNumber, 1)
+        XCTAssertEqual(vm.laps[2].lapDuration, 20.0, accuracy: 0.1)
+        XCTAssertEqual(vm.laps[1].lapNumber, 2)
+        XCTAssertEqual(vm.laps[1].lapDuration, 15.0, accuracy: 0.1)
+        XCTAssertEqual(vm.laps[0].lapNumber, 3)
+        XCTAssertEqual(vm.laps[0].lapDuration, 10.0, accuracy: 0.1)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 10, "Lap Task only receives 10s elapsed after addition")
+    }
+
+    // Test G — Storage Protection: Adding task blocked when storage is corrupted
+    @MainActor
+    func testTaskAttributionFinalCorrectionG_StorageProtectionBlocksAddTask() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let primaryURL = tempDir.appendingPathComponent("focusflow_data.json")
+        try Data("corrupted bytes".utf8).write(to: primaryURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+        XCTAssertTrue(vm.isPersistenceBlocked)
+
+        vm.addTask(title: "Should Not Add", expectedMinutes: 25)
+        XCTAssertTrue(vm.tasks.isEmpty)
+    }
+
+    // Test H — Restart Persistence: Add Task A -> Stop Stopwatch -> Quit/Reopen
+    @MainActor
+    func testTaskAttributionFinalCorrectionH_RestartPersistencePreservesStopwatchTaskAttribution() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        while !vm1.tasks.isEmpty {
+            vm1.removeTask(at: 0)
+        }
+
+        vm1.startStopwatch()
+        vm1.stopwatchStartDate = vm1.stopwatchStartDate?.addingTimeInterval(-60.0)
+
+        vm1.addTask(title: "Persisted Task", expectedMinutes: 25)
+
+        vm1.stopwatchStartDate = vm1.stopwatchStartDate?.addingTimeInterval(-30.0)
+        vm1.stopStopwatch()
+
+        XCTAssertEqual(vm1.stopwatchTime, 90)
+        XCTAssertEqual(vm1.tasks[0].timeSpentSeconds, 30)
+
+        // Quit
+        vm1.handleAppTermination()
+
+        // Reopen
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.tasks.count, 1)
+        XCTAssertEqual(vm2.tasks[0].title, "Persisted Task")
+        XCTAssertEqual(vm2.tasks[0].timeSpentSeconds, 30, "Task must retain exactly 30s upon relaunch")
+        XCTAssertEqual(vm2.stopwatchTime, 90, "Stopwatch elapsed time must survive relaunch")
+    }
 }

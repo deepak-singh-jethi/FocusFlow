@@ -1116,16 +1116,19 @@ public class TimerViewModel: ObservableObject {
         let newTask = FocusTask(title: title, estimatedMinutes: expectedMinutes, icon: "checkmark.circle", iconColor: .cyan)
         let shouldBecomeActive = tasks.isEmpty || !tasks.indices.contains(activeTaskIndex) || tasks[activeTaskIndex].isCompleted
 
-        tasks.append(newTask)
+        let now = Date()
         if shouldBecomeActive {
-            let now = Date()
             let oldTaskId = (isTimerRunning && isFocusPreset) ? activeSessionTaskId : (isStopwatchRunning && tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted ? tasks[activeTaskIndex].id : nil)
 
             if isTimerRunning || isStopwatchRunning {
                 settleActiveTime(at: now, for: oldTaskId)
                 finalizeRunningFocusSegment(at: now, for: oldTaskId)
             }
+        }
 
+        tasks.append(newTask)
+
+        if shouldBecomeActive {
             activeTaskIndex = tasks.count - 1
 
             if isTimerRunning && isFocusPreset {
