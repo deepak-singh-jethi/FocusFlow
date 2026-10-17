@@ -630,7 +630,7 @@ public class TimerViewModel: ObservableObject {
     private func recordActiveSessionSegment() {
         guard sessionSegmentStartDate != nil else { return }
         let now = Date()
-        let recordingTaskId = activeSessionTaskId ?? (tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted ? tasks[activeTaskIndex].id : nil)
+        let recordingTaskId = activeSessionTaskId
         activeSessionTaskId = nil
         finalizeRunningFocusSegment(at: now, for: recordingTaskId)
         persistData()
@@ -839,8 +839,7 @@ public class TimerViewModel: ObservableObject {
                 let uncounted = timeRemaining
                 timeRemaining = 0
                 if isFocusPreset && uncounted > 0 {
-                    let targetTaskId = activeSessionTaskId ?? (tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted ? tasks[activeTaskIndex].id : nil)
-                    creditTaskTime(taskId: targetTaskId, seconds: uncounted)
+                    creditTaskTime(taskId: activeSessionTaskId, seconds: uncounted)
                 }
                 recordActiveSessionSegment()
                 handleSessionComplete()
@@ -853,8 +852,7 @@ public class TimerViewModel: ObservableObject {
                     let delta = timeRemaining - newTime
                     timeRemaining = newTime
                     if isFocusPreset && delta > 0 {
-                        let targetTaskId = activeSessionTaskId ?? (tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted ? tasks[activeTaskIndex].id : nil)
-                        creditTaskTime(taskId: targetTaskId, seconds: delta)
+                        creditTaskTime(taskId: activeSessionTaskId, seconds: delta)
                     }
                     recalculateFocusMetrics(now: now)
                 }
@@ -911,8 +909,7 @@ public class TimerViewModel: ObservableObject {
             let newRemaining = max(Int(ceil(remaining)), 0)
             if isFocusPreset, newRemaining < timeRemaining {
                 let delta = timeRemaining - newRemaining
-                let targetTaskId = activeSessionTaskId ?? (tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted ? tasks[activeTaskIndex].id : nil)
-                creditTaskTime(taskId: targetTaskId, seconds: delta)
+                creditTaskTime(taskId: activeSessionTaskId, seconds: delta)
             }
             timeRemaining = newRemaining
             capturedRemaining = newRemaining
@@ -1122,7 +1119,7 @@ public class TimerViewModel: ObservableObject {
         tasks.append(newTask)
         if shouldBecomeActive {
             let now = Date()
-            let oldTaskId = activeSessionTaskId ?? (tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted ? tasks[activeTaskIndex].id : nil)
+            let oldTaskId = (isTimerRunning && isFocusPreset) ? activeSessionTaskId : (isStopwatchRunning && tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted ? tasks[activeTaskIndex].id : nil)
 
             if isTimerRunning || isStopwatchRunning {
                 settleActiveTime(at: now, for: oldTaskId)
@@ -1149,7 +1146,7 @@ public class TimerViewModel: ObservableObject {
         guard tasks.indices.contains(index), !tasks[index].isCompleted else { return }
 
         let targetTask = tasks[index]
-        let currentActiveId = activeSessionTaskId ?? (tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted ? tasks[activeTaskIndex].id : nil)
+        let currentActiveId = (isTimerRunning && isFocusPreset) ? activeSessionTaskId : (isStopwatchRunning && tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted ? tasks[activeTaskIndex].id : nil)
 
         // Avoid unnecessary focus-record splits when selecting the same task
         if targetTask.id == currentActiveId && index == activeTaskIndex {
@@ -1186,65 +1183,72 @@ public class TimerViewModel: ObservableObject {
         guard !isPersistenceBlocked else { return }
         guard tasks.indices.contains(index) else { return }
 
-        let completingTask = tasks[index]
-        let isCompletingActive = (activeTaskIndex == index && !completingTask.isCompleted)
+        let targetTask = tasks[index]
+        let isRunningFocus = isTimerRunning && isFocusPreset
 
-        if isCompletingActive {
-            let now = Date()
-            let oldTaskId = completingTask.id
+        if !targetTask.isCompleted {
+            // Task is currently incomplete -> marking it COMPLETE
+            let isCompletingActive = (activeTaskIndex == index)
 
-            // 1. Settle pending elapsed time under the old task before marking complete
-            settleActiveTime(at: now, for: oldTaskId)
+            if isCompletingActive {
+                let now = Date()
+                let oldTaskId = targetTask.id
 
-            // 2. Finalize running focus segment under old task
-            finalizeRunningFocusSegment(at: now, for: oldTaskId)
+                // 1. Settle pending elapsed time under the old task before marking complete
+                settleActiveTime(at: now, for: oldTaskId)
 
-            // 3. Mark completed
-            tasks[index].isCompleted = true
+                // 2. Finalize running focus segment under old task
+                finalizeRunningFocusSegment(at: now, for: oldTaskId)
 
-            // 4. Find next available eligible task
-            if let nextIndex = findNextAvailableTaskIndex(startingAt: index + 1) {
-                activeTaskIndex = nextIndex
-                if isTimerRunning && isFocusPreset {
-                    sessionSegmentStartDate = now
-                    activeSessionTaskId = tasks[nextIndex].id
-                } else {
-                    activeSessionTaskId = tasks[nextIndex].id
-                }
-            } else {
-                activeSessionTaskId = nil
-                if isTimerRunning && isFocusPreset {
-                    sessionSegmentStartDate = now
-                }
-            }
-        } else {
-            tasks[index].isCompleted.toggle()
-            if !tasks[index].isCompleted {
-                // If currently no active eligible task was selected, select this one
-                if !tasks.indices.contains(activeTaskIndex) || tasks[activeTaskIndex].isCompleted {
-                    activeTaskIndex = index
-                    if isTimerRunning && isFocusPreset {
-                        sessionSegmentStartDate = Date()
-                        activeSessionTaskId = tasks[index].id
-                    } else {
-                        activeSessionTaskId = tasks[index].id
-                    }
-                }
-            } else if activeTaskIndex == index {
-                if let nextIndex = findNextAvailableTaskIndex(startingAt: index + 1) {
+                // 3. Mark completed
+                tasks[index].isCompleted = true
+
+                // 4. Find next available eligible task
+                if let nextIndex = findNextAvailableTaskIndex(startingAt: index + 1, excludingIndex: index) {
                     activeTaskIndex = nextIndex
-                    if isTimerRunning && isFocusPreset {
-                        sessionSegmentStartDate = Date()
+                    if isRunningFocus {
+                        sessionSegmentStartDate = now
                         activeSessionTaskId = tasks[nextIndex].id
                     } else {
                         activeSessionTaskId = tasks[nextIndex].id
                     }
                 } else {
                     activeSessionTaskId = nil
-                    if isTimerRunning && isFocusPreset {
-                        sessionSegmentStartDate = Date()
+                    if isRunningFocus {
+                        sessionSegmentStartDate = now
                     }
                 }
+            } else {
+                // Completing an inactive task: active task and running segment are unaffected
+                tasks[index].isCompleted = true
+            }
+        } else {
+            // Task is currently completed -> REOPENING (marking INCOMPLETE)
+            let shouldBecomeActive = (!tasks.indices.contains(activeTaskIndex) || tasks[activeTaskIndex].isCompleted || activeTaskIndex == index)
+
+            if shouldBecomeActive {
+                let now = Date()
+                let oldTaskId = isRunningFocus ? activeSessionTaskId : (isStopwatchRunning && tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted ? tasks[activeTaskIndex].id : nil)
+
+                // 1. Settle pending elapsed time under old identity (nil if unassigned)
+                settleActiveTime(at: now, for: oldTaskId)
+
+                // 2. Finalize running focus segment under old identity (taskId == nil if unassigned)
+                finalizeRunningFocusSegment(at: now, for: oldTaskId)
+
+                // 3. Mark incomplete and make active
+                tasks[index].isCompleted = false
+                activeTaskIndex = index
+
+                // 4. Begin next focus segment under the reopened task's UUID at the exact same timestamp
+                if isRunningFocus {
+                    sessionSegmentStartDate = now
+                    activeSessionTaskId = targetTask.id
+                } else {
+                    activeSessionTaskId = targetTask.id
+                }
+            } else {
+                tasks[index].isCompleted = false
             }
         }
 
@@ -1259,9 +1263,11 @@ public class TimerViewModel: ObservableObject {
         guard tasks.indices.contains(index) else { return }
 
         let deletingTask = tasks[index]
-        let isDeletingActive = (activeTaskIndex == index)
+        let isRunningFocus = isTimerRunning && isFocusPreset
+        let isDeletingAssigned = (isRunningFocus && activeSessionTaskId == deletingTask.id) ||
+            (!isRunningFocus && isStopwatchRunning && activeTaskIndex == index && !deletingTask.isCompleted)
 
-        if isDeletingActive {
+        if isDeletingAssigned {
             let now = Date()
             let oldTaskId = deletingTask.id
 
@@ -1278,14 +1284,14 @@ public class TimerViewModel: ObservableObject {
             if tasks.isEmpty {
                 activeTaskIndex = 0
                 activeSessionTaskId = nil
-                if isTimerRunning && isFocusPreset {
+                if isRunningFocus {
                     sessionSegmentStartDate = now
                 }
             } else {
                 let candidateIndex = min(index, tasks.count - 1)
                 if let nextIndex = findNextAvailableTaskIndex(startingAt: candidateIndex) {
                     activeTaskIndex = nextIndex
-                    if isTimerRunning && isFocusPreset {
+                    if isRunningFocus {
                         sessionSegmentStartDate = now
                         activeSessionTaskId = tasks[nextIndex].id
                     } else {
@@ -1294,31 +1300,32 @@ public class TimerViewModel: ObservableObject {
                 } else {
                     activeTaskIndex = candidateIndex
                     activeSessionTaskId = nil
-                    if isTimerRunning && isFocusPreset {
+                    if isRunningFocus {
                         sessionSegmentStartDate = now
                     }
                 }
             }
         } else {
-            let activeTaskIdBefore = activeSessionTaskId ?? (tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted ? tasks[activeTaskIndex].id : nil)
+            // Deleting a task that does NOT own the running session:
+            // Could be:
+            // - Deleting a completed task during an unassigned focus session (activeSessionTaskId == nil)
+            // - Deleting an inactive task while another task is running
+            // - Deleting any task while timers are idle
+            let preservedActiveId = isRunningFocus ? activeSessionTaskId : (tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted ? tasks[activeTaskIndex].id : nil)
 
             tasks.remove(at: index)
 
             if tasks.isEmpty {
                 activeTaskIndex = 0
                 activeSessionTaskId = nil
-                if isTimerRunning && isFocusPreset {
-                    sessionSegmentStartDate = Date()
-                }
-            } else if index < activeTaskIndex {
-                activeTaskIndex -= 1
-            } else if activeTaskIndex >= tasks.count {
-                activeTaskIndex = tasks.count - 1
-            }
-
-            if let preservedId = activeTaskIdBefore,
-               let newIndex = tasks.firstIndex(where: { $0.id == preservedId }) {
+            } else if let preservedId = preservedActiveId, let newIndex = tasks.firstIndex(where: { $0.id == preservedId }) {
                 activeTaskIndex = newIndex
+            } else {
+                if index < activeTaskIndex {
+                    activeTaskIndex -= 1
+                } else if activeTaskIndex >= tasks.count {
+                    activeTaskIndex = tasks.count - 1
+                }
             }
         }
 

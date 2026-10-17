@@ -4836,9 +4836,555 @@ final class FocusFlowTests: XCTestCase {
         vm.targetEndDate = Date().addingTimeInterval(1493.2)
         vm.tick()
 
-        // ceil(1493.2) = 1494. delta = 1496 - 1494 = 2s credited to Task B
         XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 4, "Task A time must not change on subsequent tick")
         XCTAssertEqual(vm.tasks[1].timeSpentSeconds, 2, "Task B must receive the 2s delta")
         XCTAssertEqual(vm.timeRemaining, 1494)
+    }
+
+    // MARK: - Task 3 Follow-up Regression Tests
+
+    // 1. Complete all tasks -> run unassigned focus 300s -> reopen Task A -> record 120s -> pause.
+    // Verify two correct records and total 420s.
+    @MainActor
+    func testTaskAttributionFollowUp01_CompleteAll_Run300sUnassigned_ReopenTaskA_Run120s_Pause_TwoRecordsTotal420() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let idA = vm.tasks[0].id
+
+        vm.startTimer()
+
+        // Complete all tasks
+        for i in 0..<vm.tasks.count {
+            vm.toggleTaskCompletion(at: i)
+        }
+        XCTAssertTrue(vm.tasks.allSatisfy { $0.isCompleted })
+        XCTAssertNil(vm.activeSessionTaskId)
+        XCTAssertTrue(vm.isTimerRunning)
+
+        // Simulate 300 seconds of unassigned focus
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-300)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-300)
+
+        // Reopen Task A
+        vm.toggleTaskCompletion(at: 0)
+        XCTAssertFalse(vm.tasks[0].isCompleted)
+        XCTAssertEqual(vm.activeTaskIndex, 0)
+        XCTAssertEqual(vm.activeSessionTaskId, idA)
+
+        // Work for another 120 seconds on Task A
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-120)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-120)
+
+        // Pause
+        vm.stopTimer()
+
+        let unassignedRecords = vm.sessionRecords.filter { $0.taskId == nil }
+        let taskARecords = vm.sessionRecords.filter { $0.taskId == idA }
+
+        XCTAssertEqual(unassignedRecords.count, 1, "Must preserve the 300s unassigned focus segment")
+        XCTAssertEqual(unassignedRecords.first?.durationSeconds, 300, "Unassigned segment must be 300s")
+        XCTAssertEqual(taskARecords.count, 1, "Must record the 120s Task A segment")
+        XCTAssertEqual(taskARecords.first?.durationSeconds, 120, "Task A segment must be 120s")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 120, "Task A must receive only 120s, not 420s")
+        XCTAssertEqual(vm.todayFocusedSeconds, 420, "Total focused time must be 420s")
+    }
+
+    // 2. Verify the 300-second unassigned segment has taskId == nil.
+    @MainActor
+    func testTaskAttributionFollowUp02_VerifyUnassignedSegmentHasNilTaskId() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+        for i in 0..<vm.tasks.count {
+            vm.toggleTaskCompletion(at: i)
+        }
+        XCTAssertNil(vm.activeSessionTaskId)
+
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-300)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-300)
+
+        // Reopening task triggers segment finalization
+        vm.toggleTaskCompletion(at: 0)
+
+        guard let firstRecord = vm.sessionRecords.first else {
+            XCTFail("Expected session record to be finalized upon reopening task")
+            return
+        }
+        XCTAssertNil(firstRecord.taskId, "Unassigned focus segment must have taskId == nil")
+        XCTAssertEqual(firstRecord.durationSeconds, 300)
+    }
+
+    // 3. Verify Task A receives only the subsequent 120 seconds.
+    @MainActor
+    func testTaskAttributionFollowUp03_VerifyReopenedTaskReceivesOnlySubsequentTime() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let idA = vm.tasks[0].id
+        vm.startTimer()
+        for i in 0..<vm.tasks.count {
+            vm.toggleTaskCompletion(at: i)
+        }
+
+        // 300s unassigned
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-300)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-300)
+
+        // Reopen Task A
+        vm.toggleTaskCompletion(at: 0)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 0, "Task A must have 0s immediately upon reopening")
+
+        // 120s on Task A
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-120)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-120)
+        vm.stopTimer()
+
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 120, "Task A must receive strictly 120s, not unassigned time")
+    }
+
+    // 4. Verify previously accumulated task times are not altered.
+    @MainActor
+    func testTaskAttributionFollowUp04_VerifyPreviouslyAccumulatedTaskTimesNotAltered() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let idA = vm.tasks[0].id
+        vm.startTimer()
+
+        // Work 60s on Task A before completing it
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-60)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-60)
+        vm.toggleTaskCompletion(at: 0)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 60)
+
+        // Complete remaining tasks
+        for i in 1..<vm.tasks.count {
+            vm.toggleTaskCompletion(at: i)
+        }
+
+        // Run 300s unassigned
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-300)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-300)
+
+        // Reopen Task A
+        vm.toggleTaskCompletion(at: 0)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 60, "Task A previous time must not be altered on reopen")
+
+        // Work another 120s
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-120)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-120)
+        vm.stopTimer()
+
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 180, "Task A total should be 60 + 120 = 180s")
+        XCTAssertEqual(vm.todayFocusedSeconds, 480, "Total focused seconds = 60 + 300 + 120 = 480s")
+    }
+
+    // 5. Complete all tasks -> run unassigned focus -> delete the completed task at activeTaskIndex.
+    @MainActor
+    func testTaskAttributionFollowUp05_DeleteCompletedTaskAtActiveTaskIndexDuringUnassignedFocusDoesNotFabricateAttribution() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+
+        for i in 0..<vm.tasks.count {
+            vm.toggleTaskCompletion(at: i)
+        }
+        XCTAssertNil(vm.activeSessionTaskId)
+
+        // Simulate 200s unassigned focus
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-200)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-200)
+
+        let activeIdx = vm.activeTaskIndex
+        let deletingId = vm.tasks[activeIdx].id
+
+        vm.removeTask(at: activeIdx)
+
+        XCTAssertFalse(vm.sessionRecords.contains(where: { $0.taskId == deletingId }), "Deleting completed task during unassigned timer must not fabricate attribution")
+    }
+
+    // 6. Delete a different completed task while focus is unassigned. Verify no incorrect split or attribution.
+    @MainActor
+    func testTaskAttributionFollowUp06_DeleteDifferentCompletedTaskDuringUnassignedFocusNoIncorrectSplitOrAttribution() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+        for i in 0..<vm.tasks.count {
+            vm.toggleTaskCompletion(at: i)
+        }
+        XCTAssertNil(vm.activeSessionTaskId)
+
+        // 200s unassigned focus
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-200)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-200)
+
+        // Delete task at index 2 (different from activeTaskIndex 0)
+        let deletingId = vm.tasks[2].id
+        let initialRecordCount = vm.sessionRecords.count
+        vm.removeTask(at: 2)
+
+        // No new split or record fabricated
+        XCTAssertEqual(vm.sessionRecords.count, initialRecordCount, "Removing inactive completed task must not create a split record")
+        XCTAssertNil(vm.activeSessionTaskId)
+
+        // Another 100s unassigned focus, then stop
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-100)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-100)
+        vm.stopTimer()
+
+        let unassignedRecords = vm.sessionRecords.filter { $0.taskId == nil }
+        XCTAssertEqual(unassignedRecords.count, 1, "Must have exactly 1 continuous unassigned record")
+        XCTAssertEqual(unassignedRecords.first?.durationSeconds, 300, "Unassigned segment should be 300s total")
+        XCTAssertFalse(vm.sessionRecords.contains(where: { $0.taskId == deletingId }))
+    }
+
+    // 7. Delete every completed task during an unassigned timer, then stop. Verify all unassigned focus time is retained with taskId == nil.
+    @MainActor
+    func testTaskAttributionFollowUp07_DeleteEveryCompletedTaskDuringUnassignedTimerThenStopRetainsAllUnassignedTimeWithNilTaskId() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+        for i in 0..<vm.tasks.count {
+            vm.toggleTaskCompletion(at: i)
+        }
+
+        // Run 150s unassigned
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-150)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-150)
+
+        // Delete all tasks one by one
+        while !vm.tasks.isEmpty {
+            vm.removeTask(at: 0)
+        }
+        XCTAssertTrue(vm.tasks.isEmpty)
+        XCTAssertTrue(vm.isTimerRunning)
+        XCTAssertNil(vm.activeSessionTaskId)
+
+        // Run another 150s unassigned
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-150)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-150)
+
+        vm.stopTimer()
+
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertNil(vm.sessionRecords[0].taskId)
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 300)
+        XCTAssertEqual(vm.todayFocusedSeconds, 300)
+    }
+
+    // 8. Unassigned focus -> reactivate a task -> pause -> resume -> stop. Verify accurate segment accounting with no duplicates.
+    @MainActor
+    func testTaskAttributionFollowUp08_UnassignedFocus_ReactivateTask_Pause_Resume_Stop_AccurateSegmentAccountingNoDuplicates() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let idA = vm.tasks[0].id
+        vm.startTimer()
+        for i in 0..<vm.tasks.count {
+            vm.toggleTaskCompletion(at: i)
+        }
+
+        // 200s unassigned
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-200)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-200)
+
+        // Reactivate Task A
+        vm.toggleTaskCompletion(at: 0)
+
+        // 60s on Task A
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-60)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-60)
+
+        // Pause
+        vm.stopTimer()
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 60)
+
+        // Resume
+        vm.startTimer()
+        XCTAssertEqual(vm.activeSessionTaskId, idA)
+
+        // Another 60s on Task A
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-60)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-60)
+
+        // Stop
+        vm.stopTimer()
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 120)
+
+        let unassigned = vm.sessionRecords.filter { $0.taskId == nil }
+        let taskA = vm.sessionRecords.filter { $0.taskId == idA }
+        XCTAssertEqual(unassigned.count, 1)
+        XCTAssertEqual(unassigned[0].durationSeconds, 200)
+        XCTAssertEqual(taskA.count, 2)
+        XCTAssertEqual(taskA[0].durationSeconds, 60)
+        XCTAssertEqual(taskA[1].durationSeconds, 60)
+        XCTAssertEqual(vm.todayFocusedSeconds, 320)
+    }
+
+    // 9. Unassigned focus -> reactivate a task -> normal Quit/Reopen. Verify records and task time are preserved.
+    // 9. Unassigned focus -> reactivate a task -> normal Quit/Reopen. Verify records and task time are preserved.
+    @MainActor
+    func testTaskAttributionFollowUp09_UnassignedFocus_ReactivateTask_QuitReopenPreservesRecordsAndTaskTime() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let idA = vm1.tasks[0].id
+        vm1.startTimer()
+        for i in 0..<vm1.tasks.count {
+            vm1.toggleTaskCompletion(at: i)
+        }
+
+        // 200s unassigned
+        vm1.sessionSegmentStartDate = vm1.sessionSegmentStartDate?.addingTimeInterval(-200)
+        vm1.targetEndDate = vm1.targetEndDate?.addingTimeInterval(-200)
+
+        // Reactivate Task A
+        vm1.toggleTaskCompletion(at: 0)
+
+        // 100s on Task A
+        vm1.sessionSegmentStartDate = vm1.sessionSegmentStartDate?.addingTimeInterval(-100)
+        vm1.targetEndDate = vm1.targetEndDate?.addingTimeInterval(-100)
+
+        // Normal quit triggers stopTimer and persists data
+        vm1.handleAppTermination()
+
+        // Reopen app in new ViewModel instance
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm2.sessionRecords.count, 2)
+        let unassigned = vm2.sessionRecords.filter { $0.taskId == nil }
+        let taskA = vm2.sessionRecords.filter { $0.taskId == idA }
+
+        XCTAssertEqual(unassigned.count, 1)
+        XCTAssertEqual(unassigned.first?.durationSeconds, 200)
+        XCTAssertEqual(taskA.count, 1)
+        XCTAssertEqual(taskA.first?.durationSeconds, 100)
+        XCTAssertEqual(vm2.tasks[0].timeSpentSeconds, 100)
+    }
+
+    // 10. Reopen a task while the Focus Timer is paused. Verify no artificial focus time.
+    @MainActor
+    func testTaskAttributionFollowUp10_ReopenTaskWhileFocusTimerPausedDoesNotCreateArtificialFocusTime() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Complete all tasks while idle/paused
+        for i in 0..<vm.tasks.count {
+            vm.toggleTaskCompletion(at: i)
+        }
+        XCTAssertTrue(vm.tasks.allSatisfy { $0.isCompleted })
+
+        let initialRecords = vm.sessionRecords.count
+        let initialFocusedSeconds = vm.todayFocusedSeconds
+
+        // Reopen Task A while timer is not running
+        vm.toggleTaskCompletion(at: 0)
+        XCTAssertFalse(vm.tasks[0].isCompleted)
+        XCTAssertEqual(vm.activeTaskIndex, 0)
+        XCTAssertEqual(vm.sessionRecords.count, initialRecords, "No artificial session record should be created")
+        XCTAssertEqual(vm.todayFocusedSeconds, initialFocusedSeconds, "No focus seconds should be added")
+    }
+
+    // 11. Running Stopwatch without an assigned task -> reactivate a task. Verify previous time is not credited to the new task.
+    @MainActor
+    func testTaskAttributionFollowUp11_RunningStopwatchWithoutAssignedTask_ReactivateTask_PreviousTimeNotCreditedToNewTask() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Complete all tasks
+        for i in 0..<vm.tasks.count {
+            vm.toggleTaskCompletion(at: i)
+        }
+
+        // Start Stopwatch with no active task
+        vm.startStopwatch()
+        vm.stopwatchStartDate = vm.stopwatchStartDate?.addingTimeInterval(-100)
+
+        // Reactivate Task A
+        vm.toggleTaskCompletion(at: 0)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 0, "Previous unassigned stopwatch time must not be credited to Task A")
+
+        // Run another 50s on Task A
+        vm.stopwatchStartDate = vm.stopwatchStartDate?.addingTimeInterval(-50)
+        vm.stopStopwatch()
+
+        XCTAssertEqual(vm.stopwatchTime, 150)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 50, "Task A must receive only the 50s elapsed after reactivation")
+    }
+
+    // 12. Simultaneous Focus Timer and Stopwatch during unassigned-to-assigned transition.
+    @MainActor
+    func testTaskAttributionFollowUp12_SimultaneousFocusTimerAndStopwatchDuringUnassignedToAssignedTransition() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let idA = vm.tasks[0].id
+
+        // Complete all tasks
+        for i in 0..<vm.tasks.count {
+            vm.toggleTaskCompletion(at: i)
+        }
+
+        // Start both Focus Timer and Stopwatch
+        vm.startTimer()
+        vm.startStopwatch()
+
+        // 120s elapsed on both without assigned task
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-120)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-120)
+        vm.stopwatchStartDate = vm.stopwatchStartDate?.addingTimeInterval(-120)
+
+        // Reactivate Task A
+        vm.toggleTaskCompletion(at: 0)
+
+        // 60s elapsed on both with Task A active
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-60)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-60)
+        vm.stopwatchStartDate = vm.stopwatchStartDate?.addingTimeInterval(-60)
+
+        vm.stopTimer()
+        vm.stopStopwatch()
+
+        // Verify Timer records
+        let unassigned = vm.sessionRecords.filter { $0.taskId == nil }
+        let taskARecords = vm.sessionRecords.filter { $0.taskId == idA }
+        XCTAssertEqual(unassigned.count, 1)
+        XCTAssertEqual(unassigned.first?.durationSeconds, 120)
+        XCTAssertEqual(taskARecords.count, 1)
+        XCTAssertEqual(taskARecords.first?.durationSeconds, 60)
+
+        // Task A gets 60s from timer + 60s from stopwatch = 120s
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 120)
+        XCTAssertEqual(vm.stopwatchTime, 180)
+    }
+
+    // 13. Repeated complete/incomplete toggles near a tick boundary. Verify no missed or duplicated time.
+    @MainActor
+    func testTaskAttributionFollowUp13_RepeatedCompleteIncompleteTogglesNearTickBoundary() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.startTimer()
+
+        // Complete Task 0 -> auto advances to Task 1
+        vm.toggleTaskCompletion(at: 0)
+        XCTAssertEqual(vm.activeTaskIndex, 1)
+
+        // Reopen Task 0
+        vm.toggleTaskCompletion(at: 0)
+        XCTAssertFalse(vm.tasks[0].isCompleted)
+
+        // Select Task 0
+        vm.selectTask(at: 0)
+        XCTAssertEqual(vm.activeTaskIndex, 0)
+
+        // Tick on Task 0
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-1.0)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-1.0)
+        vm.tick()
+
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1)
+    }
+
+    // 14. Storage corruption protection remains active and task mutations remain blocked.
+    @MainActor
+    func testTaskAttributionFollowUp14_StorageCorruptionProtectionRemainsActiveAndTaskMutationsBlocked() throws {
+        let testDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: testDir) }
+
+        let primaryURL = testDir.appendingPathComponent("focusflow_data.json")
+        try Data("malformed json bytes".utf8).write(to: primaryURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+        XCTAssertTrue(vm.isPersistenceBlocked)
+
+        vm.addTask(title: "New Task That Should Not Be Added")
+        XCTAssertTrue(vm.tasks.isEmpty)
+
+        vm.toggleTaskCompletion(at: 0)
+        XCTAssertTrue(vm.tasks.isEmpty)
+
+        vm.removeTask(at: 0)
+        XCTAssertTrue(vm.tasks.isEmpty)
+
+        vm.selectTask(at: 0)
+        XCTAssertEqual(vm.activeTaskIndex, 0)
+    }
+
+    // 15. Existing task switching from A -> B continues to work correctly.
+    @MainActor
+    func testTaskAttributionFollowUp15_ExistingTaskSwitchingFromAtoBContinuesWorking() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let idA = vm.tasks[0].id
+        let idB = vm.tasks[1].id
+
+        vm.startTimer()
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-60)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-60)
+
+        vm.selectTask(at: 1)
+        XCTAssertEqual(vm.activeTaskIndex, 1)
+        XCTAssertEqual(vm.activeSessionTaskId, idB)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 60)
+
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-40)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-40)
+        vm.stopTimer()
+
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 60)
+        XCTAssertEqual(vm.tasks[1].timeSpentSeconds, 40)
+        XCTAssertEqual(vm.sessionRecords.count, 2)
+        XCTAssertEqual(vm.sessionRecords[0].taskId, idA)
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 60)
+        XCTAssertEqual(vm.sessionRecords[1].taskId, idB)
+        XCTAssertEqual(vm.sessionRecords[1].durationSeconds, 40)
+    }
+
+    // 16. Existing Focus Session Records, stopwatch laps and serialized data remain unchanged unless directly affected.
+    @MainActor
+    func testTaskAttributionFollowUp16_ExistingSessionRecordsAndStopwatchLapsRemainUnchangedUnlessDirectlyAffected() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Preload historical record and lap
+        let historicalUUID = UUID()
+        let oldRecord = FocusSessionRecord(
+            startTime: Date().addingTimeInterval(-3600),
+            endTime: Date().addingTimeInterval(-1800),
+            durationSeconds: 1800,
+            mode: "Focus",
+            taskId: historicalUUID
+        )
+        vm.sessionRecords.append(oldRecord)
+
+        let oldLap = StopwatchLap(lapNumber: 1, lapDuration: 10.0, totalTime: 10.0, timestamp: Date().addingTimeInterval(-1800))
+        vm.laps.append(oldLap)
+
+        // Complete all tasks, run unassigned, reactivate Task A
+        vm.startTimer()
+        for i in 0..<vm.tasks.count {
+            vm.toggleTaskCompletion(at: i)
+        }
+        vm.sessionSegmentStartDate = vm.sessionSegmentStartDate?.addingTimeInterval(-100)
+        vm.targetEndDate = vm.targetEndDate?.addingTimeInterval(-100)
+
+        vm.toggleTaskCompletion(at: 0)
+        vm.stopTimer()
+
+        // Verify old record and lap untouched
+        XCTAssertEqual(vm.sessionRecords.first?.taskId, historicalUUID)
+        XCTAssertEqual(vm.sessionRecords.first?.durationSeconds, 1800)
+        XCTAssertEqual(vm.laps.first?.lapNumber, 1)
+        XCTAssertEqual(vm.laps.first?.lapDuration, 10.0)
     }
 }
