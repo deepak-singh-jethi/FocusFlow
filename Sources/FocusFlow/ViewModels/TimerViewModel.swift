@@ -5,6 +5,10 @@ import AppKit
 // MARK: - Timer & App State ViewModel (Persistent, Date-Aware & Power-Efficient)
 @MainActor
 public class TimerViewModel: ObservableObject {
+    // MARK: - Supported Timer Duration Bounds
+    public static let minSupportedTimerDuration: Int = 5
+    public static let maxSupportedTimerDuration: Int = 360 * 60 + 59 // 21,659 seconds (360m 59s)
+
     @Published public var timeRemaining: Int = 25 * 60 {
         didSet {
             if isTimerRunning, let target = targetEndDate {
@@ -446,26 +450,35 @@ public class TimerViewModel: ObservableObject {
             self.activeTaskIndex = 0
         }
 
+        let minDuration = TimerViewModel.minSupportedTimerDuration
+        let maxDuration = TimerViewModel.maxSupportedTimerDuration
+
         if let paused = saved.pausedSession {
             // Highest Priority: Existing Paused Timer Session
             self.activePreset = paused.activePreset
             self.activeMode = paused.activeMode
             self.isBreakSession = paused.isBreakSession
-            self.totalTime = max(5, paused.totalTime)
+            self.totalTime = max(minDuration, min(paused.totalTime, maxDuration))
             self.timeRemaining = max(1, min(paused.timeRemaining, self.totalTime))
             self.currentSession = min(max(1, paused.currentSession), max(1, self.totalSessions))
             self.pausedSession?.activeTaskIndex = self.activeTaskIndex
+            self.pausedSession?.totalTime = self.totalTime
+            self.pausedSession?.timeRemaining = self.timeRemaining
 
             if paused.activeMode == "Custom Timer" || paused.activePreset == "Custom" {
-                self.customMinutes = paused.customMinutes
-                self.customSeconds = paused.customSeconds
-                self.customDurationSeconds = max(5, paused.totalTime)
+                self.customDurationSeconds = self.totalTime
+                self.customMinutes = self.totalTime / 60
+                self.customSeconds = self.totalTime % 60
+                self.pausedSession?.customMinutes = self.customMinutes
+                self.pausedSession?.customSeconds = self.customSeconds
             } else if let m = saved.configuredCustomMinutes, let s = saved.configuredCustomSeconds {
                 let safeM = max(0, min(m, 360))
                 let safeS = max(0, min(s, 59))
-                self.customMinutes = safeM
-                self.customSeconds = safeS
-                self.customDurationSeconds = max(5, safeM * 60 + safeS)
+                let computed = safeM * 60 + safeS
+                let safeCustom = (computed >= minDuration) ? min(computed, maxDuration) : 25 * 60
+                self.customDurationSeconds = safeCustom
+                self.customMinutes = safeCustom / 60
+                self.customSeconds = safeCustom % 60
             } else {
                 self.customMinutes = 25
                 self.customSeconds = 0
@@ -477,6 +490,7 @@ public class TimerViewModel: ObservableObject {
             } else {
                 self.preciseProgress = paused.preciseProgress
             }
+            self.pausedSession?.preciseProgress = self.preciseProgress
             self.isTimerRunning = false
             self.targetEndDate = nil
             self.fractionalRemaining = nil
@@ -503,14 +517,17 @@ public class TimerViewModel: ObservableObject {
 
             let customM = max(0, min(saved.configuredCustomMinutes ?? 25, 360))
             let customS = max(0, min(saved.configuredCustomSeconds ?? 0, 59))
-            self.customMinutes = customM
-            self.customSeconds = customS
             let computedCustom = customM * 60 + customS
-            self.customDurationSeconds = (computedCustom > 0) ? computedCustom : 25 * 60
+            let safeCustom = (computedCustom >= minDuration) ? min(computedCustom, maxDuration) : 25 * 60
+            self.customDurationSeconds = safeCustom
+            self.customMinutes = safeCustom / 60
+            self.customSeconds = safeCustom % 60
 
             let resolvedTotal: Int
-            if let savedTotal = saved.configuredTotalTime, savedTotal > 0 {
-                resolvedTotal = savedTotal
+            if let savedTotal = saved.configuredTotalTime, savedTotal >= minDuration {
+                resolvedTotal = min(savedTotal, maxDuration)
+            } else if let savedTotal = saved.configuredTotalTime, savedTotal > 0 {
+                resolvedTotal = minDuration
             } else if saved.activePreset == "Short Break" || saved.activePreset == "Break" {
                 resolvedTotal = 5 * 60
             } else if saved.activePreset == "Long Break" {
@@ -521,7 +538,7 @@ public class TimerViewModel: ObservableObject {
                 resolvedTotal = 25 * 60
             }
 
-            self.totalTime = max(5, resolvedTotal)
+            self.totalTime = max(minDuration, min(resolvedTotal, maxDuration))
             self.timeRemaining = self.totalTime
             self.preciseProgress = 1.0
 
@@ -799,7 +816,9 @@ public class TimerViewModel: ObservableObject {
         activePreset = name
         activeMode = mode
         isBreakSession = isBreak
-        let total = max(5, minutes * 60 + seconds)
+        let safeM = max(0, min(minutes, 360))
+        let safeS = max(0, min(seconds, 59))
+        let total = min(max(TimerViewModel.minSupportedTimerDuration, safeM * 60 + safeS), TimerViewModel.maxSupportedTimerDuration)
         customMinutes = total / 60
         customSeconds = total % 60
         customDurationSeconds = total

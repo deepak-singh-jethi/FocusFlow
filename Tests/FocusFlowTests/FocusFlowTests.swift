@@ -6313,4 +6313,445 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertFalse(vm.isTimerRunning)
         XCTAssertFalse(vm.isStopwatchRunning)
     }
+
+    // MARK: - Task 4 Follow-up Regression Tests
+
+    // Reproduction Test
+    @MainActor
+    func testTask4FollowUp_Reproduction_ExcessivePositiveDurationNotClamped() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_repro_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let primaryURL = tempDir.appendingPathComponent("focusflow_data.json")
+        let malformedData = FocusAppData(
+            activePreset: "Custom",
+            activeMode: "Custom Timer",
+            configuredTotalTime: 36000,
+            configuredCustomMinutes: 600,
+            configuredCustomSeconds: 0
+        )
+        let bytes = try JSONEncoder().encode(malformedData)
+        try bytes.write(to: primaryURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+
+        // The maximum supported duration is 360m 59s = 21659s.
+        // A 600m / 36000s duration must be clamped within supported bounds.
+        XCTAssertLessThanOrEqual(vm.totalTime, 21659, "Excessive duration 36000 should be clamped to supported max")
+        XCTAssertLessThanOrEqual(vm.customMinutes, 360, "Excessive customMinutes 600 should be clamped to 360")
+    }
+
+    // Test A — Unsupported Large Positive Duration
+    @MainActor
+    func testTask4FollowUp_A_UnsupportedLargePositiveDurationClampedAndConsistent() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t4f_testA_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let primaryURL = tempDir.appendingPathComponent("focusflow_data.json")
+        let malformedData = FocusAppData(
+            activePreset: "Custom",
+            activeMode: "Custom Timer",
+            configuredTotalTime: 36000,
+            configuredCustomMinutes: 600,
+            configuredCustomSeconds: 0
+        )
+        let bytes = try JSONEncoder().encode(malformedData)
+        try bytes.write(to: primaryURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm.totalTime, TimerViewModel.maxSupportedTimerDuration)
+        XCTAssertEqual(vm.timeRemaining, TimerViewModel.maxSupportedTimerDuration)
+        XCTAssertEqual(vm.customDurationSeconds, TimerViewModel.maxSupportedTimerDuration)
+        XCTAssertEqual(vm.customMinutes, 360)
+        XCTAssertEqual(vm.customSeconds, 59)
+        XCTAssertEqual(vm.preciseProgress, 1.0)
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertNil(vm.targetEndDate)
+        XCTAssertFalse(vm.isPersistenceBlocked)
+    }
+
+    // Test B — Maximum Valid Boundary
+    @MainActor
+    func testTask4FollowUp_B_MaximumValidBoundarySurvivesWithoutTruncation() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t4f_testB_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let fileURL = tempDir.appendingPathComponent("focusflow_data.json")
+
+        // 1. Boundary 360:00 (21600 seconds)
+        do {
+            let storage1 = FocusStorageService(storageURL: fileURL)
+            let vm1 = TimerViewModel(storage: storage1)
+            vm1.setCustomDuration(minutes: 360, seconds: 0)
+            XCTAssertEqual(vm1.totalTime, 21600)
+            vm1.persistData(force: true)
+
+            let storage2 = FocusStorageService(storageURL: fileURL)
+            let vm2 = TimerViewModel(storage: storage2)
+            XCTAssertEqual(vm2.totalTime, 21600)
+            XCTAssertEqual(vm2.timeRemaining, 21600)
+            XCTAssertEqual(vm2.customMinutes, 360)
+            XCTAssertEqual(vm2.customSeconds, 0)
+            XCTAssertEqual(vm2.customDurationSeconds, 21600)
+            XCTAssertEqual(vm2.activePreset, "Custom")
+            XCTAssertEqual(vm2.activeMode, "Custom Timer")
+            XCTAssertFalse(vm2.isTimerRunning)
+        }
+
+        // 2. Boundary 360:59 (21659 seconds)
+        do {
+            let storage3 = FocusStorageService(storageURL: fileURL)
+            let vm3 = TimerViewModel(storage: storage3)
+            vm3.setCustomDuration(minutes: 360, seconds: 59)
+            XCTAssertEqual(vm3.totalTime, 21659)
+            vm3.persistData(force: true)
+
+            let storage4 = FocusStorageService(storageURL: fileURL)
+            let vm4 = TimerViewModel(storage: storage4)
+            XCTAssertEqual(vm4.totalTime, 21659)
+            XCTAssertEqual(vm4.timeRemaining, 21659)
+            XCTAssertEqual(vm4.customMinutes, 360)
+            XCTAssertEqual(vm4.customSeconds, 59)
+            XCTAssertEqual(vm4.customDurationSeconds, 21659)
+            XCTAssertEqual(vm4.activePreset, "Custom")
+            XCTAssertEqual(vm4.activeMode, "Custom Timer")
+            XCTAssertFalse(vm4.isTimerRunning)
+        }
+    }
+
+    // Test C — One Second Above Maximum
+    @MainActor
+    func testTask4FollowUp_C_OneSecondAboveMaximumClampedDeterministically() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t4f_testC_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let primaryURL = tempDir.appendingPathComponent("focusflow_data.json")
+        let malformedData = FocusAppData(
+            activePreset: "Custom",
+            activeMode: "Custom Timer",
+            configuredTotalTime: 21660,
+            configuredCustomMinutes: 361,
+            configuredCustomSeconds: 0
+        )
+        let bytes = try JSONEncoder().encode(malformedData)
+        try bytes.write(to: primaryURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm.totalTime, 21659)
+        XCTAssertEqual(vm.timeRemaining, 21659)
+        XCTAssertEqual(vm.customMinutes, 360)
+        XCTAssertEqual(vm.customSeconds, 59)
+        XCTAssertEqual(vm.customDurationSeconds, 21659)
+        XCTAssertFalse(vm.isTimerRunning)
+    }
+
+    // Test D — Extremely Large Integer
+    @MainActor
+    func testTask4FollowUp_D_ExtremelyLargeIntegerHandledSafelyWithoutOverflow() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t4f_testD_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let primaryURL = tempDir.appendingPathComponent("focusflow_data.json")
+        let malformedData = FocusAppData(
+            activePreset: "Custom",
+            activeMode: "Custom Timer",
+            configuredTotalTime: Int.max,
+            configuredCustomMinutes: Int.max,
+            configuredCustomSeconds: Int.max
+        )
+        let bytes = try JSONEncoder().encode(malformedData)
+        try bytes.write(to: primaryURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm.totalTime, TimerViewModel.maxSupportedTimerDuration)
+        XCTAssertEqual(vm.timeRemaining, TimerViewModel.maxSupportedTimerDuration)
+        XCTAssertEqual(vm.customMinutes, 360)
+        XCTAssertEqual(vm.customSeconds, 59)
+        XCTAssertEqual(vm.customDurationSeconds, TimerViewModel.maxSupportedTimerDuration)
+        XCTAssertEqual(vm.preciseProgress, 1.0)
+        XCTAssertFalse(vm.isTimerRunning)
+    }
+
+    // Test E — Valid Custom Duration Unchanged
+    @MainActor
+    func testTask4FollowUp_E_ValidCustomDuration4530Unchanged() {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.setCustomDuration(minutes: 45, seconds: 30)
+        XCTAssertEqual(vm1.totalTime, 2730)
+        XCTAssertEqual(vm1.timeRemaining, 2730)
+        XCTAssertEqual(vm1.customMinutes, 45)
+        XCTAssertEqual(vm1.customSeconds, 30)
+        XCTAssertEqual(vm1.customDurationSeconds, 2730)
+        vm1.persistData(force: true)
+
+        let storage2 = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage2)
+
+        XCTAssertEqual(vm2.totalTime, 2730)
+        XCTAssertEqual(vm2.timeRemaining, 2730)
+        XCTAssertEqual(vm2.customMinutes, 45)
+        XCTAssertEqual(vm2.customSeconds, 30)
+        XCTAssertEqual(vm2.customDurationSeconds, 2730)
+        XCTAssertEqual(vm2.activePreset, "Custom")
+        XCTAssertEqual(vm2.activeMode, "Custom Timer")
+        XCTAssertFalse(vm2.isTimerRunning)
+    }
+
+    // Test F — Valid Paused Timer Unchanged
+    @MainActor
+    func testTask4FollowUp_F_ValidPausedTimerUnchangedAndOutOfRangePausedClamped() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t4f_testF_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let primaryURL = tempDir.appendingPathComponent("focusflow_data.json")
+
+        // Sub-test 1: Valid paused custom timer (45:00 total, 32:10 remaining) with conflicting invalid top-level duration
+        let validPaused = PausedTimerSession(
+            activePreset: "Custom",
+            activeMode: "Custom Timer",
+            isBreakSession: false,
+            totalTime: 2700,
+            timeRemaining: 1930,
+            preciseProgress: 1930.0 / 2700.0,
+            customMinutes: 45,
+            customSeconds: 0,
+            currentSession: 1,
+            activeTaskIndex: 0
+        )
+        let payloadWithValidPaused = FocusAppData(
+            activePreset: "Custom",
+            pausedSession: validPaused,
+            activeMode: "Custom Timer",
+            configuredTotalTime: 36000 // Out-of-range top-level idle field must not clobber paused session
+        )
+        let bytes1 = try JSONEncoder().encode(payloadWithValidPaused)
+        try bytes1.write(to: primaryURL)
+
+        let storage1 = FocusStorageService(storageURL: primaryURL)
+        let vm1 = TimerViewModel(storage: storage1)
+
+        XCTAssertEqual(vm1.totalTime, 2700)
+        XCTAssertEqual(vm1.timeRemaining, 1930)
+        XCTAssertEqual(vm1.customMinutes, 45)
+        XCTAssertEqual(vm1.customSeconds, 0)
+        XCTAssertEqual(vm1.customDurationSeconds, 2700)
+        XCTAssertFalse(vm1.isTimerRunning)
+        XCTAssertEqual(vm1.preciseProgress, 1930.0 / 2700.0, accuracy: 0.001)
+
+        // Sub-test 2: Paused session with excessively large duration (36000 total, 35000 remaining)
+        let invalidPaused = PausedTimerSession(
+            activePreset: "Custom",
+            activeMode: "Custom Timer",
+            isBreakSession: false,
+            totalTime: 36000,
+            timeRemaining: 35000,
+            preciseProgress: 35000.0 / 36000.0,
+            customMinutes: 600,
+            customSeconds: 0,
+            currentSession: 1,
+            activeTaskIndex: 0
+        )
+        let payloadWithInvalidPaused = FocusAppData(
+            activePreset: "Custom",
+            pausedSession: invalidPaused,
+            activeMode: "Custom Timer"
+        )
+        let bytes2 = try JSONEncoder().encode(payloadWithInvalidPaused)
+        try bytes2.write(to: primaryURL)
+
+        let storage2 = FocusStorageService(storageURL: primaryURL)
+        let vm2 = TimerViewModel(storage: storage2)
+
+        XCTAssertEqual(vm2.totalTime, TimerViewModel.maxSupportedTimerDuration)
+        XCTAssertEqual(vm2.timeRemaining, TimerViewModel.maxSupportedTimerDuration)
+        XCTAssertEqual(vm2.customMinutes, 360)
+        XCTAssertEqual(vm2.customSeconds, 59)
+        XCTAssertEqual(vm2.customDurationSeconds, TimerViewModel.maxSupportedTimerDuration)
+        XCTAssertFalse(vm2.isTimerRunning)
+    }
+
+    // Test G — Legacy JSON
+    @MainActor
+    func testTask4FollowUp_G_LegacyJSONWithoutNewFieldsRetainsDefaults() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t4f_testG_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let primaryURL = tempDir.appendingPathComponent("focusflow_data.json")
+        let legacyJSON = """
+        {
+            "tasks": [
+                {
+                    "id": "A1B2C3D4-E5F6-7890-ABCD-EF1234567890",
+                    "title": "Legacy Architecture Task",
+                    "estimatedMinutes": 25,
+                    "timeSpentSeconds": 0,
+                    "isCompleted": false,
+                    "isLocked": false,
+                    "icon": "star.fill",
+                    "iconColorName": "orange"
+                }
+            ],
+            "completedSessions": 2,
+            "totalSessions": 4,
+            "autoStartNextSession": false,
+            "activePreset": "Focus",
+            "laps": []
+        }
+        """
+        try legacyJSON.data(using: .utf8)!.write(to: primaryURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+
+        XCTAssertEqual(vm.activePreset, "Focus")
+        XCTAssertEqual(vm.activeMode, "Pomodoro")
+        XCTAssertEqual(vm.totalTime, 1500)
+        XCTAssertEqual(vm.timeRemaining, 1500)
+        XCTAssertEqual(vm.customMinutes, 25)
+        XCTAssertEqual(vm.customSeconds, 0)
+        XCTAssertEqual(vm.customDurationSeconds, 1500)
+        XCTAssertFalse(vm.isBreakSession)
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertEqual(vm.tasks.count, 1)
+        XCTAssertEqual(vm.tasks[0].title, "Legacy Architecture Task")
+    }
+
+    // Test H — Other State Integrity
+    @MainActor
+    func testTask4FollowUp_H_OtherStateIntegrityPreservedWhenLoadingInvalidDuration() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t4f_testH_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let primaryURL = tempDir.appendingPathComponent("focusflow_data.json")
+
+        let task1 = FocusTask(title: "Task 1", estimatedMinutes: 25)
+        let task2 = FocusTask(title: "Task 2", estimatedMinutes: 50)
+        let record = FocusSessionRecord(startTime: Date().addingTimeInterval(-3000), endTime: Date().addingTimeInterval(-1500), durationSeconds: 1500, mode: "Pomodoro", taskId: task1.id)
+        let lap = StopwatchLap(lapNumber: 1, lapDuration: 60.0, totalTime: 60.0)
+
+        let testData = FocusAppData(
+            tasks: [task1, task2],
+            completedSessions: 5,
+            notes: ["Important architecture notes"],
+            dailyGoalHours: 6,
+            totalSessions: 4,
+            activePreset: "Custom",
+            sessionRecords: [record],
+            laps: [lap],
+            stopwatchElapsedSeconds: 125.5,
+            lastRecordedLapElapsedSeconds: 60.0,
+            nextLapNumber: 2,
+            selectedTaskId: task2.id,
+            activeMode: "Custom Timer",
+            configuredTotalTime: 36000, // Invalid excessive duration
+            configuredCustomMinutes: 600,
+            configuredCustomSeconds: 0
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let bytes = try encoder.encode(testData)
+        try bytes.write(to: primaryURL)
+
+        let storage = FocusStorageService(storageURL: primaryURL)
+        let vm = TimerViewModel(storage: storage)
+
+        // 1. Tasks & selection preserved
+        XCTAssertEqual(vm.tasks.count, 2)
+        XCTAssertEqual(vm.tasks[0].id, task1.id)
+        XCTAssertEqual(vm.tasks[1].id, task2.id)
+        XCTAssertEqual(vm.activeTaskIndex, 1)
+
+        // 2. Historical records & metrics preserved
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 1500)
+        XCTAssertEqual(vm.completedSessions, 5)
+
+        // 3. Stopwatch & laps preserved
+        XCTAssertEqual(vm.stopwatchTime, 125)
+        XCTAssertEqual(vm.laps.count, 1)
+        XCTAssertEqual(vm.nextLapNumber, 2)
+        XCTAssertEqual(vm.lastRecordedLapElapsedSeconds, 60.0)
+
+        // 4. Notes & preferences preserved
+        XCTAssertEqual(vm.notes, ["Important architecture notes"])
+        XCTAssertEqual(vm.dailyGoalHours, 6)
+
+        // 5. Timer duration sanitized to supported boundary
+        XCTAssertEqual(vm.totalTime, TimerViewModel.maxSupportedTimerDuration)
+        XCTAssertEqual(vm.timeRemaining, TimerViewModel.maxSupportedTimerDuration)
+        XCTAssertEqual(vm.customMinutes, 360)
+        XCTAssertEqual(vm.customSeconds, 59)
+    }
+
+    // Test I — Corruption Protection
+    @MainActor
+    func testTask4FollowUp_I_CorruptionProtectionPreservedForGenuinelyCorruptedFiles() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t4f_testI_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let primaryURL = tempDir.appendingPathComponent("focusflow_data.json")
+        let backupURL = tempDir.appendingPathComponent("focusflow_data.json.bak")
+
+        // Sub-test 1: Syntactically valid JSON with out-of-range duration is NOT treated as file corruption
+        let validJSONMalformedValues = FocusAppData(
+            activePreset: "Custom",
+            activeMode: "Custom Timer",
+            configuredTotalTime: 99999
+        )
+        try JSONEncoder().encode(validJSONMalformedValues).write(to: primaryURL)
+        let storage1 = FocusStorageService(storageURL: primaryURL)
+        let vm1 = TimerViewModel(storage: storage1)
+        XCTAssertFalse(vm1.isPersistenceBlocked)
+        if case .success = vm1.storageLoadResult {
+            // Success as expected
+        } else {
+            XCTFail("Syntactically valid JSON with out-of-range values should load successfully as .success, got: \(String(describing: vm1.storageLoadResult))")
+        }
+
+        // Sub-test 2: Corrupted primary with valid backup triggers .recovered
+        let validBackupData = FocusAppData(completedSessions: 8)
+        try JSONEncoder().encode(validBackupData).write(to: backupURL)
+        try "CORRUPTED_GARBAGE_BYTES".data(using: .utf8)!.write(to: primaryURL)
+
+        let storage2 = FocusStorageService(storageURL: primaryURL)
+        let vm2 = TimerViewModel(storage: storage2)
+        XCTAssertFalse(vm2.isPersistenceBlocked)
+        XCTAssertTrue(vm2.didRecoverFromBackup)
+        if case .recovered = vm2.storageLoadResult {
+            // Recovered as expected
+        } else {
+            XCTFail("Genuinely corrupted primary with valid backup must trigger .recovered, got: \(String(describing: vm2.storageLoadResult))")
+        }
+        XCTAssertEqual(vm2.completedSessions, 8)
+
+        // Sub-test 3: Corrupted primary and corrupted backup triggers .unrecoverable and blocks persistence
+        try "CORRUPTED_PRIMARY_BYTES".data(using: .utf8)!.write(to: primaryURL)
+        try "CORRUPTED_BACKUP_BYTES".data(using: .utf8)!.write(to: backupURL)
+        let storage3 = FocusStorageService(storageURL: primaryURL)
+        let vm3 = TimerViewModel(storage: storage3)
+        XCTAssertTrue(vm3.isPersistenceBlocked)
+        if case .unrecoverable = vm3.storageLoadResult {
+            // Unrecoverable as expected
+        } else {
+            XCTFail("Corrupted primary and backup must trigger .unrecoverable, got: \(String(describing: vm3.storageLoadResult))")
+        }
+    }
 }
