@@ -470,6 +470,7 @@ public final class FocusStorageService {
     public var simulateWriteFailure: Bool = false
     public var simulateDiagnosticFailure: Bool = false
     public var simulateRestoreFailure: Bool = false
+    public private(set) var saveAttemptCount: Int = 0
 
     public init(storageURL: URL? = nil, fileManager: FileManager = .default) {
         self.customStorageURL = storageURL
@@ -520,6 +521,10 @@ public final class FocusStorageService {
         fileManager.fileExists(atPath: effectiveStorageURL.path) || fileManager.fileExists(atPath: backupURL.path)
     }
 
+    public func resetSaveAttemptCount() {
+        saveAttemptCount = 0
+    }
+
     public func resetBlockedStateForTesting() {
         isPersistenceBlocked = false
         lastError = nil
@@ -528,6 +533,7 @@ public final class FocusStorageService {
         simulateWriteFailure = false
         simulateDiagnosticFailure = false
         simulateRestoreFailure = false
+        saveAttemptCount = 0
     }
 
     public func decodeData(from url: URL) throws -> FocusAppData {
@@ -690,6 +696,7 @@ public final class FocusStorageService {
     }
 
     public func save(_ data: FocusAppData) throws {
+        saveAttemptCount += 1
         guard !isPersistenceBlocked else {
             let error = StorageError.persistenceBlocked(reason: "Persistence is blocked due to unrecoverable storage state")
             self.lastError = error

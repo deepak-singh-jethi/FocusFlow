@@ -8271,4 +8271,516 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertFalse(appDelegate.isPendingCloseAfterFullScreenExit, "Failed exit must reset pending close flag")
         XCTAssertFalse(fsWindow.isVisible, "Window must be hidden as fallback")
     }
+
+    // MARK: - Task 6 Tests: Persistence Write Coalescing & Pending Save Safety
+
+    // 1. Rapid save requests produce only one pending delayed save.
+    @MainActor
+    func testTask6_01_RapidSaveRequestsProduceOnlyOnePendingDelayedSave() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Initial save to establish lastPersistTime
+        vm.persistData(force: true)
+        vm.storage.resetSaveAttemptCount()
+
+        // Rapid requests within throttle interval
+        for _ in 1...50 {
+            vm.persistData(force: false)
+        }
+
+        XCTAssertTrue(vm.hasPendingSave, "A coalesced trailing save must be scheduled")
+        XCTAssertEqual(vm.pendingSaveScheduledCount, 1, "Only one pending save must be scheduled across 50 rapid calls")
+        XCTAssertEqual(vm.pendingSaveCancelledCount, 0)
+    }
+
+    // 2. 100 rapid mutations do not create 100 disk writes.
+    @MainActor
+    func testTask6_02_100RapidMutationsDoNotCreate100DiskWrites() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Baseline forced save
+        vm.persistData(force: true)
+        vm.storage.resetSaveAttemptCount()
+
+        // 100 rapid mutations
+        for i in 1...100 {
+            vm.totalSessions = (i % 8) + 1
+        }
+
+        XCTAssertEqual(vm.pendingSaveScheduledCount, 1, "Must schedule only 1 pending save")
+
+        // Wait for coalesced trailing save to execute
+        let exp = expectation(description: "Wait for trailing save")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 2.0)
+
+        // Verifies write coalescing: 100 mutations result in exactly 1 trailing save
+        XCTAssertEqual(vm.storage.saveAttemptCount, 1, "100 rapid mutations must result in exactly 1 coalesced write attempt, not 100")
+        XCTAssertFalse(vm.hasPendingSave)
+        XCTAssertEqual(vm.pendingSaveExecutedCount, 1)
+    }
+
+    // 3. The eventual save contains the latest state, not the first queued state.
+    @MainActor
+    func testTask6_03_EventualSaveContainsLatestStateNotFirstQueuedState() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.persistData(force: true)
+
+        // Queue a sequence of edits with different values
+        for i in 1...10 {
+            vm.dailyGoalHours = i
+        }
+
+        let exp = expectation(description: "Wait for trailing save")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 2.0)
+
+        let savedData = try vm.storage.decodeData(from: tempURL)
+        XCTAssertEqual(savedData.dailyGoalHours, 10, "Eventual save must contain latest state (10), not first queued state (1)")
+    }
+
+    // 4. A forced save executes immediately during the throttle interval.
+    @MainActor
+    func testTask6_04_ForcedSaveExecutesImmediatelyDuringThrottleInterval() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.persistData(force: true)
+        let countAfterFirst = vm.storage.saveAttemptCount
+
+        // Mutate and force save immediately within milliseconds (< 1.0s)
+        vm.totalSessions = 7
+        vm.persistData(force: true)
+
+        XCTAssertEqual(vm.storage.saveAttemptCount, countAfterFirst + 1, "Forced save must execute immediately without waiting for throttle")
+        let savedData = try vm.storage.decodeData(from: tempURL)
+        XCTAssertEqual(savedData.totalSessions, 7)
+    }
+
+    // 5. Forced save cancels obsolete pending work.
+    @MainActor
+    func testTask6_05_ForcedSaveCancelsObsoletePendingWork() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.persistData(force: true)
+        vm.totalSessions = 5 // schedules pending save
+        XCTAssertTrue(vm.hasPendingSave)
+
+        // Now force save
+        vm.persistData(force: true)
+        XCTAssertFalse(vm.hasPendingSave, "Forced save must invalidate pending save")
+        XCTAssertEqual(vm.pendingSaveCancelledCount, 1, "Pending save must be marked cancelled")
+    }
+
+    // 6. Forced save followed by an old callback does not produce duplicate writes.
+    @MainActor
+    func testTask6_06_ForcedSaveFollowedByOldCallbackDoesNotProduceDuplicateWrites() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var capturedAction: (() -> Void)?
+        vm.saveScheduler = { _, action in
+            capturedAction = action
+            return AnyCancellable {}
+        }
+
+        vm.persistData(force: true)
+        vm.storage.resetSaveAttemptCount()
+
+        // Unforced mutation schedules trailing save via scheduler
+        vm.totalSessions = 6
+        XCTAssertTrue(vm.hasPendingSave)
+        XCTAssertNotNil(capturedAction)
+
+        // Force save occurs before capturedAction fires
+        vm.persistData(force: true)
+        XCTAssertEqual(vm.storage.saveAttemptCount, 1, "Forced save executed 1 write")
+        XCTAssertFalse(vm.hasPendingSave)
+
+        // Now trigger the obsolete capturedAction
+        capturedAction?()
+
+        // saveAttemptCount must NOT increase!
+        XCTAssertEqual(vm.storage.saveAttemptCount, 1, "Obsolete callback must not produce duplicate write")
+    }
+
+    // 7. Repeated save bursts stay bounded.
+    @MainActor
+    func testTask6_07_RepeatedSaveBurstsStayBounded() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var simulatedTime = Date()
+        vm.currentDateProvider = { simulatedTime }
+
+        var scheduledAction: (() -> Void)?
+        vm.saveScheduler = { _, action in
+            scheduledAction = action
+            return AnyCancellable {}
+        }
+
+        // Burst 1
+        for i in 1...20 { vm.totalSessions = i }
+        XCTAssertTrue(vm.hasPendingSave)
+        XCTAssertEqual(vm.pendingSaveScheduledCount, 1)
+
+        // Fire trailing save for burst 1
+        simulatedTime.addTimeInterval(1.0)
+        scheduledAction?()
+        scheduledAction = nil
+        XCTAssertFalse(vm.hasPendingSave)
+
+        // Burst 2
+        for i in 21...40 { vm.totalSessions = i }
+        XCTAssertTrue(vm.hasPendingSave)
+        XCTAssertEqual(vm.pendingSaveScheduledCount, 2)
+
+        // Fire trailing save for burst 2
+        simulatedTime.addTimeInterval(1.0)
+        scheduledAction?()
+        scheduledAction = nil
+        XCTAssertFalse(vm.hasPendingSave)
+
+        XCTAssertEqual(vm.pendingSaveExecutedCount, 2)
+    }
+
+    // 8. Sustained activity does not indefinitely postpone persistence.
+    @MainActor
+    func testTask6_08_SustainedActivityDoesNotIndefinitelyPostponePersistence() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var simulatedTime = Date()
+        vm.currentDateProvider = { simulatedTime }
+
+        var scheduledAction: (() -> Void)?
+        vm.saveScheduler = { _, action in
+            scheduledAction = action
+            return AnyCancellable {}
+        }
+
+        // Leading save at t=0
+        vm.persistData(force: false)
+        XCTAssertEqual(vm.storage.saveAttemptCount, 1, "Leading save occurs immediately")
+
+        // Edit at t=0.2 (within interval) schedules trailing save
+        simulatedTime.addTimeInterval(0.2)
+        vm.totalSessions = 2
+        XCTAssertTrue(vm.hasPendingSave)
+        XCTAssertNotNil(scheduledAction)
+
+        // More edits at t=0.4, 0.6, 0.8 do not push the deadline back
+        simulatedTime.addTimeInterval(0.2)
+        vm.totalSessions = 3
+        simulatedTime.addTimeInterval(0.2)
+        vm.totalSessions = 4
+        simulatedTime.addTimeInterval(0.2)
+        vm.totalSessions = 5
+
+        // At t=1.0, the trailing save fires as scheduled
+        simulatedTime.addTimeInterval(0.2)
+        scheduledAction?()
+        scheduledAction = nil
+
+        XCTAssertFalse(vm.hasPendingSave)
+        XCTAssertEqual(vm.storage.saveAttemptCount, 2, "Trailing save executed on time; persistence was not indefinitely postponed")
+    }
+
+    // 9. Pending save with corrupted primary preserves original corrupted bytes.
+    @MainActor
+    func testTask6_09_PendingSaveWithCorruptedPrimaryPreservesOriginalCorruptedBytes() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Healthy save
+        vm.persistData(force: true)
+        XCTAssertFalse(vm.isPersistenceBlocked)
+
+        var scheduledAction: (() -> Void)?
+        vm.saveScheduler = { _, action in
+            scheduledAction = action
+            return AnyCancellable {}
+        }
+
+        // Schedule pending save
+        vm.totalSessions = 8
+        XCTAssertTrue(vm.hasPendingSave)
+
+        // Corrupt primary file with sentinel data
+        let sentinel = Data("CORRUPTED_SENTINEL_TASK6_09".utf8)
+        try sentinel.write(to: tempURL)
+
+        // Fire pending save
+        scheduledAction?()
+
+        // Storage corruption protection must engage and block persistence
+        XCTAssertTrue(vm.isPersistenceBlocked)
+        XCTAssertNotNil(vm.storageErrorMessage)
+
+        // Corrupted bytes must NOT be overwritten
+        let primaryOnDisk = try Data(contentsOf: tempURL)
+        XCTAssertEqual(primaryOnDisk, sentinel, "Original corrupted bytes must be preserved intact")
+    }
+
+    // 10. Persistence-blocked state prevents pending writes.
+    @MainActor
+    func testTask6_10_PersistenceBlockedStatePreventsPendingWrites() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Establish blocked state
+        let corrupted = Data("CORRUPTED_PRIMARY_TASK6_10".utf8)
+        try corrupted.write(to: tempURL)
+        vm.persistData(force: true)
+        XCTAssertTrue(vm.isPersistenceBlocked)
+
+        vm.storage.resetSaveAttemptCount()
+
+        // Attempt normal and forced persist while blocked
+        vm.persistData(force: false)
+        XCTAssertFalse(vm.hasPendingSave, "No pending save should be scheduled while persistence is blocked")
+        XCTAssertEqual(vm.storage.saveAttemptCount, 0, "No disk writes allowed while blocked")
+
+        vm.persistData(force: true)
+        XCTAssertEqual(vm.storage.saveAttemptCount, 0)
+    }
+
+    // 11. Temporary write failure displays the correct error.
+    @MainActor
+    func testTask6_11_TemporaryWriteFailureDisplaysCorrectError() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.storage.simulateWriteFailure = true
+        vm.persistData(force: true)
+
+        XCTAssertTrue(vm.isSaveFailed)
+        XCTAssertNotNil(vm.saveErrorMessage)
+        XCTAssertFalse(vm.isPersistenceBlocked, "Temporary write failure must not permanently block persistence")
+    }
+
+    // 12. Successful manual retry clears the error.
+    @MainActor
+    func testTask6_12_SuccessfulManualRetryClearsError() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.storage.simulateWriteFailure = true
+        vm.totalSessions = 5
+        vm.persistData(force: true)
+        XCTAssertTrue(vm.isSaveFailed)
+
+        // Recover failure
+        vm.storage.simulateWriteFailure = false
+        vm.retrySave()
+
+        XCTAssertFalse(vm.isSaveFailed, "Successful retry must clear isSaveFailed")
+        XCTAssertNil(vm.saveErrorMessage)
+        XCTAssertNil(vm.lastSaveError)
+
+        let saved = try vm.storage.decodeData(from: tempURL)
+        XCTAssertEqual(saved.totalSessions, 5)
+    }
+
+    // 13. Quit with pending changes persists the final state synchronously.
+    @MainActor
+    func testTask6_13_QuitWithPendingChangesPersistsFinalStateSynchronously() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.persistData(force: true)
+
+        // Make edit that leaves a pending save
+        vm.totalSessions = 8
+        XCTAssertTrue(vm.hasPendingSave)
+
+        // Quit the application
+        vm.handleAppTermination()
+
+        XCTAssertFalse(vm.hasPendingSave, "handleAppTermination must cancel pending save")
+        XCTAssertTrue(vm.hasTerminated)
+
+        // Verify final state is written synchronously on disk
+        let saved = try vm.storage.decodeData(from: tempURL)
+        XCTAssertEqual(saved.totalSessions, 8, "Final state must be written to disk synchronously on Quit")
+    }
+
+    // 14. Paused Focus Timer restoration remains accurate.
+    @MainActor
+    func testTask6_14_PausedFocusTimerRestorationRemainsAccurate() throws {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.addTask(title: "Task For Paused Timer", expectedMinutes: 25)
+        vm1.activeTaskIndex = 0
+        vm1.startTimer()
+        vm1.timeRemaining = 18 * 60 + 45
+        vm1.preciseProgress = Double(18 * 60 + 45) / Double(25 * 60)
+        vm1.stopTimer()
+
+        // Multiple rapid edits before shutdown
+        vm1.dailyGoalHours = 5
+        vm1.totalSessions = 6
+        vm1.handleAppTermination()
+
+        // Relaunch
+        let storage2 = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage2)
+
+        XCTAssertFalse(vm2.isTimerRunning)
+        XCTAssertEqual(vm2.timeRemaining, 18 * 60 + 45)
+        XCTAssertEqual(vm2.dailyGoalHours, 5)
+        XCTAssertEqual(vm2.totalSessions, 6)
+        XCTAssertTrue(vm2.tasks.contains(where: { $0.title == "Task For Paused Timer" }))
+    }
+
+    // 15. Custom Timer configuration survives Quit/Reopen.
+    @MainActor
+    func testTask6_15_CustomTimerConfigurationSurvivesQuitReopen() throws {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.setCustomDuration(minutes: 42, seconds: 15)
+        XCTAssertEqual(vm1.totalTime, 42 * 60 + 15)
+        XCTAssertEqual(vm1.activeMode, "Custom Timer")
+
+        vm1.dailyGoalHours = 6
+        vm1.handleAppTermination()
+
+        let storage2 = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage2)
+
+        XCTAssertEqual(vm2.totalTime, 42 * 60 + 15)
+        XCTAssertEqual(vm2.customMinutes, 42)
+        XCTAssertEqual(vm2.customSeconds, 15)
+        XCTAssertEqual(vm2.activeMode, "Custom Timer")
+    }
+
+    // 16. Task UUIDs, selection and task attribution remain intact.
+    @MainActor
+    func testTask6_16_TaskUUIDsSelectionAndTaskAttributionRemainIntact() throws {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.tasks = []
+        vm1.addTask(title: "Task Alpha", expectedMinutes: 25)
+        vm1.addTask(title: "Task Beta", expectedMinutes: 50)
+        vm1.activeTaskIndex = 1
+        let betaId = vm1.tasks[1].id
+
+        vm1.tasks[1].timeSpentSeconds = 300
+        vm1.handleAppTermination()
+
+        let storage2 = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage2)
+
+        XCTAssertEqual(vm2.tasks.count, 2)
+        XCTAssertEqual(vm2.tasks[1].id, betaId)
+        XCTAssertEqual(vm2.tasks[1].timeSpentSeconds, 300)
+        XCTAssertEqual(vm2.activeTaskIndex, 1)
+    }
+
+    // 17. Stopwatch laps and checkpoints remain intact.
+    @MainActor
+    func testTask6_17_StopwatchLapsAndCheckpointsRemainIntact() throws {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.startStopwatch()
+        vm1.stopwatchTime = 60
+        vm1.recordLap()
+        vm1.stopwatchTime = 140
+        vm1.recordLap()
+        vm1.stopStopwatch()
+
+        XCTAssertEqual(vm1.laps.count, 2)
+        vm1.handleAppTermination()
+
+        let storage2 = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage2)
+
+        XCTAssertEqual(vm2.laps.count, 2)
+        XCTAssertEqual(vm2.laps[0].lapNumber, 2)
+        XCTAssertEqual(vm2.laps[1].lapNumber, 1)
+    }
+
+    // 18. Session records and daily analytics remain intact.
+    @MainActor
+    func testTask6_18_SessionRecordsAndDailyAnalyticsRemainIntact() throws {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let now = Date()
+        let record = FocusSessionRecord(
+            startTime: now.addingTimeInterval(-3600),
+            endTime: now,
+            durationSeconds: 3600,
+            mode: "Focus",
+            taskId: nil
+        )
+        vm1.sessionRecords = [record]
+        vm1.handleAppTermination()
+
+        let storage2 = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage2)
+
+        XCTAssertEqual(vm2.sessionRecords.count, 1)
+        XCTAssertEqual(vm2.sessionRecords.first?.durationSeconds, 3600)
+    }
+
+    // 19. Fresh installation creates a valid primary and backup.
+    @MainActor
+    func testTask6_19_FreshInstallationCreatesValidPrimaryAndBackup() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: tempURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: vm.storage.backupURL.path))
+
+        vm.addTask(title: "Fresh Install Task", expectedMinutes: 25)
+        vm.persistData(force: true)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tempURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: vm.storage.backupURL.path))
+
+        let primaryData = try vm.storage.decodeData(from: tempURL)
+        let backupData = try vm.storage.decodeData(from: vm.storage.backupURL)
+        XCTAssertTrue(primaryData.tasks.contains(where: { $0.title == "Fresh Install Task" }))
+        XCTAssertTrue(backupData.tasks.contains(where: { $0.title == "Fresh Install Task" }))
+    }
+
+    // 20. Existing backup rotation and corruption-recovery tests continue passing.
+    @MainActor
+    func testTask6_20_ExistingBackupRotationAndCorruptionRecoveryIntegration() throws {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm1.addTask(title: "Initial Valid Data", expectedMinutes: 25)
+        vm1.persistData(force: true)
+
+        // Second forced save creates valid backup of initial data
+        vm1.addTask(title: "Second Valid Data", expectedMinutes: 30)
+        vm1.persistData(force: true)
+
+        // Corrupt primary
+        let corrupted = Data("CORRUPTED_PRIMARY_TEST20".utf8)
+        try corrupted.write(to: tempURL)
+
+        // Reload should recover from backup
+        let storage2 = FocusStorageService(storageURL: tempURL)
+        let vm2 = TimerViewModel(storage: storage2)
+
+        XCTAssertTrue(vm2.didRecoverFromBackup)
+        XCTAssertFalse(vm2.isPersistenceBlocked)
+        XCTAssertTrue(vm2.tasks.contains(where: { $0.title == "Initial Valid Data" }))
+    }
 }

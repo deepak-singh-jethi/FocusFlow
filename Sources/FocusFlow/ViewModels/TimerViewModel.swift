@@ -283,6 +283,89 @@ public class TimerViewModel: ObservableObject {
     private var isLoadingPersistedData = false
     private var lastPersistTime: Date = .distantPast
 
+    // MARK: - Persistence Write Coalescing (Task 6)
+    public static let defaultThrottleInterval: TimeInterval = 1.0
+    public var throttleInterval: TimeInterval = 1.0
+
+    /// Indicates whether a coalesced trailing save is currently scheduled and pending.
+    public private(set) var hasPendingSave: Bool = false
+
+    /// Total count of scheduled pending saves (for metrics and test verification).
+    public private(set) var pendingSaveScheduledCount: Int = 0
+
+    /// Total count of executed pending saves.
+    public private(set) var pendingSaveExecutedCount: Int = 0
+
+    /// Total count of cancelled pending saves.
+    public private(set) var pendingSaveCancelledCount: Int = 0
+
+    /// Injectable scheduler seam for test determinism.
+    /// Signature: (delay: TimeInterval, action: @escaping @MainActor () -> Void) -> AnyCancellable?
+    /// If nil, production `DispatchQueue.main.asyncAfter` with `DispatchWorkItem` is used.
+    public var saveScheduler: ((TimeInterval, @escaping @MainActor () -> Void) -> AnyCancellable?)? = nil
+
+    private var pendingSaveWorkItem: DispatchWorkItem?
+    private var pendingSaveCancellable: AnyCancellable?
+
+    public func cancelPendingSave() {
+        guard hasPendingSave || pendingSaveWorkItem != nil || pendingSaveCancellable != nil else { return }
+        pendingSaveWorkItem?.cancel()
+        pendingSaveWorkItem = nil
+        pendingSaveCancellable?.cancel()
+        pendingSaveCancellable = nil
+        if hasPendingSave {
+            hasPendingSave = false
+            pendingSaveCancelledCount += 1
+        }
+    }
+
+    private func schedulePendingSave(delay: TimeInterval) {
+        hasPendingSave = true
+        pendingSaveScheduledCount += 1
+
+        if let customScheduler = saveScheduler {
+            pendingSaveCancellable = customScheduler(delay) { [weak self] in
+                guard let self = self else { return }
+                self.executePendingSave()
+            }
+            return
+        }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.executePendingSave()
+        }
+        self.pendingSaveWorkItem = workItem
+        self.pendingSaveCancellable = AnyCancellable { [weak workItem] in
+            workItem?.cancel()
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func executePendingSave() {
+        guard hasPendingSave else { return }
+        if let workItem = pendingSaveWorkItem, workItem.isCancelled {
+            cancelPendingSave()
+            return
+        }
+        guard !isPersistenceBlocked else {
+            cancelPendingSave()
+            return
+        }
+        guard !hasTerminated else {
+            cancelPendingSave()
+            return
+        }
+
+        pendingSaveWorkItem = nil
+        pendingSaveCancellable = nil
+        hasPendingSave = false
+        pendingSaveExecutedCount += 1
+
+        performSave(now: currentDateProvider())
+    }
+
     // Storage Safety & Recovery State
     @Published public private(set) var storageLoadResult: StorageLoadResult = .freshInstall
     @Published public private(set) var isPersistenceBlocked: Bool = false
@@ -322,6 +405,8 @@ public class TimerViewModel: ObservableObject {
     deinit {
         midnightRefreshTimer?.invalidate()
         midnightRefreshCancellable?.cancel()
+        pendingSaveWorkItem?.cancel()
+        pendingSaveCancellable?.cancel()
     }
 
     public private(set) var hasTerminated: Bool = false
@@ -330,6 +415,7 @@ public class TimerViewModel: ObservableObject {
         guard !hasTerminated else { return }
         hasTerminated = true
 
+        cancelPendingSave()
         guard !isPersistenceBlocked else { return }
 
         if isTimerRunning {
@@ -347,10 +433,12 @@ public class TimerViewModel: ObservableObject {
 
     public func resetTerminationStateForTesting() {
         hasTerminated = false
+        cancelPendingSave()
     }
 
     // MARK: - Persistence Integration (Priority 4A & 4C)
     public func loadPersistedData() {
+        cancelPendingSave()
         isLoadingPersistedData = true
         defer {
             isLoadingPersistedData = false
@@ -413,6 +501,7 @@ public class TimerViewModel: ObservableObject {
     }
 
     private func clearDataForStorageError() {
+        cancelPendingSave()
         self.tasks = []
         self.sessionRecords = []
         self.legacyLifetimeFocusedSeconds = nil
@@ -607,19 +696,42 @@ public class TimerViewModel: ObservableObject {
     public func persistData(force: Bool = false) {
         guard !isLoadingPersistedData else { return }
         guard !isPersistenceBlocked else {
+            cancelPendingSave()
             print("[TimerViewModel] Persistence blocked: Storage error state active.")
             return
         }
 
-        let now = Date()
-        // Throttle disk writes to avoid repeated writes during UI animations or high frequency changes
-        if !force && now.timeIntervalSince(lastPersistTime) < 1.0 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                guard let self = self, !self.isPersistenceBlocked else { return }
-                self.persistData(force: true)
-            }
+        let now = currentDateProvider()
+
+        if force {
+            cancelPendingSave()
+            performSave(now: now)
             return
         }
+
+        let elapsed = now.timeIntervalSince(lastPersistTime)
+        if elapsed >= throttleInterval || elapsed < 0 {
+            cancelPendingSave()
+            performSave(now: now)
+            return
+        }
+
+        if hasPendingSave {
+            return
+        }
+
+        let delay = max(0.01, throttleInterval - elapsed)
+        schedulePendingSave(delay: delay)
+    }
+
+    private func performSave(now: Date) {
+        guard !isLoadingPersistedData else { return }
+        guard !isPersistenceBlocked else {
+            cancelPendingSave()
+            print("[TimerViewModel] Persistence blocked: Storage error state active.")
+            return
+        }
+
         lastPersistTime = now
 
         let currentStopwatchElapsed: TimeInterval
@@ -688,6 +800,7 @@ public class TimerViewModel: ObservableObject {
 
             if isUnrecoverable {
                 self.isPersistenceBlocked = true
+                cancelPendingSave()
                 let reason = (error as? StorageError)?.description ?? error.localizedDescription
                 self.storageErrorMessage = "Data Protection Alert: Saved data could not be persisted because the save file is corrupted or unreadable. Automatic saving is blocked to protect your existing file.\n(\(reason))"
                 self.isSaveFailed = false
@@ -1135,6 +1248,7 @@ public class TimerViewModel: ObservableObject {
 
     // MARK: Master Engine
     private func suspendActiveTimersForBlockedStorage() {
+        cancelPendingSave()
         isTimerRunning = false
         isStopwatchRunning = false
         targetEndDate = nil
