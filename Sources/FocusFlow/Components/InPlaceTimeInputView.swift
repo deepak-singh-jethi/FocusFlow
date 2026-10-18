@@ -10,23 +10,49 @@ public struct InPlaceTimeInputView: View {
     public var accentColor: Color = .orange
     public var isCompact: Bool = false
 
-    @State private var inputMinutes: String = "25"
-    @State private var inputSeconds: String = "00"
-    @FocusState private var focusedField: TimeInputField?
-    @State private var isMinutesHovered: Bool = false
-    @State private var isSecondsHovered: Bool = false
-    @State private var isSyncingProgrammatically: Bool = false
+    public class Model: ObservableObject {
+        @Published public var activeEditingField: TimeInputField? = nil
+        @Published public var inputMinutes: String
+        @Published public var inputSeconds: String
 
-    private enum TimeInputField: Hashable {
+        public init(totalTime: Int) {
+            let m = totalTime >= 60 ? totalTime / 60 : 0
+            let s = totalTime % 60
+            self.inputMinutes = "\(m)"
+            self.inputSeconds = String(format: "%02d", s)
+        }
+    }
+
+    public enum TimeInputField: Hashable {
         case minutes
         case seconds
     }
 
-    public init(viewModel: TimerViewModel, size: CGFloat, accentColor: Color = .orange, isCompact: Bool = false) {
+    @ObservedObject public var model: Model
+    @FocusState var focusedField: TimeInputField?
+    @State private var isMinutesHovered: Bool = false
+    @State private var isSecondsHovered: Bool = false
+    @State private var isSyncingProgrammatically: Bool = false
+
+    public init(viewModel: TimerViewModel, size: CGFloat, accentColor: Color = .orange, isCompact: Bool = false, model: Model? = nil) {
         self.viewModel = viewModel
         self.size = size
         self.accentColor = accentColor
         self.isCompact = isCompact
+        self.model = model ?? Model(totalTime: viewModel.totalTime)
+    }
+
+    public var activeEditingField: TimeInputField? {
+        get { model.activeEditingField }
+        nonmutating set { model.activeEditingField = newValue }
+    }
+    public var inputMinutes: String {
+        get { model.inputMinutes }
+        nonmutating set { model.inputMinutes = newValue }
+    }
+    public var inputSeconds: String {
+        get { model.inputSeconds }
+        nonmutating set { model.inputSeconds = newValue }
     }
 
     private var activeColor: Color {
@@ -62,41 +88,55 @@ public struct InPlaceTimeInputView: View {
 
                 // Minutes Input Card
                 VStack(spacing: 3) {
-                    TextField("25", text: $inputMinutes)
-                        .font(.system(size: digitFontSize, weight: .bold, design: .rounded))
-                        .monospacedDigit()
-                        .multilineTextAlignment(.center)
-                        .textFieldStyle(.plain)
-                        .foregroundColor(.white)
-                        .focused($focusedField, equals: .minutes)
-                        .frame(width: minutesBoxWidth, height: boxHeight)
-                        .background(
-                            Color.white.opacity(focusedField == .minutes ? 0.08 : (isMinutesHovered ? 0.06 : 0.035)),
-                            in: RoundedRectangle(cornerRadius: 14)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14)
-                                .stroke(
-                                    focusedField == .minutes
-                                        ? activeColor
-                                        : (isMinutesHovered ? Color.white.opacity(0.25) : Color.white.opacity(0.09)),
-                                    lineWidth: focusedField == .minutes ? 2 : 1
-                                )
-                        )
-                        .shadow(color: focusedField == .minutes ? activeColor.opacity(0.35) : .clear, radius: 10)
-                        .onHover { h in isMinutesHovered = h }
-                        .onSubmit {
-                            applyCustomInput()
-                            focusedField = .seconds
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 14)
+                            .fill(Color.white.opacity(model.activeEditingField == .minutes ? 0.08 : (isMinutesHovered ? 0.06 : 0.035)))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14)
+                                    .stroke(
+                                        model.activeEditingField == .minutes
+                                            ? activeColor
+                                            : (isMinutesHovered ? Color.white.opacity(0.25) : Color.white.opacity(0.09)),
+                                        lineWidth: model.activeEditingField == .minutes ? 2 : 1
+                                    )
+                            )
+                            .shadow(color: model.activeEditingField == .minutes ? activeColor.opacity(0.35) : .clear, radius: 10)
+
+                        if model.activeEditingField == .minutes {
+                            TextField("25", text: $model.inputMinutes)
+                                .font(.system(size: digitFontSize, weight: .bold, design: .rounded))
+                                .monospacedDigit()
+                                .multilineTextAlignment(.center)
+                                .textFieldStyle(.plain)
+                                .foregroundColor(.white)
+                                .focused($focusedField, equals: .minutes)
+                                .onSubmit {
+                                    applyCustomInput()
+                                    startEditing(.seconds)
+                                }
+                                .onChange(of: model.inputMinutes) { _, newVal in
+                                    handleMinutesChange(newVal)
+                                }
+                        } else {
+                            Text(model.inputMinutes)
+                                .font(.system(size: digitFontSize, weight: .bold, design: .rounded))
+                                .monospacedDigit()
+                                .multilineTextAlignment(.center)
+                                .foregroundColor(.white)
+                                .lineLimit(1)
                         }
-                        .onChange(of: inputMinutes) { _, newVal in
-                            handleMinutesChange(newVal)
-                        }
+                    }
+                    .frame(width: minutesBoxWidth, height: boxHeight)
+                    .contentShape(RoundedRectangle(cornerRadius: 14))
+                    .onHover { h in isMinutesHovered = h }
+                    .onTapGesture {
+                        startEditing(.minutes)
+                    }
 
                     Text("MINUTES")
                         .font(.system(size: max(8, min(size * 0.024, 10)), weight: .bold))
                         .tracking(1.4)
-                        .foregroundColor(focusedField == .minutes ? activeColor : .gray.opacity(0.7))
+                        .foregroundColor(model.activeEditingField == .minutes ? activeColor : .gray.opacity(0.7))
                 }
 
                 // Colon Separator
@@ -107,41 +147,55 @@ public struct InPlaceTimeInputView: View {
 
                 // Seconds Input Card
                 VStack(spacing: 3) {
-                    TextField("00", text: $inputSeconds)
-                        .font(.system(size: digitFontSize, weight: .bold, design: .rounded))
-                        .monospacedDigit()
-                        .multilineTextAlignment(.center)
-                        .textFieldStyle(.plain)
-                        .foregroundColor(.white)
-                        .focused($focusedField, equals: .seconds)
-                        .frame(width: secondsBoxWidth, height: boxHeight)
-                        .background(
-                            Color.white.opacity(focusedField == .seconds ? 0.08 : (isSecondsHovered ? 0.06 : 0.035)),
-                            in: RoundedRectangle(cornerRadius: 14)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14)
-                                .stroke(
-                                    focusedField == .seconds
-                                        ? activeColor
-                                        : (isSecondsHovered ? Color.white.opacity(0.25) : Color.white.opacity(0.09)),
-                                    lineWidth: focusedField == .seconds ? 2 : 1
-                                )
-                        )
-                        .shadow(color: focusedField == .seconds ? activeColor.opacity(0.35) : .clear, radius: 10)
-                        .onHover { h in isSecondsHovered = h }
-                        .onSubmit {
-                            applyCustomInput()
-                            focusedField = nil
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 14)
+                            .fill(Color.white.opacity(model.activeEditingField == .seconds ? 0.08 : (isSecondsHovered ? 0.06 : 0.035)))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14)
+                                    .stroke(
+                                        model.activeEditingField == .seconds
+                                            ? activeColor
+                                            : (isSecondsHovered ? Color.white.opacity(0.25) : Color.white.opacity(0.09)),
+                                        lineWidth: model.activeEditingField == .seconds ? 2 : 1
+                                    )
+                            )
+                            .shadow(color: model.activeEditingField == .seconds ? activeColor.opacity(0.35) : .clear, radius: 10)
+
+                        if model.activeEditingField == .seconds {
+                            TextField("00", text: $model.inputSeconds)
+                                .font(.system(size: digitFontSize, weight: .bold, design: .rounded))
+                                .monospacedDigit()
+                                .multilineTextAlignment(.center)
+                                .textFieldStyle(.plain)
+                                .foregroundColor(.white)
+                                .focused($focusedField, equals: .seconds)
+                                .onSubmit {
+                                    applyCustomInput()
+                                    stopEditing()
+                                }
+                                .onChange(of: model.inputSeconds) { _, newVal in
+                                    handleSecondsChange(newVal)
+                                }
+                        } else {
+                            Text(model.inputSeconds)
+                                .font(.system(size: digitFontSize, weight: .bold, design: .rounded))
+                                .monospacedDigit()
+                                .multilineTextAlignment(.center)
+                                .foregroundColor(.white)
+                                .lineLimit(1)
                         }
-                        .onChange(of: inputSeconds) { _, newVal in
-                            handleSecondsChange(newVal)
-                        }
+                    }
+                    .frame(width: secondsBoxWidth, height: boxHeight)
+                    .contentShape(RoundedRectangle(cornerRadius: 14))
+                    .onHover { h in isSecondsHovered = h }
+                    .onTapGesture {
+                        startEditing(.seconds)
+                    }
 
                     Text("SECONDS")
                         .font(.system(size: max(8, min(size * 0.024, 10)), weight: .bold))
                         .tracking(1.4)
-                        .foregroundColor(focusedField == .seconds ? activeColor : .gray.opacity(0.7))
+                        .foregroundColor(model.activeEditingField == .seconds ? activeColor : .gray.opacity(0.7))
                 }
 
                 // +5m Quick Stepper
@@ -213,34 +267,62 @@ public struct InPlaceTimeInputView: View {
         .onAppear {
             syncInputFields()
         }
+        .onExitCommand {
+            cancelEditing()
+        }
         .onChange(of: viewModel.totalTime) { _, _ in
-            if focusedField == nil {
+            if model.activeEditingField == nil {
                 syncInputFields()
             }
         }
         .onChange(of: focusedField) { _, newField in
             if newField == nil {
+                applyCustomInput()
+                model.activeEditingField = nil
                 formatAndFinalizeFields()
+            } else {
+                model.activeEditingField = newField
             }
         }
+    }
+
+    public func startEditing(_ field: TimeInputField) {
+        model.activeEditingField = field
+        focusedField = field
+        DispatchQueue.main.async {
+            NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
+        }
+    }
+
+    public func stopEditing() {
+        focusedField = nil
+        model.activeEditingField = nil
+        formatAndFinalizeFields()
+    }
+
+    public func cancelEditing() {
+        syncInputFields()
+        focusedField = nil
+        model.activeEditingField = nil
     }
 
     private func syncInputFields() {
         isSyncingProgrammatically = true
         let m = viewModel.totalTime / 60
         let s = viewModel.totalTime % 60
-        inputMinutes = "\(m)"
-        inputSeconds = String(format: "%02d", s)
+        model.inputMinutes = "\(m)"
+        model.inputSeconds = String(format: "%02d", s)
         DispatchQueue.main.async {
             isSyncingProgrammatically = false
         }
     }
 
     private func adjustMinutes(by delta: Int) {
-        let currentM = Int(inputMinutes.filter { $0.isNumber }) ?? (viewModel.totalTime / 60)
+        stopEditing()
+        let currentM = Int(model.inputMinutes.filter { $0.isNumber }) ?? (viewModel.totalTime / 60)
         let newM = min(max(currentM + delta, 1), 360)
-        inputMinutes = "\(newM)"
-        inputSeconds = "00"
+        model.inputMinutes = "\(newM)"
+        model.inputSeconds = "00"
         if viewModel.isBreakPreset {
             viewModel.switchToBreak(minutes: newM)
         } else {
@@ -249,29 +331,29 @@ public struct InPlaceTimeInputView: View {
     }
 
     private func selectPreset(minutes: Int) {
-        inputMinutes = "\(minutes)"
-        inputSeconds = "00"
+        stopEditing()
+        model.inputMinutes = "\(minutes)"
+        model.inputSeconds = "00"
         if viewModel.isBreakPreset {
             viewModel.switchToBreak(minutes: minutes)
         } else {
             viewModel.setCustomDuration(minutes: minutes, seconds: 0)
         }
-        focusedField = nil
     }
 
     private func handleMinutesChange(_ newVal: String) {
-        guard !isSyncingProgrammatically, focusedField == .minutes else { return }
+        guard !isSyncingProgrammatically, model.activeEditingField == .minutes else { return }
         let digits = newVal.filter { $0.isNumber }
         if digits.count > 3 {
-            inputMinutes = String(digits.prefix(3))
+            model.inputMinutes = String(digits.prefix(3))
             return
         }
         if digits != newVal {
-            inputMinutes = digits
+            model.inputMinutes = digits
         }
         if let val = Int(digits), val > 0 {
             let safeM = min(val, 360)
-            let s = Int(inputSeconds.filter { $0.isNumber }) ?? (viewModel.totalTime % 60)
+            let s = Int(model.inputSeconds.filter { $0.isNumber }) ?? (viewModel.totalTime % 60)
             if viewModel.isBreakPreset {
                 let name = (safeM >= 15) ? "Long Break" : "Short Break"
                 viewModel.requestModeOrPresetChange(name: name, minutes: safeM, seconds: s, mode: "Pomodoro", isBreak: true)
@@ -282,18 +364,18 @@ public struct InPlaceTimeInputView: View {
     }
 
     private func handleSecondsChange(_ newVal: String) {
-        guard !isSyncingProgrammatically, focusedField == .seconds else { return }
+        guard !isSyncingProgrammatically, model.activeEditingField == .seconds else { return }
         let digits = newVal.filter { $0.isNumber }
         if digits.count > 2 {
-            inputSeconds = String(digits.prefix(2))
+            model.inputSeconds = String(digits.prefix(2))
             return
         }
         if digits != newVal {
-            inputSeconds = digits
+            model.inputSeconds = digits
         }
         if let val = Int(digits) {
             let safeS = min(val, 59)
-            let m = Int(inputMinutes.filter { $0.isNumber }) ?? (viewModel.totalTime / 60)
+            let m = Int(model.inputMinutes.filter { $0.isNumber }) ?? (viewModel.totalTime / 60)
             let total = m * 60 + safeS
             if total >= 5 {
                 if viewModel.isBreakPreset {
@@ -308,8 +390,8 @@ public struct InPlaceTimeInputView: View {
 
     private func applyCustomInput() {
         guard !isSyncingProgrammatically else { return }
-        let m = min(max(Int(inputMinutes.filter { $0.isNumber }) ?? 0, 0), 360)
-        let s = min(max(Int(inputSeconds.filter { $0.isNumber }) ?? 0, 0), 59)
+        let m = min(max(Int(model.inputMinutes.filter { $0.isNumber }) ?? 0, 0), 360)
+        let s = min(max(Int(model.inputSeconds.filter { $0.isNumber }) ?? 0, 0), 59)
         let total = m * 60 + s
         if total >= 5 {
             if viewModel.isBreakPreset {
@@ -323,10 +405,10 @@ public struct InPlaceTimeInputView: View {
     }
 
     private func formatAndFinalizeFields() {
-        let m = max(Int(inputMinutes.filter { $0.isNumber }) ?? 0, (viewModel.totalTime >= 60 ? viewModel.totalTime / 60 : 0))
-        let s = min(max(Int(inputSeconds.filter { $0.isNumber }) ?? 0, 0), 59)
-        inputMinutes = "\(m)"
-        inputSeconds = String(format: "%02d", s)
+        let m = max(Int(model.inputMinutes.filter { $0.isNumber }) ?? 0, (viewModel.totalTime >= 60 ? viewModel.totalTime / 60 : 0))
+        let s = min(max(Int(model.inputSeconds.filter { $0.isNumber }) ?? 0, 0), 59)
+        model.inputMinutes = "\(m)"
+        model.inputSeconds = String(format: "%02d", s)
     }
 }
 

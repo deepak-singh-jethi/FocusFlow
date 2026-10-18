@@ -55,6 +55,13 @@ public struct MenuBarCompanionView: View {
     @State private var isEditingDirectTime: Bool = false
     @State private var isSyncingFields: Bool = false
 
+    private enum CompanionTimeInputField: Hashable {
+        case minutes
+        case seconds
+    }
+    @FocusState private var focusedCompanionField: CompanionTimeInputField?
+    @State private var activeCompanionField: CompanionTimeInputField? = nil
+
     @State private var isPlayHovered: Bool = false
     @State private var isLapHovered: Bool = false
     @State private var isResetHovered: Bool = false
@@ -70,6 +77,10 @@ public struct MenuBarCompanionView: View {
     public init(viewModel: TimerViewModel, audioPlayer: AmbientAudioPlayer) {
         self.viewModel = viewModel
         self.audioPlayer = audioPlayer
+        let m = viewModel.totalTime >= 60 ? viewModel.totalTime / 60 : 0
+        let s = viewModel.totalTime % 60
+        _inputMinutes = State(initialValue: "\(m)")
+        _inputSeconds = State(initialValue: String(format: "%02d", s))
     }
 
     private var isBreak: Bool {
@@ -128,6 +139,18 @@ public struct MenuBarCompanionView: View {
         .onChange(of: viewModel.totalTime) { _, _ in
             if !isEditingDirectTime {
                 syncInputFields()
+            }
+        }
+        .onExitCommand {
+            stopEditing()
+        }
+        .onChange(of: focusedCompanionField) { _, newField in
+            if newField == nil {
+                activeCompanionField = nil
+                isEditingDirectTime = false
+            } else {
+                activeCompanionField = newField
+                isEditingDirectTime = true
             }
         }
         .animation(.spring(response: 0.28, dampingFraction: 0.86), value: viewModel.activePreset)
@@ -340,50 +363,96 @@ public struct MenuBarCompanionView: View {
                         .help("Subtract 5 minutes")
 
                         // Minutes Direct Input Field
-                        TextField("25", text: $inputMinutes)
-                            .font(.system(size: 34, weight: .bold, design: .rounded))
-                            .monospacedDigit()
-                            .multilineTextAlignment(.center)
-                            .textFieldStyle(.plain)
-                            .foregroundColor(.white)
-                            .frame(width: 68, height: 38)
-                            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.40), lineWidth: 1))
-                            .onSubmit { applyCustomInput() }
-                            .onChange(of: inputMinutes) { _, newVal in
-                                guard !isSyncingFields else { return }
-                                let digits = newVal.filter { $0.isNumber }
-                                let val = min(Int(digits) ?? 0, 360)
-                                if digits != newVal {
-                                    inputMinutes = "\(val)"
-                                }
-                                applyCustomInput()
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.white.opacity(activeCompanionField == .minutes ? 0.10 : 0.08))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(activeCompanionField == .minutes ? Color.orange : Color.orange.opacity(0.40), lineWidth: activeCompanionField == .minutes ? 2 : 1)
+                                )
+
+                            if activeCompanionField == .minutes {
+                                TextField("25", text: $inputMinutes)
+                                    .font(.system(size: 34, weight: .bold, design: .rounded))
+                                    .monospacedDigit()
+                                    .multilineTextAlignment(.center)
+                                    .textFieldStyle(.plain)
+                                    .foregroundColor(.white)
+                                    .focused($focusedCompanionField, equals: .minutes)
+                                    .onSubmit {
+                                        applyCustomInput()
+                                        startEditing(.seconds)
+                                    }
+                                    .onChange(of: inputMinutes) { _, newVal in
+                                        guard !isSyncingFields else { return }
+                                        let digits = newVal.filter { $0.isNumber }
+                                        let val = min(Int(digits) ?? 0, 360)
+                                        if digits != newVal {
+                                            inputMinutes = "\(val)"
+                                        }
+                                        applyCustomInput()
+                                    }
+                            } else {
+                                Text(inputMinutes)
+                                    .font(.system(size: 34, weight: .bold, design: .rounded))
+                                    .monospacedDigit()
+                                    .multilineTextAlignment(.center)
+                                    .foregroundColor(.white)
                             }
+                        }
+                        .frame(width: 68, height: 38)
+                        .contentShape(RoundedRectangle(cornerRadius: 8))
+                        .onTapGesture {
+                            startEditing(.minutes)
+                        }
 
                         Text(":")
                             .font(.system(size: 28, weight: .bold, design: .rounded))
                             .foregroundColor(.gray.opacity(0.7))
 
                         // Seconds Direct Input Field
-                        TextField("00", text: $inputSeconds)
-                            .font(.system(size: 34, weight: .bold, design: .rounded))
-                            .monospacedDigit()
-                            .multilineTextAlignment(.center)
-                            .textFieldStyle(.plain)
-                            .foregroundColor(.white)
-                            .frame(width: 58, height: 38)
-                            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.15), lineWidth: 1))
-                            .onSubmit { applyCustomInput() }
-                            .onChange(of: inputSeconds) { _, newVal in
-                                guard !isSyncingFields else { return }
-                                let digits = newVal.filter { $0.isNumber }
-                                let val = min(Int(digits) ?? 0, 59)
-                                if digits != newVal {
-                                    inputSeconds = String(format: "%02d", val)
-                                }
-                                applyCustomInput()
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.white.opacity(activeCompanionField == .seconds ? 0.10 : 0.08))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(activeCompanionField == .seconds ? Color.orange : Color.white.opacity(0.15), lineWidth: activeCompanionField == .seconds ? 2 : 1)
+                                )
+
+                            if activeCompanionField == .seconds {
+                                TextField("00", text: $inputSeconds)
+                                    .font(.system(size: 34, weight: .bold, design: .rounded))
+                                    .monospacedDigit()
+                                    .multilineTextAlignment(.center)
+                                    .textFieldStyle(.plain)
+                                    .foregroundColor(.white)
+                                    .focused($focusedCompanionField, equals: .seconds)
+                                    .onSubmit {
+                                        applyCustomInput()
+                                        stopEditing()
+                                    }
+                                    .onChange(of: inputSeconds) { _, newVal in
+                                        guard !isSyncingFields else { return }
+                                        let digits = newVal.filter { $0.isNumber }
+                                        let val = min(Int(digits) ?? 0, 59)
+                                        if digits != newVal {
+                                            inputSeconds = String(format: "%02d", val)
+                                        }
+                                        applyCustomInput()
+                                    }
+                            } else {
+                                Text(inputSeconds)
+                                    .font(.system(size: 34, weight: .bold, design: .rounded))
+                                    .monospacedDigit()
+                                    .multilineTextAlignment(.center)
+                                    .foregroundColor(.white)
                             }
+                        }
+                        .frame(width: 58, height: 38)
+                        .contentShape(RoundedRectangle(cornerRadius: 8))
+                        .onTapGesture {
+                            startEditing(.seconds)
+                        }
 
                         // +5m quick stepper
                         Button {
@@ -432,7 +501,23 @@ public struct MenuBarCompanionView: View {
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.06), lineWidth: 1))
     }
 
+    private func startEditing(_ field: CompanionTimeInputField) {
+        activeCompanionField = field
+        focusedCompanionField = field
+        isEditingDirectTime = true
+        DispatchQueue.main.async {
+            NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
+        }
+    }
+
+    private func stopEditing() {
+        focusedCompanionField = nil
+        activeCompanionField = nil
+        isEditingDirectTime = false
+    }
+
     private func adjustMinutes(by delta: Int) {
+        stopEditing()
         let currentM = Int(inputMinutes.filter { $0.isNumber }) ?? (viewModel.totalTime / 60)
         let newM = min(max(currentM + delta, 1), 360)
         inputMinutes = "\(newM)"
@@ -445,6 +530,7 @@ public struct MenuBarCompanionView: View {
     }
 
     private func selectQuickDuration(minutes: Int) {
+        stopEditing()
         inputMinutes = "\(minutes)"
         inputSeconds = "00"
         if viewModel.isBreakPreset {

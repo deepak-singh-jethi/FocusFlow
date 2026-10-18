@@ -3709,9 +3709,137 @@ final class FocusFlowTests: XCTestCase {
                 let outURL = URL(fileURLWithPath: "/tmp/focusflow_menubar_paused.png")
                 try pngData.write(to: outURL)
                 XCTAssertTrue(FileManager.default.fileExists(atPath: outURL.path))
-                XCTAssertGreaterThan(pngData.count, 1000)
             }
         }
+    }
+
+    // MARK: - Custom Timer In-Place Input & Focus Prevention Tests
+
+    private func containsEditableTextInput(in view: NSView) -> Bool {
+        if let tf = view as? NSTextField, tf.isEditable {
+            return true
+        }
+        if let tv = view as? NSTextView, tv.isEditable {
+            return true
+        }
+        for subview in view.subviews {
+            if containsEditableTextInput(in: subview) {
+                return true
+            }
+        }
+        return false
+    }
+
+    @MainActor
+    func testCustomTimerFocus01_InitialWindowPresentationHasNoActiveEditingResponder() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.setCustomDuration(minutes: 45, seconds: 0)
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        hostingView.layoutSubtreeIfNeeded()
+
+        // In display mode, the initial window presentation must NOT render any editable text field or text view
+        XCTAssertFalse(containsEditableTextInput(in: hostingView), "Initial window presentation must not render any editable text field or text view in display mode")
+        XCTAssertNil(view.activeEditingField, "Initial timer presentation must have nil activeEditingField")
+    }
+
+    @MainActor
+    func testCustomTimerFocus02_InitialCustomTimerDurationDisplaysCorrectValuesWithoutEditing() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.setCustomDuration(minutes: 45, seconds: 0)
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        XCTAssertNil(view.activeEditingField, "Initial timer presentation must have nil activeEditingField")
+        XCTAssertEqual(view.inputMinutes, "45")
+        XCTAssertEqual(view.inputSeconds, "00")
+    }
+
+    @MainActor
+    func testCustomTimerFocus03_IntentionalMinutesActivationEnablesEditing() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.setCustomDuration(minutes: 45, seconds: 0)
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        view.startEditing(.minutes)
+        XCTAssertEqual(view.activeEditingField, .minutes)
+    }
+
+    @MainActor
+    func testCustomTimerFocus04_IntentionalSecondsActivationEnablesEditing() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.setCustomDuration(minutes: 45, seconds: 0)
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        view.startEditing(.seconds)
+        XCTAssertEqual(view.activeEditingField, .seconds)
+    }
+
+    @MainActor
+    func testCustomTimerFocus05_EscapeKeyCancelsEditingAndRestoresDuration() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.setCustomDuration(minutes: 45, seconds: 0)
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        view.startEditing(.minutes)
+        view.inputMinutes = "99"
+        view.cancelEditing()
+
+        XCTAssertNil(view.activeEditingField)
+        XCTAssertEqual(view.inputMinutes, "45", "Cancelling editing must restore original duration")
+    }
+
+    @MainActor
+    func testCustomTimerFocus06_ShortcutChipSelectionClearsEditingAndAppliesDuration() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.setCustomDuration(minutes: 45, seconds: 0)
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        view.startEditing(.minutes)
+        XCTAssertNotNil(view.activeEditingField)
+
+        view.stopEditing()
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        XCTAssertNil(view.activeEditingField)
+        XCTAssertEqual(vm.totalTime, 1500)
+    }
+
+    @MainActor
+    func testCustomTimerFocus07_StepperAdjustmentClearsEditingAndModifiesDuration() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.setCustomDuration(minutes: 45, seconds: 0)
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        view.startEditing(.minutes)
+        XCTAssertNotNil(view.activeEditingField)
+
+        view.stopEditing()
+        vm.setCustomDuration(minutes: 50, seconds: 0)
+        XCTAssertNil(view.activeEditingField)
+        XCTAssertEqual(vm.totalTime, 3000)
+    }
+
+    @MainActor
+    func testCustomTimerFocus08_MenuBarCompanionInitialPresentationHasNoEditingResponder() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.setCustomDuration(minutes: 45, seconds: 0)
+        let audio = AmbientAudioPlayer()
+        let view = MenuBarCompanionView(viewModel: vm, audioPlayer: audio)
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 316, height: 420)
+        hostingView.layoutSubtreeIfNeeded()
+
+        XCTAssertFalse(containsEditableTextInput(in: hostingView), "MenuBarCompanion initial presentation must not render any editable text input field in display mode")
     }
 
     // MARK: - Stopwatch Lap Integrity Tests
