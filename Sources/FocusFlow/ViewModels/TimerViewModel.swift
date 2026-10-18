@@ -409,13 +409,22 @@ public class TimerViewModel: ObservableObject {
     // Task 8: In-Flight Crash / Force-Quit Recovery State
     public private(set) var activeTimerSessionId: UUID = UUID()
     public var checkpointInterval: TimeInterval = 15.0
-    private var lastCheckpointTime: Date = .distantPast
+    public var checkpointRetryInterval: TimeInterval = 5.0
+    public private(set) var lastSuccessfulCheckpointTime: Date = .distantPast
+    public private(set) var lastAttemptedCheckpointTime: Date = .distantPast
+    public var lastCheckpointTime: Date {
+        lastSuccessfulCheckpointTime
+    }
     @Published public private(set) var didRecoverInterruptedSession: Bool = false
+    private var isPerformingSave: Bool = false
+    private var pendingRecoveryNoticeMessage: String? = nil
 
     public func checkpointActiveTimers(now: Date? = nil) {
         guard !isLoadingPersistedData, !isPersistenceBlocked, !hasTerminated else { return }
         let effectiveNow = now ?? currentDateProvider()
-        reconcileActiveTimers(at: effectiveNow)
+        if reconcileIfExpired(at: effectiveNow) {
+            return
+        }
         performSave(now: effectiveNow)
     }
 
@@ -426,6 +435,92 @@ public class TimerViewModel: ObservableObject {
     public func retrySave() {
         guard !isPersistenceBlocked else { return }
         persistData(force: true)
+    }
+
+    // MARK: - Crash Recovery Validation (Finding 2)
+    public static func validateRecoveryState(_ recovery: ActiveSessionRecoveryState, in saved: FocusAppData) -> Bool {
+        // 1. Supported version
+        guard recovery.version == 1 else {
+            print("[TimerViewModel] Recovery validation failed: unsupported version \(recovery.version)")
+            return false
+        }
+
+        // 2. Activity state combinations
+        guard recovery.isTimerRunning || recovery.isStopwatchRunning else {
+            print("[TimerViewModel] Recovery validation failed: neither timer nor stopwatch is running")
+            return false
+        }
+
+        // 3. Floating-point sanity
+        guard recovery.preciseProgress.isFinite,
+              recovery.preciseProgress >= 0.0,
+              recovery.preciseProgress <= 1.0 else {
+            print("[TimerViewModel] Recovery validation failed: invalid preciseProgress")
+            return false
+        }
+
+        if let frac = recovery.fractionalRemaining {
+            guard frac.isFinite, frac >= 0.0 else {
+                print("[TimerViewModel] Recovery validation failed: invalid fractionalRemaining")
+                return false
+            }
+        }
+
+        // 4. Timer validation (if isTimerRunning)
+        if recovery.isTimerRunning {
+            let minDuration = TimerViewModel.minSupportedTimerDuration
+            let maxDuration = TimerViewModel.maxSupportedTimerDuration
+
+            guard recovery.totalTime >= minDuration, recovery.totalTime <= maxDuration else {
+                print("[TimerViewModel] Recovery validation failed: totalTime \(recovery.totalTime) out of bounds")
+                return false
+            }
+
+            guard recovery.timeRemaining >= 0, recovery.timeRemaining <= recovery.totalTime else {
+                print("[TimerViewModel] Recovery validation failed: timeRemaining \(recovery.timeRemaining) out of bounds")
+                return false
+            }
+
+            guard recovery.segmentCreditedSeconds >= 0, recovery.segmentCreditedSeconds <= recovery.totalTime else {
+                print("[TimerViewModel] Recovery validation failed: segmentCreditedSeconds \(recovery.segmentCreditedSeconds) invalid")
+                return false
+            }
+
+            let elapsedNominal = recovery.totalTime - recovery.timeRemaining
+            guard recovery.segmentCreditedSeconds <= elapsedNominal + 1 else {
+                print("[TimerViewModel] Recovery validation failed: segmentCreditedSeconds \(recovery.segmentCreditedSeconds) exceeds elapsed \(elapsedNominal)")
+                return false
+            }
+
+            let cp = recovery.checkpointTimestamp
+            if let start = recovery.sessionSegmentStartDate {
+                guard start <= cp else {
+                    print("[TimerViewModel] Recovery validation failed: sessionSegmentStartDate is after checkpointTimestamp")
+                    return false
+                }
+            }
+
+            if let target = recovery.targetEndDate {
+                if let start = recovery.sessionSegmentStartDate {
+                    guard start <= target else {
+                        print("[TimerViewModel] Recovery validation failed: sessionSegmentStartDate is after targetEndDate")
+                        return false
+                    }
+                }
+            }
+        }
+
+        // 5. Stopwatch validation (if isStopwatchRunning)
+        if recovery.isStopwatchRunning {
+            guard recovery.stopwatchElapsedSeconds.isFinite,
+                  recovery.stopwatchElapsedSeconds >= 0.0,
+                  recovery.stopwatchElapsedSeconds <= 86400 * 365 else {
+                print("[TimerViewModel] Recovery validation failed: invalid stopwatchElapsedSeconds")
+                return false
+            }
+        }
+
+        return true
     }
 
     // Active Timer Mode: "Pomodoro" or "Custom Timer"
@@ -627,7 +722,9 @@ public class TimerViewModel: ObservableObject {
         self.stopwatchStartDate = nil
 
         // Task Selection Restoration
-        if let recovery = saved.activeSessionRecovery, (recovery.isTimerRunning || recovery.isStopwatchRunning) {
+        if let recovery = saved.activeSessionRecovery,
+           (recovery.isTimerRunning || recovery.isStopwatchRunning),
+           Self.validateRecoveryState(recovery, in: saved) {
             let targetTaskId = recovery.isTimerRunning ? recovery.activeSessionTaskId : recovery.stopwatchTaskId
             if let targetTaskId = targetTaskId,
                let foundIndex = self.tasks.firstIndex(where: { $0.id == targetTaskId }),
@@ -657,7 +754,19 @@ public class TimerViewModel: ObservableObject {
         }
 
         if let recovery = saved.activeSessionRecovery, (recovery.isTimerRunning || recovery.isStopwatchRunning) {
-            restoreCrashRecoverySession(recovery, saved: saved)
+            if Self.validateRecoveryState(recovery, in: saved) {
+                restoreCrashRecoverySession(recovery, saved: saved)
+            } else {
+                print("[TimerViewModel] Quarantined invalid activeSessionRecovery metadata.")
+                self.didRecoverInterruptedSession = false
+                self.showRecoveryNotice = false
+                self.recoveryNoticeMessage = nil
+                if let paused = saved.pausedSession {
+                    restorePausedTimerSession(paused, saved: saved)
+                } else {
+                    restoreIdleTimerConfiguration(saved: saved)
+                }
+            }
         } else if let paused = saved.pausedSession {
             restorePausedTimerSession(paused, saved: saved)
         } else {
@@ -667,10 +776,8 @@ public class TimerViewModel: ObservableObject {
 
     private func restoreCrashRecoverySession(_ recovery: ActiveSessionRecoveryState, saved: FocusAppData) {
         self.didRecoverInterruptedSession = true
-        if self.recoveryNoticeMessage == nil {
-            self.recoveryNoticeMessage = "Interrupted session restored to paused state from last checkpoint."
-        }
-        self.showRecoveryNotice = true
+        self.pendingRecoveryNoticeMessage = "Interrupted session restored to paused state from last checkpoint."
+        self.showRecoveryNotice = false
 
         let minDuration = TimerViewModel.minSupportedTimerDuration
         let maxDuration = TimerViewModel.maxSupportedTimerDuration
@@ -707,16 +814,27 @@ public class TimerViewModel: ObservableObject {
                 let startTime = recovery.sessionSegmentStartDate ?? endTime.addingTimeInterval(-Double(credited))
                 let boundedEnd = max(startTime, endTime)
 
+                let recordTaskId: UUID?
+                if let taskId = recovery.activeSessionTaskId,
+                   let index = self.tasks.firstIndex(where: { $0.id == taskId }),
+                   !self.tasks[index].isCompleted {
+                    recordTaskId = taskId
+                } else {
+                    recordTaskId = nil
+                }
+
                 let isAlreadyRecorded = self.sessionRecords.contains {
-                    $0.startTime == startTime && $0.durationSeconds == credited && $0.taskId == recovery.activeSessionTaskId
+                    $0.id == recovery.timerSessionId ||
+                    ($0.startTime == startTime && $0.durationSeconds == credited && $0.taskId == recordTaskId)
                 }
                 if !isAlreadyRecorded {
                     let record = FocusSessionRecord(
+                        id: recovery.timerSessionId,
                         startTime: startTime,
                         endTime: boundedEnd,
                         durationSeconds: credited,
                         mode: recovery.activePreset,
-                        taskId: recovery.activeSessionTaskId
+                        taskId: recordTaskId
                     )
                     self.sessionRecords.append(record)
                     recalculateFocusMetrics(now: boundedEnd)
@@ -889,13 +1007,73 @@ public class TimerViewModel: ObservableObject {
         schedulePendingSave(delay: delay)
     }
 
+    private func settleActiveTimeForSnapshot(at now: Date) {
+        var didMutate = false
+
+        // 1. Settle running Focus countdown timer
+        if isTimerRunning, let target = targetEndDate {
+            let remaining = target.timeIntervalSince(now)
+            if remaining <= 0 {
+                if timeRemaining > 0 {
+                    let uncounted = timeRemaining
+                    synchronizeCountdownRemaining(to: 0)
+                    preciseProgress = 0.0
+                    if isFocusPreset && uncounted > 0 {
+                        creditTaskTime(taskId: activeSessionTaskId, seconds: uncounted)
+                        segmentCreditedSeconds += uncounted
+                    }
+                    didMutate = true
+                }
+            } else {
+                let newRemaining = max(Int(ceil(remaining)), 0)
+                if newRemaining < timeRemaining {
+                    let delta = timeRemaining - newRemaining
+                    synchronizeCountdownRemaining(to: newRemaining)
+                    if isFocusPreset && delta > 0 {
+                        creditTaskTime(taskId: activeSessionTaskId, seconds: delta)
+                        segmentCreditedSeconds += delta
+                    }
+                    didMutate = true
+                }
+                if totalTime > 0 {
+                    preciseProgress = min(max(remaining / Double(totalTime), 0.0), 1.0)
+                }
+            }
+        }
+
+        // 2. Settle running Stopwatch
+        if isStopwatchRunning, let start = stopwatchStartDate {
+            let elapsed = max(0.0, now.timeIntervalSince(start))
+            let newTime = max(Int(elapsed), 0)
+            if newTime > stopwatchTime {
+                let delta = newTime - stopwatchTime
+                let targetTaskId = tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted ? tasks[activeTaskIndex].id : nil
+                creditTaskTime(taskId: targetTaskId, seconds: delta)
+                stopwatchTime = newTime
+                didMutate = true
+            }
+            preciseStopwatchProgress = (elapsed.truncatingRemainder(dividingBy: 60.0)) / 60.0
+        }
+
+        if didMutate {
+            recalculateFocusMetrics(now: now)
+        }
+    }
+
     private func performSave(now: Date) {
         guard !isLoadingPersistedData else { return }
+        guard !isPerformingSave else { return }
         guard !isPersistenceBlocked else {
             cancelPendingSave()
             print("[TimerViewModel] Persistence blocked: Storage error state active.")
             return
         }
+
+        isPerformingSave = true
+        defer { isPerformingSave = false }
+
+        lastAttemptedCheckpointTime = now
+        settleActiveTimeForSnapshot(at: now)
 
         lastPersistTime = now
 
@@ -945,7 +1123,7 @@ public class TimerViewModel: ObservableObject {
                 isStopwatchRunning: isStopwatchRunning,
                 stopwatchElapsedSeconds: currentStopwatchElapsed,
                 stopwatchTaskId: activeSwTaskId,
-                checkpointTimestamp: now
+                checkpointTimestamp: max(now, sessionSegmentStartDate?.addingTimeInterval(Double(segmentCreditedSeconds)) ?? now)
             )
         } else {
             recoveryState = nil
@@ -985,6 +1163,13 @@ public class TimerViewModel: ObservableObject {
                 self.saveErrorMessage = nil
                 self.lastSaveError = nil
             }
+            if recoveryState != nil {
+                self.lastSuccessfulCheckpointTime = now
+            }
+            if self.didRecoverInterruptedSession {
+                self.showRecoveryNotice = true
+                self.recoveryNoticeMessage = self.pendingRecoveryNoticeMessage ?? "Interrupted session restored to paused state from last checkpoint."
+            }
         } catch {
             let isUnrecoverable: Bool
             if storage.isPersistenceBlocked {
@@ -1009,6 +1194,9 @@ public class TimerViewModel: ObservableObject {
                 self.saveErrorMessage = nil
                 self.lastSaveError = nil
                 suspendActiveTimersForBlockedStorage()
+                if self.didRecoverInterruptedSession {
+                    self.showRecoveryNotice = false
+                }
                 print("[TimerViewModel] Storage blocked persistence due to unrecoverable state: \(error)")
                 return
             }
@@ -1020,6 +1208,9 @@ public class TimerViewModel: ObservableObject {
             } else {
                 self.lastSaveError = nil
                 self.saveErrorMessage = "Recent changes may not have been saved. (\(error.localizedDescription))"
+            }
+            if self.didRecoverInterruptedSession {
+                self.showRecoveryNotice = false
             }
             print("[TimerViewModel] Failed to persist data: \(error)")
         }
@@ -1604,9 +1795,17 @@ public class TimerViewModel: ObservableObject {
 
         // 3. Periodic checkpoint for crash recovery
         if (isTimerRunning || isStopwatchRunning) && !hasTerminated {
-            let elapsed = now.timeIntervalSince(lastCheckpointTime)
-            if elapsed >= checkpointInterval || elapsed < 0 {
-                lastCheckpointTime = now
+            let timeSinceSuccess = now.timeIntervalSince(lastSuccessfulCheckpointTime)
+            let timeSinceAttempt = now.timeIntervalSince(lastAttemptedCheckpointTime)
+            let shouldAttempt: Bool
+            if isSaveFailed {
+                // Throttle retries during persistent failure to prevent write storms
+                shouldAttempt = timeSinceAttempt >= checkpointRetryInterval || timeSinceAttempt < 0
+            } else {
+                shouldAttempt = timeSinceSuccess >= checkpointInterval || timeSinceSuccess < 0
+            }
+            if shouldAttempt {
+                lastAttemptedCheckpointTime = now
                 performSave(now: now)
             }
         }
@@ -1636,7 +1835,7 @@ public class TimerViewModel: ObservableObject {
             activeSessionTaskId = nil
         }
         pausedSession = nil
-        lastCheckpointTime = now
+        lastAttemptedCheckpointTime = now
         updateMasterEngine()
         persistData(force: true)
     }
@@ -1713,7 +1912,7 @@ public class TimerViewModel: ObservableObject {
         } else {
             pausedSession = nil
         }
-        lastCheckpointTime = now
+        lastAttemptedCheckpointTime = now
         persistData(force: true)
     }
 
@@ -1765,7 +1964,7 @@ public class TimerViewModel: ObservableObject {
         stopwatchStartDate = now.addingTimeInterval(-offset)
         preciseStopwatchProgress = (offset.truncatingRemainder(dividingBy: 60.0)) / 60.0
         stopwatchFractional = nil
-        lastCheckpointTime = now
+        lastAttemptedCheckpointTime = now
         updateMasterEngine()
         persistData(force: true)
     }
@@ -1789,7 +1988,7 @@ public class TimerViewModel: ObservableObject {
         }
         isStopwatchRunning = false
         stopwatchStartDate = nil
-        lastCheckpointTime = now
+        lastAttemptedCheckpointTime = now
         updateMasterEngine()
         persistData(force: true)
     }
