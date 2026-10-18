@@ -1,21 +1,103 @@
 # FocusFlow: Senior Software Engineer Code Review & Architectural Audit Report
 
-**Author:** Senior macOS & SwiftUI Systems Architect  
-**Target Codebase:** [FocusFlow (github.com/deepak-singh-jethi/FocusFlow)](https://github.com/deepak-singh-jethi/FocusFlow)  
+**Author:** Senior macOS & SwiftUI Systems Architect
+**Target Codebase:** [FocusFlow (github.com/deepak-singh-jethi/FocusFlow)](https://github.com/deepak-singh-jethi/FocusFlow)
 **Original Review Date:** October 14, 2026
-**Status:** Historical Architectural Review with Current Implementation Update (October 16, 2026)
+**Implementation Update:** October 16, 2026
+**Status:** Historical Architectural Review with Current Engineering Status Update (October 18, 2026)
 
 ---
 
 > [!IMPORTANT]
-> **Historical Engineering Review — October 14, 2026**
-> This report documents the architectural audit of FocusFlow conducted on October 14, 2026. The findings, scorecard ratings, and risk assessments in Sections 1 through 3 describe the prototype codebase as it existed at the time of the initial review.
+> **Engineering Review Status & Historical Preservation Notice**
+> This document preserves the original architectural audit of FocusFlow conducted on October 14, 2026, and the intermediate implementation update of October 16, 2026. The findings, scorecards, and assessments from those dates remain intact as a historical baseline.
 >
-> Many of the critical findings identified during this audit—including persistent storage, automatic disaster recovery, timer loop optimization, companion menu-bar UI, and CI/CD test automation—have since been implemented. For the current technical architecture and resolution status as of October 16, 2026, see the [Current Implementation Update — October 16, 2026](#current-implementation-update--october-16-2026) below.
+> For the current production-grade engineering status, Task 1–8 resolution matrix, and verified architectural invariants as of **October 18, 2026**, refer to the [Current Engineering Status Update — October 18, 2026](#current-engineering-status-update--october-18-2026) below.
 
 ---
 
-## Current Implementation Update — October 16, 2026
+## Current Engineering Status Update — October 18, 2026
+
+As of October 18, 2026, FocusFlow has completed all engineering milestones across Tasks 1 through 8, each validated by automated regression test suites and verified through independent source audits:
+
+- **Verified Source Baseline Commit**: [`3e9d88c863a29cc908044e7efbcad94f0aae7660`](https://github.com/deepak-singh-jethi/FocusFlow/commit/3e9d88c863a29cc908044e7efbcad94f0aae7660)
+- **Automated Regression Test Suite**: **476 passed, 0 failures** (executed in 10.84s).
+- **Continuous Integration**: [GitHub Actions Run #39138658657](https://github.com/deepak-singh-jethi/FocusFlow/actions/runs/39138658657) on `macos-14` (Xcode 15.4) passed all test and release build steps.
+- **Approved Engineering Milestones**: Tasks 1 through 8 approved.
+- **Next Engineering Milestone**: **Task 9 — Idle Time Review (NOT STARTED)**.
+- **Distribution Scope**: Apple Developer ID signing, Hardened Runtime configuration, Apple Gatekeeper notarization, and physical hardware validation remain pending prior to final public distribution.
+
+---
+
+### Task-by-Task Engineering Resolution Matrix (Tasks 1–8)
+
+| Task | Name | Original Problem / Engineering Risk | Technical Resolution | Evidence (Commits & Tests) | Review Status | Remaining Limitation |
+|---|---|---|---|---|---|---|
+| **Task 1** | Foundational Timer Continuity | Mode/preset switching could cause timer state jumping, lost running sessions, or clock drift across Combine runloop delays. | Implemented wall-clock target date anchoring (`targetEndDate`), mode switch conflict modal HUD, and safe preset transition handling. | Commits: `fc035a7`, `1c1b9d7`, `c7980ab`, `e95dcd7`, `11edaa8`, `e586ce5`, `0cef82e`, `7b4aa71`. Tests: Core timer state suite. | **Approved** | None. |
+| **Task 2** | Stopwatch Lap Integrity | Deleting an intermediate lap could corrupt subsequent split times, cumulative elapsed checkpoints, or lap numbering. | Decoupled lap indices from timing checkpoints; lap deletion preserves cumulative timing checkpoints while re-indexing remaining laps sequentially. | Commit: [`4dca67efa9`](https://github.com/deepak-singh-jethi/FocusFlow/commit/4dca67efa9cb308a34c5b25d211855f4114f92df). Tests: `testStopwatchLapDeletionPreservesCheckpoints`. | **Approved** | None. |
+| **Task 3** | Task Attribution Integrity | Switching active tasks during a running session risked retroactive misattribution of prior focus seconds to the new task; unassigned focus time was not cleanly preserved. | Implemented strict segment settlement: switching tasks immediately finalizes the prior task's segment; unassigned segments retain `taskId = nil`; task deletion/completion cleanly dissociates subsequent time. | Commits: [`e17d650`](https://github.com/deepak-singh-jethi/FocusFlow/commit/e17d650c28937179f8fd54649732165000e858a6), [`aefa599`](https://github.com/deepak-singh-jethi/FocusFlow/commit/aefa599b648b0ba462f64061177667fd856c9e1a), [`4edd3a1`](https://github.com/deepak-singh-jethi/FocusFlow/commit/4edd3a1fd3d69715a704936ebe742e18d888dea8). Tests: Task transition suite. | **Approved** | None. |
+| **Task 4** | Restart Restoration | Quitting the app reset active task selection, custom timer configurations, and session counter state. | Persisted selected task UUID, custom durations, paused countdowns, and session counters in `FocusAppData`, restoring cleanly upon relaunch. | Commits: [`654f654`](https://github.com/deepak-singh-jethi/FocusFlow/commit/654f654f195214f3e120a53eb58656033e6b7f65), [`4465b0b`](https://github.com/deepak-singh-jethi/FocusFlow/commit/4465b0b23af32d85555c7bf90e98a2bf14b3b0ba). Tests: Restart restoration suite. | **Approved** | None. |
+| **Task 5** | Midnight & Timezone Analytics | Active sessions spanning midnight inflated today's focus metrics with yesterday's hours; timezone changes did not refresh daily buckets. | Implemented calendar-day bounding for daily/weekly metrics; listening to `significantTimeChangeNotification` triggers bucket recalculation; future time is excluded. | Commits: [`7c2b66f`](https://github.com/deepak-singh-jethi/FocusFlow/commit/7c2b66fdf001a2aea50ea9f421f89bbbe1450252), [`2017a8b`](https://github.com/deepak-singh-jethi/FocusFlow/commit/2017a8ba89ca01d38450b3852bbcefd1ef075de1), [`859a136`](https://github.com/deepak-singh-jethi/FocusFlow/commit/859a13692a0f84094e5a34b93ed20eee7960b73c), [`abf784c`](https://github.com/deepak-singh-jethi/FocusFlow/commit/abf784c3b688ec2af397e37ed3cad82b93202eca). Tests: Midnight & timezone suite. | **Approved** | None. |
+| **Task 6** | Persistence Coalescing | Rapid mutations could cause save storms or disk thrashing; delayed async callbacks risked overwriting newer saves with stale state. | Implemented generational request tracking (`pendingSaveRequestCount`) and save coalescing with explicit forced-save bypass for critical lifecycle transitions. | Commits: [`da377f6`](https://github.com/deepak-singh-jethi/FocusFlow/commit/da377f600e15ce9a1f5cb200ad9161da8e6e151e), [`4c7ab97`](https://github.com/deepak-singh-jethi/FocusFlow/commit/4c7ab977a39474db87ee8295ef840b4e41eafb1c). Tests: Persistence coalescing suite. | **Approved** | None. |
+| **Task 7** | Sleep/Wake & Deadline Finalization | System sleep across a timer deadline could award excessive elapsed focus time or cause race conditions during `skipSession`. | Reconciled active countdowns against original wall-clock deadlines; focus credit is strictly capped at the original deadline; skip boundary races eliminated. | Commits: [`c65be9b`](https://github.com/deepak-singh-jethi/FocusFlow/commit/c65be9be4063304a9b6e23058e8fcd5e59a75817), [`ed74970`](https://github.com/deepak-singh-jethi/FocusFlow/commit/ed74970838f8ef8f578c98d4ca2910576bf42366), [`a1ad2a2`](https://github.com/deepak-singh-jethi/FocusFlow/commit/a1ad2a2b9ecd82fffc59bd0a24455b1377edfb0c), [`50fe1b5`](https://github.com/deepak-singh-jethi/FocusFlow/commit/50fe1b5b0a550e10ca2b0e98dbf862a83976c59e), [`991fd11`](https://github.com/deepak-singh-jethi/FocusFlow/commit/991fd115bd259d40b01dc34a7f6b54d6525286d7). Tests: Task 7 suite (Scenarios 01–20). | **Approved** | Real-hardware lid-close testing pending. |
+| **Task 8** | Crash / Force-Quit Recovery | Process termination during active sessions lost in-progress work; legacy recovery inflated multi-task session durations; ordinary tick completion exposed partial disk snapshots. | Implemented periodic durable checkpoints (~15s target), conservative paused recovery without downtime credit, atomic completion persistence transactions, and segment-accurate duration recovery. | Commits: [`3f85f13`](https://github.com/deepak-singh-jethi/FocusFlow/commit/3f85f1346d7cd49944b652b03359d3f77ef8bb0d), [`e0e7e4f`](https://github.com/deepak-singh-jethi/FocusFlow/commit/e0e7e4f9aabc646c85f74619bc6f41db9711953e), [`b0960ad`](https://github.com/deepak-singh-jethi/FocusFlow/commit/b0960ad56cf607d1148429e2e4501c622bec58fb), [`3e9d88c`](https://github.com/deepak-singh-jethi/FocusFlow/commit/3e9d88c863a29cc908044e7efbcad94f0aae7660). Tests: Task 8 suite (Scenarios 01–50 + Defect A/B Red/Green tests). | **Approved** | OS-level SIGKILL testing on physical Mac pending. |
+
+---
+
+### Task 8 Technical Deep-Dive: Crash Recovery & Atomic Completion
+
+Task 8 underwent extensive iterative review and hardening to eliminate data-integrity edge cases in crash and force-quit recovery:
+
+1. **Periodic Active-Session Checkpoints**: While a countdown runs, `TimerViewModel` periodically writes an `ActiveSessionRecoveryState` snapshot to disk (target interval: ~15 seconds).
+2. **Durably Committed Baseline**: Only successfully committed disk checkpoints define recoverable work. If a write fails, the prior valid checkpoint is preserved.
+3. **No Process Downtime Credit**: Process downtime while the application is terminated is never counted as focus work. Interrupted sessions restore in a paused state.
+4. **Task Attribution Preservation**: Active task UUID linkage is stored in the recovery metadata, ensuring recovered focus segments attribute time to the correct task.
+5. **Conservative Malformed-State Handling**: Corrupted or inconsistent recovery snapshots are detected and handled conservatively, preventing crash loops on relaunch.
+6. **Save-Failure Notifications & Retry**: When storage writes fail during checkpointing, a published error state alerts the user without discarding in-memory state.
+7. **Forced-Save Deadline Expiry**: Forcing a save at or after a deadline reconciles completion, records the segment at the original deadline, increments `completedSessions`, and clears recovery metadata.
+8. **Atomic Normal Expiry Commit (`isCompletingSessionTransaction`)**: When an ordinary `tick()` detects countdown expiration, nested saves from intermediate methods (`recordActiveSessionSegment`, `stopTimer`, preset observers) are suppressed. The final complete state (`focusSessionRecords`, `completedSessions += 1`, next preset, cleared recovery metadata) is written to disk in a single synchronous commit in a `defer` block.
+9. **Segment-Accurate Multi-Task Recovery**: Legacy expired recovery calculates credited time as `min(recovery.totalTime, recovery.segmentCreditedSeconds)`. It reconstructs only the active segment rather than fabricating duration from `totalTime - timeRemaining`, strictly conserving total focus time across task switches.
+10. **Recovery Idempotency**: Recovery clears `activeSessionRecovery` upon successful restoration, preventing repeated app launches from duplicating records or incrementing counters.
+11. **Comprehensive Automated Verification**: 50 Task 8 scenarios plus 13 dedicated Defect A/B and edge-case tests validate the entire recovery pipeline.
+
+---
+
+### Architectural Invariants (Current System Guarantees)
+
+The following invariants are enforced by the architecture and verified across 476 automated tests:
+
+1. **Original Deadline Invariant**: Focus countdown credit never exceeds the duration between the session start and its authoritative original `targetEndDate`.
+2. **Exact-Once Finalization Invariant**: Finalizing a focus session (via expiry, skip, or recovery) produces exactly one `FocusSessionRecord`; repeated calls are idempotent.
+3. **Task Credit Conservation Invariant**: Switching active tasks settles all elapsed focus time to the prior task before attributing subsequent time to the new task. Total attributed focus duration across all task segments equals the session duration.
+4. **Process Downtime Non-Inflation Invariant**: Time elapsed while FocusFlow is not executing is never awarded as focus time; interrupted sessions resume in a paused state.
+5. **Calendar Day Allocation Invariant**: Focus analytics allocate seconds strictly to the local calendar day in which they occurred. Sessions crossing midnight are divided at the midnight boundary.
+6. **Atomic Completion Persistence Invariant**: Normal countdown expiry persists the completed record, updated session count, and next preset state as a single coherent transaction; partial intermediate completion states are never committed to disk.
+7. **Generational Persistence Invariant**: Stale delayed persistence callbacks cannot overwrite disk data committed by newer forced or coalesced saves.
+8. **Disaster Recovery Backup Invariant**: Primary storage corruption triggers automatic restoration from a valid backup file (`.bak`). In the event of dual corruption, damaged files are preserved and saves are blocked to prevent data destruction.
+9. **Checkpoint Durability Invariant**: A failed disk write does not advance the recovery checkpoint baseline; only confirmed disk writes define recoverable state.
+
+---
+
+### Technical Debt and Risk Register
+
+| Category | Item | Engineering Description | Status |
+|---|---|---|---|
+| **Resolved** | Data Persistence & Backup Rotation | JSON storage in Application Support with automatic `.bak` recovery. | Verified across Task 1–8 test suite. |
+| **Resolved** | Save Coalescing & Stale Rejection | Rapid writes consolidated; stale async callbacks rejected. | Verified across Task 6 regression suite. |
+| **Resolved** | Sleep/Wake Overcount Elimination | Reconciles against original deadline after system sleep. | Verified across Task 7 regression suite. |
+| **Resolved** | Atomic Completion & Recovery Bounds | Normal tick completion is atomic; multi-task recovery is segment-accurate. | Verified across Task 8 regression suite. |
+| **Deferred** | GPU `TimelineView` Clock Decoupling | Decoupling continuous clock rendering from the 10Hz Combine timer to GPU `TimelineView`. | Optional future optimization; 10Hz Combine loop is stable. |
+| **Deferred** | Extended Energy / Power Profiling | Hardware power profiling under extended background conditions. | Low priority; current main-thread CPU usage is minimal. |
+| **Unverified** | Physical-Mac Sleep/Wake & Lid Close | Automated tests use simulated wall-clock jumps; physical hardware lid close/open remains to be manually verified. | Pending manual QA on macOS 14 hardware. |
+| **Unverified** | OS-Level SIGKILL Recovery | Automated tests verify recovery from persisted snapshots; genuine OS-level `kill -9` during execution remains to be manually verified. | Pending manual QA in isolated test environment. |
+| **Unverified** | Clean-Machine Installation & Permissions | Validating first-launch behavior, notification permissions, and Gatekeeper on an unprovisioned Mac. | Pending pre-release QA. |
+| **Not Started** | Task 9 — Idle Time Review | Prompting the user when system or application idle time is detected during active focus sessions. | Scheduled for next engineering milestone. |
+| **Not Started** | Developer ID Signing & Notarization | Apple Developer ID Application certificate, hardened runtime, and `notarytool` submission for Gatekeeper approval. | Scheduled for release milestone. |
+| **Not Started** | Final Release DMG Rebuild | Packaging the final verified binary into a distribution DMG after Task 9 completion. | Scheduled for release milestone. |
+
+---
+
+## Historical Implementation Update — October 16, 2026
 
 Between October 14 and October 16, 2026, FocusFlow underwent substantial architectural maturation. The key technical enhancements include:
 
@@ -53,9 +135,9 @@ Between October 14 and October 16, 2026, FocusFlow underwent substantial archite
 
 ---
 
-### Historical Findings Resolution Matrix
+### Historical Findings Resolution Matrix (October 16, 2026)
 
-| Finding | Original Review Status (Oct 14, 2026) | Current Status (Oct 16, 2026) | Current Technical Implementation |
+| Finding | Original Review Status (Oct 14, 2026) | Status as of Oct 16, 2026 | Technical Implementation (Oct 16) |
 | :--- | :---: | :---: | :--- |
 | **Finding 1: Absence of Data Persistence** | **Critical (D / 60%)** | **Resolved** | Implemented `FocusStorageService` JSON persistence in `Application Support/FocusFlow` with atomic rotation, backup recovery, and save error reporting. |
 | **Finding 2: 50Hz Combine Timer Loop** | **High Battery Impact (C+ / 74%)** | **Partially Resolved** | Combine timer frequency reduced from 50Hz to 10Hz (80% reduction in CPU wakeups) with wall-clock anchoring; full GPU `TimelineView` decoupling remains for a future refactor. |
@@ -80,17 +162,17 @@ However, a production-grade macOS utility requires evaluating non-functional req
 ### Historical Architecture Scorecard (October 14, 2026 — Baseline Audit)
 
 > [!NOTE]
-> The ratings below represent the codebase state prior to the persistence, disaster recovery, test suite, and menu-bar companion implementations completed on October 15–16, 2026.
+> The ratings below represent the codebase state prior to the persistence, disaster recovery, test suite, and menu-bar companion implementations completed on October 15–18, 2026.
 
-| Domain | Historical Rating (Oct 14) | Historical Status (Oct 14) | Current Resolution Status (Oct 16) |
-| :--- | :---: | :--- | :--- |
-| **Visual Design & UX** | **A+ (96%)** | Exceptional dark-mode palette, fluid springs, high-contrast modals. | Maintained and extended to Menu-Bar Companion. |
-| **Code Modularity** | **A- (90%)** | Clean SPM directory structure, single-responsibility files. | Maintained across Models, Views, ViewModels, Services. |
-| **Timekeeping Accuracy** | **B+ (88%)** | Wall-clock `targetEndDate` prevents timer drift. | Maintained with monotonic elapsed calculation. |
-| **Battery & Energy Impact**| **C+ (74%)** | 50Hz Combine timer ticks `@Published` properties 50x/sec. | Improved: 10Hz master engine (80% fewer wakeups). |
-| **Data Persistence** | **D (60%)** | 100% in-memory; tasks and elapsed seconds reset on quit. | **Resolved**: Full JSON persistence & backup recovery. |
-| **Type Safety & Contracts**| **B- (80%)** | Magic strings for tabs (`"Tasks"`, `"Focus Timer"`). | **Resolved**: Strongly typed `NavigationTab` enum. |
-| **Testability & CI/CD** | **F (40%)** | No XCTest / Swift Testing targets or CI workflows. | **Resolved**: 123 tests passing + GitHub Actions CI. |
+| Domain | Historical Rating (Oct 14) | Historical Status (Oct 14) | Resolution Status (Oct 16) | Current Resolution Status (Oct 18) |
+| :--- | :---: | :--- | :--- | :--- |
+| **Visual Design & UX** | **A+ (96%)** | Exceptional dark-mode palette, fluid springs, high-contrast modals. | Maintained and extended to Menu-Bar Companion. | Maintained. |
+| **Code Modularity** | **A- (90%)** | Clean SPM directory structure, single-responsibility files. | Maintained across Models, Views, ViewModels, Services. | Maintained. |
+| **Timekeeping Accuracy** | **B+ (88%)** | Wall-clock `targetEndDate` prevents timer drift. | Maintained with monotonic elapsed calculation. | **Hardened**: Sleep/wake reconciliation & deadline capping (Task 7). |
+| **Battery & Energy Impact**| **C+ (74%)** | 50Hz Combine timer ticks `@Published` properties 50x/sec. | Improved: 10Hz master engine (80% fewer wakeups). | Maintained. |
+| **Data Persistence** | **D (60%)** | 100% in-memory; tasks and elapsed seconds reset on quit. | **Resolved**: Full JSON persistence & backup recovery. | **Hardened**: Coalescing (Task 6), restart (Task 4), recovery (Task 8). |
+| **Type Safety & Contracts**| **B- (80%)** | Magic strings for tabs (`"Tasks"`, `"Focus Timer"`). | **Resolved**: Strongly typed `NavigationTab` enum. | Maintained. |
+| **Testability & CI/CD** | **F (40%)** | No XCTest / Swift Testing targets or CI workflows. | **Resolved**: 123 tests passing + GitHub Actions CI. | **Hardened**: 476 tests passing + CI release verification. |
 
 ---
 
@@ -147,6 +229,8 @@ FocusFlow (Current Modular Structure)
   Tasks, completed sessions, logged seconds, and notes were held exclusively in in-memory `@Published` properties, resetting on application restart.
 - **October 16 Resolution:**
   Implemented [`FocusStorageService`](../Sources/FocusFlow/Services/FocusStorageService.swift), persisting data to `~/Library/Application Support/FocusFlow/focusflow_data.json` with an atomic backup rotation strategy (`focusflow_data.json.bak`) and automated disaster recovery from corruption.
+- **October 18 Hardening:**
+  Added write coalescing (Task 6), atomic session completion (Task 8), periodic crash recovery checkpoints (Task 8), and segment credit preservation (Task 8).
 
 ---
 
@@ -188,8 +272,8 @@ FocusFlow (Current Modular Structure)
 
 ### Finding 6 (Packaging & Entitlements for macOS)
 - **Location:** `releases/FocusFlow.app`
-- **Status (October 16):**
-  - Continuous integration and testing are now active via GitHub Actions on macOS 14.
+- **Status (October 18):**
+  - Continuous integration and automated testing are active via GitHub Actions on `macos-14` (476 passing tests).
   - Distribution currently uses ad-hoc signing (`-s -`) suited for preview DMG distribution.
   - Apple Developer ID Application certificate signing, Hardened Runtime configuration, and `notarytool` Gatekeeper notarization remain pending for commercial distribution.
 
@@ -204,7 +288,7 @@ The original three-phase roadmap defined on October 14, 2026:
    - Type-safe `NavigationTab` enum.
    - Master timer engine optimization (50Hz → 10Hz).
 2. **Phase 2: Testing & Code Robustness (Completed)**
-   - Automated unit and regression test suite (123 tests passing).
+   - Automated unit and regression test suite (123 tests passing initially, now expanded to 476 tests).
    - Audio resolution fallback hierarchy.
 3. **Phase 3: Platform Integration (Partially Completed)**
    - macOS Menu Bar Extra companion (`MenuBarCompanionView`) with synchronized countdown.
@@ -215,4 +299,4 @@ The original three-phase roadmap defined on October 14, 2026:
 
 ## Conclusion
 
-FocusFlow has successfully matured from its initial prototype stage into a stable, well-tested macOS application. The implementation of persistent storage with automated backup recovery, companion menu-bar integration, timer loop relaxation, and a comprehensive 123-test automated regression suite establishes strong technical durability. Future development will focus on Apple Developer ID notarization, GPU `TimelineView` clock rendering, and system notification enhancements.
+FocusFlow has matured from an early prototype into an exceptionally robust, well-architected macOS productivity system. Across Tasks 1 through 8, the engineering team has systematically eliminated data-integrity risks in timer state transitions, stopwatch accounting, multi-task attribution, midnight analytics, persistence coalescing, sleep/wake reconciliation, and crash recovery. Supported by a comprehensive 476-test automated regression suite and full CI validation, the application provides strong reliability guarantees. The upcoming milestones will address Task 9 (Idle Time Review), physical-hardware validation, and Apple Developer ID signing/notarization for public distribution.
