@@ -417,14 +417,12 @@ public class TimerViewModel: ObservableObject {
     }
     @Published public private(set) var didRecoverInterruptedSession: Bool = false
     private var isPerformingSave: Bool = false
+    private var isReconcilingActiveTimers: Bool = false
     private var pendingRecoveryNoticeMessage: String? = nil
 
     public func checkpointActiveTimers(now: Date? = nil) {
         guard !isLoadingPersistedData, !isPersistenceBlocked, !hasTerminated else { return }
         let effectiveNow = now ?? currentDateProvider()
-        if reconcileIfExpired(at: effectiveNow) {
-            return
-        }
         performSave(now: effectiveNow)
     }
 
@@ -776,83 +774,160 @@ public class TimerViewModel: ObservableObject {
 
     private func restoreCrashRecoverySession(_ recovery: ActiveSessionRecoveryState, saved: FocusAppData) {
         self.didRecoverInterruptedSession = true
-        self.pendingRecoveryNoticeMessage = "Interrupted session restored to paused state from last checkpoint."
         self.showRecoveryNotice = false
 
         let minDuration = TimerViewModel.minSupportedTimerDuration
         let maxDuration = TimerViewModel.maxSupportedTimerDuration
 
         if recovery.isTimerRunning {
-            self.activePreset = recovery.activePreset
-            self.activeMode = recovery.activeMode
-            self.isBreakSession = recovery.isBreakSession
-            self.totalTime = max(minDuration, min(recovery.totalTime, maxDuration))
-            self.timeRemaining = max(1, min(recovery.timeRemaining, self.totalTime))
-            self.currentSession = min(max(1, recovery.currentSession), max(1, self.totalSessions))
-            self.customMinutes = max(0, min(recovery.customMinutes, 360))
-            self.customSeconds = max(0, min(recovery.customSeconds, 59))
-            self.customDurationSeconds = max(minDuration, min(self.customMinutes * 60 + self.customSeconds, maxDuration))
-
-            if self.totalTime > 0 {
-                self.preciseProgress = min(max(Double(self.timeRemaining) / Double(self.totalTime), 0.0), 1.0)
+            let isExpiredAtCheckpoint: Bool
+            if recovery.timeRemaining <= 0 {
+                isExpiredAtCheckpoint = true
+            } else if let target = recovery.targetEndDate, recovery.checkpointTimestamp >= target {
+                isExpiredAtCheckpoint = true
             } else {
-                self.preciseProgress = recovery.preciseProgress
+                isExpiredAtCheckpoint = false
             }
 
-            self.isTimerRunning = false
-            self.targetEndDate = nil
-            self.fractionalRemaining = recovery.fractionalRemaining
-            self.sessionSegmentStartDate = nil
-            self.segmentCreditedSeconds = 0
-            self.activeSessionTaskId = nil
-            self.activeTimerSessionId = UUID()
+            if isExpiredAtCheckpoint {
+                self.pendingRecoveryNoticeMessage = "Completed session restored from last checkpoint."
 
-            // Finalize interrupted focus segment if credited seconds > 0
-            if !recovery.isBreakSession && recovery.segmentCreditedSeconds > 0 {
-                let credited = recovery.segmentCreditedSeconds
-                let endTime = recovery.checkpointTimestamp
-                let startTime = recovery.sessionSegmentStartDate ?? endTime.addingTimeInterval(-Double(credited))
-                let boundedEnd = max(startTime, endTime)
+                // 1. Finalize focus record if this was a focus session
+                if !recovery.isBreakSession {
+                    let credited = min(recovery.totalTime, max(recovery.segmentCreditedSeconds, recovery.totalTime - recovery.timeRemaining))
+                    let rawEnd = recovery.targetEndDate ?? recovery.checkpointTimestamp
+                    let boundedEnd = min(recovery.checkpointTimestamp, rawEnd)
+                    let startTime = recovery.sessionSegmentStartDate ?? boundedEnd.addingTimeInterval(-Double(credited))
+                    let validEnd = max(startTime, boundedEnd)
 
-                let recordTaskId: UUID?
-                if let taskId = recovery.activeSessionTaskId,
-                   let index = self.tasks.firstIndex(where: { $0.id == taskId }),
-                   !self.tasks[index].isCompleted {
-                    recordTaskId = taskId
+                    let recordTaskId: UUID?
+                    if let taskId = recovery.activeSessionTaskId,
+                       let index = self.tasks.firstIndex(where: { $0.id == taskId }),
+                       !self.tasks[index].isCompleted {
+                        recordTaskId = taskId
+                    } else {
+                        recordTaskId = nil
+                    }
+
+                    let isAlreadyRecorded = self.sessionRecords.contains {
+                        $0.id == recovery.timerSessionId ||
+                        ($0.startTime == startTime && $0.durationSeconds == credited && $0.taskId == recordTaskId)
+                    }
+                    if !isAlreadyRecorded && credited > 0 {
+                        let record = FocusSessionRecord(
+                            id: recovery.timerSessionId,
+                            startTime: startTime,
+                            endTime: validEnd,
+                            durationSeconds: credited,
+                            mode: recovery.activePreset,
+                            taskId: recordTaskId
+                        )
+                        self.sessionRecords.append(record)
+                        recalculateFocusMetrics(now: validEnd)
+                    }
+
+                    if !isAlreadyRecorded {
+                        self.completedSessions += 1
+                    }
+
+                    // Transition to next break preset
+                    let isFinalSession = recovery.currentSession >= self.totalSessions
+                    self.currentSession = isFinalSession ? 1 : recovery.currentSession + 1
+                    let nextBreakPreset = isFinalSession ? "Long Break" : "Short Break"
+                    let nextBreakMinutes = isFinalSession ? 15 : 5
+                    applyPresetDirectly(name: nextBreakPreset, minutes: nextBreakMinutes, mode: "Pomodoro", isBreak: true)
                 } else {
-                    recordTaskId = nil
+                    // Was a break session
+                    if recovery.activePreset == "Long Break" {
+                        self.currentSession = 1
+                    }
+                    applyPresetDirectly(name: "Focus", minutes: 25, mode: "Pomodoro", isBreak: false)
                 }
 
-                let isAlreadyRecorded = self.sessionRecords.contains {
-                    $0.id == recovery.timerSessionId ||
-                    ($0.startTime == startTime && $0.durationSeconds == credited && $0.taskId == recordTaskId)
+                // Session completed at checkpoint: state is IDLE, NOT running, NOT paused
+                self.isTimerRunning = false
+                self.targetEndDate = nil
+                self.fractionalRemaining = nil
+                self.sessionSegmentStartDate = nil
+                self.segmentCreditedSeconds = 0
+                self.activeSessionTaskId = nil
+                self.activeTimerSessionId = UUID()
+                self.pausedSession = nil
+            } else {
+                // Interrupted mid-flight before deadline: restore as PAUSED
+                self.pendingRecoveryNoticeMessage = "Interrupted session restored to paused state from last checkpoint."
+                self.activePreset = recovery.activePreset
+                self.activeMode = recovery.activeMode
+                self.isBreakSession = recovery.isBreakSession
+                self.totalTime = max(minDuration, min(recovery.totalTime, maxDuration))
+                self.timeRemaining = max(1, min(recovery.timeRemaining, self.totalTime))
+                self.currentSession = min(max(1, recovery.currentSession), max(1, self.totalSessions))
+                self.customMinutes = max(0, min(recovery.customMinutes, 360))
+                self.customSeconds = max(0, min(recovery.customSeconds, 59))
+                self.customDurationSeconds = max(minDuration, min(self.customMinutes * 60 + self.customSeconds, maxDuration))
+
+                if self.totalTime > 0 {
+                    self.preciseProgress = min(max(Double(self.timeRemaining) / Double(self.totalTime), 0.0), 1.0)
+                } else {
+                    self.preciseProgress = recovery.preciseProgress
                 }
-                if !isAlreadyRecorded {
-                    let record = FocusSessionRecord(
-                        id: recovery.timerSessionId,
-                        startTime: startTime,
-                        endTime: boundedEnd,
-                        durationSeconds: credited,
-                        mode: recovery.activePreset,
-                        taskId: recordTaskId
-                    )
-                    self.sessionRecords.append(record)
-                    recalculateFocusMetrics(now: boundedEnd)
+
+                self.isTimerRunning = false
+                self.targetEndDate = nil
+                self.fractionalRemaining = recovery.fractionalRemaining
+                self.sessionSegmentStartDate = nil
+                self.segmentCreditedSeconds = 0
+                self.activeSessionTaskId = nil
+                self.activeTimerSessionId = UUID()
+
+                // Finalize interrupted focus segment if credited seconds > 0
+                if !recovery.isBreakSession && recovery.segmentCreditedSeconds > 0 {
+                    let credited = recovery.segmentCreditedSeconds
+                    let deadline = recovery.targetEndDate ?? recovery.checkpointTimestamp
+                    let rawEnd = min(recovery.checkpointTimestamp, deadline)
+                    let startTime = recovery.sessionSegmentStartDate ?? rawEnd.addingTimeInterval(-Double(credited))
+                    let boundedEnd = max(startTime, rawEnd)
+
+                    let recordTaskId: UUID?
+                    if let taskId = recovery.activeSessionTaskId,
+                       let index = self.tasks.firstIndex(where: { $0.id == taskId }),
+                       !self.tasks[index].isCompleted {
+                        recordTaskId = taskId
+                    } else {
+                        recordTaskId = nil
+                    }
+
+                    let isAlreadyRecorded = self.sessionRecords.contains {
+                        $0.id == recovery.timerSessionId ||
+                        ($0.startTime == startTime && $0.durationSeconds == credited && $0.taskId == recordTaskId)
+                    }
+                    if !isAlreadyRecorded {
+                        let record = FocusSessionRecord(
+                            id: recovery.timerSessionId,
+                            startTime: startTime,
+                            endTime: boundedEnd,
+                            durationSeconds: credited,
+                            mode: recovery.activePreset,
+                            taskId: recordTaskId
+                        )
+                        self.sessionRecords.append(record)
+                        recalculateFocusMetrics(now: boundedEnd)
+                    }
                 }
+
+                self.pausedSession = PausedTimerSession(
+                    activePreset: self.activePreset,
+                    activeMode: self.activeMode,
+                    isBreakSession: self.isBreakSession,
+                    totalTime: self.totalTime,
+                    timeRemaining: self.timeRemaining,
+                    preciseProgress: self.preciseProgress,
+                    customMinutes: self.customMinutes,
+                    customSeconds: self.customSeconds,
+                    currentSession: self.currentSession,
+                    activeTaskIndex: self.activeTaskIndex
+                )
             }
-
-            self.pausedSession = PausedTimerSession(
-                activePreset: self.activePreset,
-                activeMode: self.activeMode,
-                isBreakSession: self.isBreakSession,
-                totalTime: self.totalTime,
-                timeRemaining: self.timeRemaining,
-                preciseProgress: self.preciseProgress,
-                customMinutes: self.customMinutes,
-                customSeconds: self.customSeconds,
-                currentSession: self.currentSession,
-                activeTaskIndex: self.activeTaskIndex
-            )
         } else if let paused = saved.pausedSession {
             restorePausedTimerSession(paused, saved: saved)
         } else {
@@ -1010,21 +1085,10 @@ public class TimerViewModel: ObservableObject {
     private func settleActiveTimeForSnapshot(at now: Date) {
         var didMutate = false
 
-        // 1. Settle running Focus countdown timer
+        // 1. Settle running Focus countdown timer (pre-deadline only)
         if isTimerRunning, let target = targetEndDate {
             let remaining = target.timeIntervalSince(now)
-            if remaining <= 0 {
-                if timeRemaining > 0 {
-                    let uncounted = timeRemaining
-                    synchronizeCountdownRemaining(to: 0)
-                    preciseProgress = 0.0
-                    if isFocusPreset && uncounted > 0 {
-                        creditTaskTime(taskId: activeSessionTaskId, seconds: uncounted)
-                        segmentCreditedSeconds += uncounted
-                    }
-                    didMutate = true
-                }
-            } else {
+            if remaining > 0 {
                 let newRemaining = max(Int(ceil(remaining)), 0)
                 if newRemaining < timeRemaining {
                     let delta = timeRemaining - newRemaining
@@ -1073,7 +1137,12 @@ public class TimerViewModel: ObservableObject {
         defer { isPerformingSave = false }
 
         lastAttemptedCheckpointTime = now
-        settleActiveTimeForSnapshot(at: now)
+
+        if isTimerRunning, !isReconcilingActiveTimers, let target = targetEndDate, now >= target {
+            reconcileActiveTimers(at: now)
+        } else {
+            settleActiveTimeForSnapshot(at: now)
+        }
 
         lastPersistTime = now
 
@@ -1713,7 +1782,7 @@ public class TimerViewModel: ObservableObject {
     /// Returns true if expiration reconciliation was performed.
     @discardableResult
     internal func reconcileIfExpired(at now: Date) -> Bool {
-        if isTimerRunning, let target = targetEndDate, now >= target {
+        if isTimerRunning, !isReconcilingActiveTimers, let target = targetEndDate, now >= target {
             reconcileActiveTimers(at: now)
             return true
         }
@@ -1723,10 +1792,14 @@ public class TimerViewModel: ObservableObject {
     /// Reconciles running Focus Timer and Stopwatch against the current wall-clock deadline.
     /// Safe and idempotent across sleep/wake, application activation, and high-frequency master ticks.
     public func reconcileActiveTimers(at date: Date? = nil) {
+        guard !isReconcilingActiveTimers else { return }
         guard !isPersistenceBlocked else {
             suspendActiveTimersForBlockedStorage()
             return
         }
+        isReconcilingActiveTimers = true
+        defer { isReconcilingActiveTimers = false }
+
         let now = date ?? currentDateProvider()
 
         // 1. Reconcile running Focus / Break countdown timer
@@ -1755,12 +1828,12 @@ public class TimerViewModel: ObservableObject {
                     effectiveCompletionDate = now
                 }
 
-                recordActiveSessionSegment(at: effectiveCompletionDate)
                 isTimerRunning = false
                 targetEndDate = nil
                 fractionalRemaining = nil
                 updateMasterEngine()
-                handleSessionComplete()
+                recordActiveSessionSegment(at: effectiveCompletionDate)
+                handleSessionComplete(at: now)
             } else {
                 if totalTime > 0 {
                     preciseProgress = min(max(remaining / Double(totalTime), 0.0), 1.0)
@@ -1816,13 +1889,13 @@ public class TimerViewModel: ObservableObject {
     }
 
     // MARK: Focus Timer Core Controls
-    public func startTimer() {
+    public func startTimer(at date: Date? = nil) {
         guard !isPersistenceBlocked, !hasTerminated else { return }
         guard !isTimerRunning else { return }
         // Ensure only one countdown timer runs at a time
         isTimerRunning = true
         activeTimerSessionId = UUID()
-        let now = currentDateProvider()
+        let now = date ?? currentDateProvider()
         let remainingInterval = fractionalRemaining ?? TimeInterval(timeRemaining)
         targetEndDate = now.addingTimeInterval(remainingInterval)
         preciseProgress = totalTime > 0 ? min(max(remainingInterval / Double(totalTime), 0.0), 1.0) : 1.0
@@ -1855,10 +1928,10 @@ public class TimerViewModel: ObservableObject {
                 preciseProgress = min(max(remaining / Double(totalTime), 0.0), 1.0)
             }
         }
-        recordActiveSessionSegment(at: now)
         isTimerRunning = false
         targetEndDate = nil
         updateMasterEngine()
+        recordActiveSessionSegment(at: now)
     }
 
     public func stopTimer(at date: Date? = nil) {
@@ -1892,10 +1965,10 @@ public class TimerViewModel: ObservableObject {
                 capturedProgress = preciseProgress
             }
         }
-        recordActiveSessionSegment(at: now)
         isTimerRunning = false
         targetEndDate = nil
         updateMasterEngine()
+        recordActiveSessionSegment(at: now)
         if capturedRemaining > 0 && (capturedRemaining < totalTime || wasRunning) {
             pausedSession = PausedTimerSession(
                 activePreset: activePreset,
@@ -2495,8 +2568,9 @@ public class TimerViewModel: ObservableObject {
         }
     }
 
-    internal func handleSessionComplete() {
-        stopTimer()
+    internal func handleSessionComplete(at date: Date? = nil) {
+        let now = date ?? currentDateProvider()
+        stopTimer(at: now)
         fractionalRemaining = nil
         pausedSession = nil
         showConflictModal = false
@@ -2531,7 +2605,7 @@ public class TimerViewModel: ObservableObject {
             applyPresetDirectly(name: nextBreakPreset, minutes: nextBreakMinutes, mode: "Pomodoro", isBreak: true)
             persistData()
             if autoStartNextSession && !hasTerminated {
-                startTimer()
+                startTimer(at: now)
             }
             return
         } else {
@@ -2546,7 +2620,7 @@ public class TimerViewModel: ObservableObject {
             applyPresetDirectly(name: "Focus", minutes: 25, mode: "Pomodoro", isBreak: false)
             persistData()
             if autoStartNextSession && !hasTerminated {
-                startTimer()
+                startTimer(at: now)
             }
         }
     }
