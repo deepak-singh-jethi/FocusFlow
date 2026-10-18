@@ -11050,4 +11050,275 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(vm.activePreset, "Focus", "Must be Focus, not double-skipped to Break!")
         XCTAssertTrue(vm.isTimerRunning, "Focus should be running when autoStart is true")
     }
+
+    // MARK: - Task 7 Finalization Ordering Tests (Reset, Skip, End-and-Switch)
+
+    // 1. Mandatory Red Reproduction — Reset Before Expiry
+    @MainActor
+    func testTask7_Ordering_ResetBeforeExpiry_WithPendingElapsedSeconds() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+
+        // Tick at T0 + 300s (300s credited, 1200s remaining)
+        simulatedNow = baseDate.addingTimeInterval(300)
+        vm.tick()
+
+        // Advance to T0 + 600s without further intermediate ticks
+        simulatedNow = baseDate.addingTimeInterval(600)
+
+        // Invoke resetFocusTimer() directly
+        vm.resetFocusTimer()
+
+        // Invariants:
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 600, "Task must receive full 600s")
+        XCTAssertEqual(vm.sessionRecords.count, 1, "Must have exactly 1 focus session record")
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 600, "Record must contain full 600s, NOT 300s!")
+        XCTAssertEqual(vm.sessionRecords[0].endTime, baseDate.addingTimeInterval(600), "Record endTime must be T0 + 600s")
+        XCTAssertEqual(vm.todayFocusedSeconds, 600, "Today focus total must be 600s")
+        XCTAssertEqual(vm.completedSessions, 0, "Reset session is not completed")
+        XCTAssertEqual(vm.timeRemaining, 1500, "Timer must be reset to 1500s")
+        XCTAssertFalse(vm.isTimerRunning, "Timer must be stopped")
+        XCTAssertNil(vm.pausedSession, "Paused session must be cleared on reset")
+    }
+
+    // 2. Mandatory Red Reproduction — Skip Before Expiry
+    @MainActor
+    func testTask7_Ordering_SkipBeforeExpiry_WithPendingElapsedSeconds() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+
+        // Tick at T0 + 300s
+        simulatedNow = baseDate.addingTimeInterval(300)
+        vm.tick()
+
+        // Advance to T0 + 600s without ticks
+        simulatedNow = baseDate.addingTimeInterval(600)
+
+        // Invoke skipSession() directly
+        vm.skipSession()
+
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 600, "Task must receive full 600s")
+        XCTAssertEqual(vm.sessionRecords.count, 1, "Must record exactly 1 focus record")
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 600, "Record must contain full 600s, NOT 300s!")
+        XCTAssertEqual(vm.sessionRecords[0].endTime, baseDate.addingTimeInterval(600))
+        XCTAssertEqual(vm.todayFocusedSeconds, 600)
+        XCTAssertEqual(vm.completedSessions, 0, "Skipped session is not completed")
+        XCTAssertEqual(vm.activePreset, "Short Break", "Must transition to Short Break")
+        XCTAssertEqual(vm.currentSession, 2)
+    }
+
+    // 3. Mandatory Red Reproduction — End and Switch Before Expiry
+    @MainActor
+    func testTask7_Ordering_EndAndSwitch_BeforeExpiry_WithPendingElapsedSeconds() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+
+        // Tick at T0 + 300s
+        simulatedNow = baseDate.addingTimeInterval(300)
+        vm.tick()
+
+        // Request switching to Break (creates conflict modal)
+        vm.switchToBreak(minutes: 5)
+        XCTAssertTrue(vm.showConflictModal)
+        XCTAssertNotNil(vm.pendingTimerRequest)
+
+        // Advance to T0 + 600s without intermediate ticks
+        simulatedNow = baseDate.addingTimeInterval(600)
+
+        // Invoke endAndSwitch()
+        vm.endAndSwitch(autoStart: false)
+
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 600, "Task must receive 600s")
+        XCTAssertEqual(vm.sessionRecords.count, 1, "Must record exactly 1 focus session")
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 600, "Record must contain 600s, NOT 300s!")
+        XCTAssertEqual(vm.sessionRecords[0].endTime, baseDate.addingTimeInterval(600))
+        XCTAssertEqual(vm.todayFocusedSeconds, 600)
+        XCTAssertEqual(vm.activePreset, "Short Break")
+        XCTAssertFalse(vm.showConflictModal)
+        XCTAssertNil(vm.pendingTimerRequest)
+    }
+
+    // 4. Mandatory Red Reproduction — End and Switch After Expiry (Without Auto-Start)
+    @MainActor
+    func testTask7_Ordering_EndAndSwitch_AfterExpiry_WithoutAutoStart() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+        vm.autoStartNextSession = false
+
+        vm.startTimer()
+
+        // Tick at T0 + 300s
+        simulatedNow = baseDate.addingTimeInterval(300)
+        vm.tick()
+
+        // Open switch confirmation modal while running
+        vm.switchToBreak(minutes: 5)
+        XCTAssertTrue(vm.showConflictModal)
+
+        // Advance to T0 + 7200s without wake reconciliation
+        simulatedNow = baseDate.addingTimeInterval(7200)
+
+        // Invoke endAndSwitch()
+        vm.endAndSwitch(autoStart: false)
+
+        // Invariants:
+        XCTAssertEqual(vm.completedSessions, 1, "Expired focus session must increment completedSessions")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1500, "Task credit must be capped at 1500s deadline")
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 1500, "Record duration must be full 1500s")
+        XCTAssertEqual(vm.sessionRecords[0].endTime, baseDate.addingTimeInterval(1500), "Record endTime must be T0 + 1500s")
+        XCTAssertEqual(vm.todayFocusedSeconds, 1500)
+        XCTAssertEqual(vm.activePreset, "Short Break", "Must apply user's requested Short Break")
+        XCTAssertFalse(vm.isTimerRunning, "Target timer must not run when autoStart is false")
+        XCTAssertFalse(vm.showConflictModal)
+        XCTAssertNil(vm.pendingTimerRequest)
+    }
+
+    // 4 (continued). End and Switch After Expiry (WITH Auto-Start)
+    @MainActor
+    func testTask7_Ordering_EndAndSwitch_AfterExpiry_WithAutoStart() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+        vm.autoStartNextSession = true
+
+        vm.startTimer()
+
+        simulatedNow = baseDate.addingTimeInterval(300)
+        vm.tick()
+
+        vm.switchToBreak(minutes: 5)
+        XCTAssertTrue(vm.showConflictModal)
+
+        simulatedNow = baseDate.addingTimeInterval(7200)
+        vm.endAndSwitch(autoStart: true)
+
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1500)
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 1500)
+        XCTAssertEqual(vm.todayFocusedSeconds, 1500)
+        XCTAssertEqual(vm.activePreset, "Short Break")
+        XCTAssertTrue(vm.isTimerRunning, "Target timer must run when autoStart is true")
+        XCTAssertFalse(vm.showConflictModal)
+        XCTAssertNil(vm.pendingTimerRequest)
+    }
+
+    // 5. Task switch before Reset
+    @MainActor
+    func testTask7_Ordering_TaskSwitchThenResetBeforeExpiry() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        let idA = vm.tasks[0].id
+        let idB = vm.tasks[1].id
+
+        vm.startTimer()
+
+        // Switch to Task B at T0 + 200s
+        simulatedNow = baseDate.addingTimeInterval(200)
+        vm.selectTask(at: 1)
+
+        // Tick on Task B at T0 + 300s (Task B gets 100s)
+        simulatedNow = baseDate.addingTimeInterval(300)
+        vm.tick()
+
+        // Advance to T0 + 500s without ticks (Task B has 200s pending)
+        simulatedNow = baseDate.addingTimeInterval(500)
+        vm.resetFocusTimer()
+
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 200, "Task A must have 200s")
+        XCTAssertEqual(vm.tasks[1].timeSpentSeconds, 300, "Task B must have 100s + 200s = 300s")
+        XCTAssertEqual(vm.sessionRecords.count, 2)
+        XCTAssertEqual(vm.sessionRecords[0].taskId, idA)
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 200)
+        XCTAssertEqual(vm.sessionRecords[1].taskId, idB)
+        XCTAssertEqual(vm.sessionRecords[1].durationSeconds, 300, "Record B must contain 300s, NOT 100s!")
+        XCTAssertEqual(vm.todayFocusedSeconds, 500)
+    }
+
+    // 6. Unassigned focus time before Skip
+    @MainActor
+    func testTask7_Ordering_UnassignedTimeBeforeSkip() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        // Remove tasks so session is unassigned
+        vm.tasks.removeAll()
+
+        vm.startTimer()
+
+        simulatedNow = baseDate.addingTimeInterval(300)
+        vm.tick()
+
+        simulatedNow = baseDate.addingTimeInterval(600)
+        vm.skipSession()
+
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertNil(vm.sessionRecords[0].taskId)
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 600, "Unassigned record must have 600s, NOT 300s!")
+        XCTAssertEqual(vm.todayFocusedSeconds, 600)
+    }
+
+    // 7. Reset after expiry capped at deadline
+    @MainActor
+    func testTask7_Ordering_ResetAfterExpiry_CappedAtDeadline() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+
+        simulatedNow = baseDate.addingTimeInterval(300)
+        vm.tick()
+
+        // Advance to 2 hours
+        simulatedNow = baseDate.addingTimeInterval(7200)
+        vm.resetFocusTimer()
+
+        XCTAssertEqual(vm.completedSessions, 1, "Expired session increments completedSessions")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1500)
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 1500)
+        XCTAssertEqual(vm.sessionRecords[0].endTime, baseDate.addingTimeInterval(1500))
+        XCTAssertEqual(vm.todayFocusedSeconds, 1500)
+        XCTAssertEqual(vm.timeRemaining, vm.totalTime, "Reset restores full duration of active preset")
+        XCTAssertFalse(vm.isTimerRunning)
+    }
 }

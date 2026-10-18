@@ -1234,16 +1234,19 @@ public class TimerViewModel: ObservableObject {
             return
         }
 
-        // 1. Record completed focus time into session records
-        recordActiveSessionSegment()
+        let now = currentDateProvider()
+        if isTimerRunning {
+            stopTimer()
+        } else {
+            reconcileIfExpired(at: now)
+            recordActiveSessionSegment(at: now)
+        }
 
-        // 2. Stop timer and clear preserved session
-        stopTimer()
         fractionalRemaining = nil
         preservedSession = nil
         pausedSession = nil
 
-        // 3. Apply new requested preset/mode
+        // Apply new requested preset/mode
         applyPresetDirectly(name: pending.name, minutes: pending.minutes, seconds: pending.seconds, mode: pending.mode, isBreak: pending.isBreak)
 
         showConflictModal = false
@@ -1251,8 +1254,8 @@ public class TimerViewModel: ObservableObject {
         conflictOrigin = nil
         persistData()
 
-        // 4. Start target timer immediately so user directly transitions into active Break/Focus session
-        if autoStart {
+        // Start target timer immediately so user directly transitions into active Break/Focus session
+        if autoStart && !hasTerminated {
             startTimer()
         }
     }
@@ -1533,10 +1536,11 @@ public class TimerViewModel: ObservableObject {
     public func resetFocusTimer() {
         guard !isPersistenceBlocked else { return }
         let now = currentDateProvider()
-        if !reconcileIfExpired(at: now) {
-            recordActiveSessionSegment()
+        if isTimerRunning {
+            stopTimer()
+        } else {
+            reconcileIfExpired(at: now)
         }
-        stopTimer()
         fractionalRemaining = nil
         timeRemaining = totalTime
         preciseProgress = 1.0
@@ -2048,8 +2052,11 @@ public class TimerViewModel: ObservableObject {
         if reconcileIfExpired(at: now) {
             return
         }
-        recordActiveSessionSegment()
-        stopTimer()
+        if isTimerRunning {
+            stopTimer()
+        } else {
+            recordActiveSessionSegment(at: now)
+        }
         fractionalRemaining = nil
         pausedSession = nil
         if isBreakPreset {
