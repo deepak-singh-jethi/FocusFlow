@@ -238,6 +238,79 @@ public struct PausedTimerSession: Codable, Equatable {
     }
 }
 
+// MARK: - Active Session Recovery State (Task 8: Crash / Force-Quit Recovery)
+public struct ActiveSessionRecoveryState: Codable, Equatable {
+    public var version: Int
+    public var isTimerRunning: Bool
+    public var timerSessionId: UUID
+    public var activePreset: String
+    public var activeMode: String
+    public var isBreakSession: Bool
+    public var totalTime: Int
+    public var timeRemaining: Int
+    public var fractionalRemaining: Double?
+    public var preciseProgress: Double
+    public var targetEndDate: Date?
+    public var sessionSegmentStartDate: Date?
+    public var segmentCreditedSeconds: Int
+    public var activeSessionTaskId: UUID?
+    public var currentSession: Int
+    public var customMinutes: Int
+    public var customSeconds: Int
+
+    public var isStopwatchRunning: Bool
+    public var stopwatchElapsedSeconds: Double
+    public var stopwatchTaskId: UUID?
+
+    public var checkpointTimestamp: Date
+
+    public init(
+        version: Int = 1,
+        isTimerRunning: Bool = false,
+        timerSessionId: UUID = UUID(),
+        activePreset: String = "Focus",
+        activeMode: String = "Pomodoro",
+        isBreakSession: Bool = false,
+        totalTime: Int = 1500,
+        timeRemaining: Int = 1500,
+        fractionalRemaining: Double? = nil,
+        preciseProgress: Double = 1.0,
+        targetEndDate: Date? = nil,
+        sessionSegmentStartDate: Date? = nil,
+        segmentCreditedSeconds: Int = 0,
+        activeSessionTaskId: UUID? = nil,
+        currentSession: Int = 1,
+        customMinutes: Int = 25,
+        customSeconds: Int = 0,
+        isStopwatchRunning: Bool = false,
+        stopwatchElapsedSeconds: Double = 0.0,
+        stopwatchTaskId: UUID? = nil,
+        checkpointTimestamp: Date = Date()
+    ) {
+        self.version = version
+        self.isTimerRunning = isTimerRunning
+        self.timerSessionId = timerSessionId
+        self.activePreset = activePreset
+        self.activeMode = activeMode
+        self.isBreakSession = isBreakSession
+        self.totalTime = totalTime
+        self.timeRemaining = timeRemaining
+        self.fractionalRemaining = fractionalRemaining
+        self.preciseProgress = preciseProgress
+        self.targetEndDate = targetEndDate
+        self.sessionSegmentStartDate = sessionSegmentStartDate
+        self.segmentCreditedSeconds = max(0, segmentCreditedSeconds)
+        self.activeSessionTaskId = activeSessionTaskId
+        self.currentSession = currentSession
+        self.customMinutes = customMinutes
+        self.customSeconds = customSeconds
+        self.isStopwatchRunning = isStopwatchRunning
+        self.stopwatchElapsedSeconds = max(0.0, stopwatchElapsedSeconds)
+        self.stopwatchTaskId = stopwatchTaskId
+        self.checkpointTimestamp = checkpointTimestamp
+    }
+}
+
 // MARK: - Persistent App State Payload
 public struct FocusAppData: Codable, Equatable {
     public var tasks: [FocusTask]
@@ -265,6 +338,8 @@ public struct FocusAppData: Codable, Equatable {
     public var configuredCustomSeconds: Int?
     public var configuredCurrentSession: Int?
     public var configuredIsBreakSession: Bool?
+    // Task 8: Crash / Force-Quit Recovery State
+    public var activeSessionRecovery: ActiveSessionRecoveryState?
 
     enum CodingKeys: String, CodingKey {
         case tasks
@@ -292,6 +367,7 @@ public struct FocusAppData: Codable, Equatable {
         case configuredCustomSeconds
         case configuredCurrentSession
         case configuredIsBreakSession
+        case activeSessionRecovery
     }
 
     public init(
@@ -318,7 +394,8 @@ public struct FocusAppData: Codable, Equatable {
         configuredCustomMinutes: Int? = nil,
         configuredCustomSeconds: Int? = nil,
         configuredCurrentSession: Int? = nil,
-        configuredIsBreakSession: Bool? = nil
+        configuredIsBreakSession: Bool? = nil,
+        activeSessionRecovery: ActiveSessionRecoveryState? = nil
     ) {
         self.tasks = tasks
         self.focusedSeconds = focusedSeconds
@@ -356,6 +433,7 @@ public struct FocusAppData: Codable, Equatable {
         self.configuredCustomSeconds = configuredCustomSeconds
         self.configuredCurrentSession = configuredCurrentSession
         self.configuredIsBreakSession = configuredIsBreakSession
+        self.activeSessionRecovery = activeSessionRecovery
     }
 
     public init(from decoder: Decoder) throws {
@@ -402,6 +480,13 @@ public struct FocusAppData: Codable, Equatable {
         self.configuredCustomSeconds = try container.decodeIfPresent(Int.self, forKey: .configuredCustomSeconds)
         self.configuredCurrentSession = try container.decodeIfPresent(Int.self, forKey: .configuredCurrentSession)
         self.configuredIsBreakSession = try container.decodeIfPresent(Bool.self, forKey: .configuredIsBreakSession)
+
+        do {
+            self.activeSessionRecovery = try container.decodeIfPresent(ActiveSessionRecoveryState.self, forKey: .activeSessionRecovery)
+        } catch {
+            print("[FocusStorageService] Warning: Failed to decode activeSessionRecovery: \(error)")
+            self.activeSessionRecovery = nil
+        }
 
         // Backward compatibility migration:
         // If sessionRecords is empty and legacyLifetimeFocusedSeconds was nil,

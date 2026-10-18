@@ -406,6 +406,19 @@ public class TimerViewModel: ObservableObject {
     @Published public private(set) var saveErrorMessage: String? = nil
     @Published public private(set) var lastSaveError: StorageError? = nil
 
+    // Task 8: In-Flight Crash / Force-Quit Recovery State
+    public private(set) var activeTimerSessionId: UUID = UUID()
+    public var checkpointInterval: TimeInterval = 15.0
+    private var lastCheckpointTime: Date = .distantPast
+    @Published public private(set) var didRecoverInterruptedSession: Bool = false
+
+    public func checkpointActiveTimers(now: Date? = nil) {
+        guard !isLoadingPersistedData, !isPersistenceBlocked, !hasTerminated else { return }
+        let effectiveNow = now ?? currentDateProvider()
+        reconcileActiveTimers(at: effectiveNow)
+        performSave(now: effectiveNow)
+    }
+
     public func dismissRecoveryNotice() {
         showRecoveryNotice = false
     }
@@ -424,7 +437,10 @@ public class TimerViewModel: ObservableObject {
     }
     public var isRunning: Bool { isTimerRunning || isStopwatchRunning }
 
-    public init(storage: FocusStorageService = .shared) {
+    public init(storage: FocusStorageService = .shared, currentDateProvider: (() -> Date)? = nil) {
+        if let clock = currentDateProvider {
+            self.currentDateProvider = clock
+        }
         self.storage = storage
         loadPersistedData()
         NotificationService.shared.requestAuthorization()
@@ -471,10 +487,14 @@ public class TimerViewModel: ObservableObject {
     // MARK: - Persistence Integration (Priority 4A & 4C)
     public func loadPersistedData() {
         cancelPendingSave()
+        didRecoverInterruptedSession = false
         isLoadingPersistedData = true
         defer {
             isLoadingPersistedData = false
             recalculateFocusMetrics()
+            if didRecoverInterruptedSession && !isPersistenceBlocked {
+                persistData(force: true)
+            }
         }
 
         let result = storage.loadDetailed()
@@ -607,9 +627,24 @@ public class TimerViewModel: ObservableObject {
         self.stopwatchStartDate = nil
 
         // Task Selection Restoration
-        if let savedTaskId = saved.selectedTaskId,
-           let foundIndex = self.tasks.firstIndex(where: { $0.id == savedTaskId }),
-           !self.tasks[foundIndex].isCompleted {
+        if let recovery = saved.activeSessionRecovery, (recovery.isTimerRunning || recovery.isStopwatchRunning) {
+            let targetTaskId = recovery.isTimerRunning ? recovery.activeSessionTaskId : recovery.stopwatchTaskId
+            if let targetTaskId = targetTaskId,
+               let foundIndex = self.tasks.firstIndex(where: { $0.id == targetTaskId }),
+               !self.tasks[foundIndex].isCompleted {
+                self.activeTaskIndex = foundIndex
+            } else if let savedTaskId = saved.selectedTaskId,
+                      let foundIndex = self.tasks.firstIndex(where: { $0.id == savedTaskId }),
+                      !self.tasks[foundIndex].isCompleted {
+                self.activeTaskIndex = foundIndex
+            } else if let firstEligible = self.tasks.firstIndex(where: { !$0.isCompleted }) {
+                self.activeTaskIndex = firstEligible
+            } else {
+                self.activeTaskIndex = 0
+            }
+        } else if let savedTaskId = saved.selectedTaskId,
+                  let foundIndex = self.tasks.firstIndex(where: { $0.id == savedTaskId }),
+                  !self.tasks[foundIndex].isCompleted {
             self.activeTaskIndex = foundIndex
         } else if let paused = saved.pausedSession,
                   self.tasks.indices.contains(paused.activeTaskIndex),
@@ -621,109 +656,206 @@ public class TimerViewModel: ObservableObject {
             self.activeTaskIndex = 0
         }
 
+        if let recovery = saved.activeSessionRecovery, (recovery.isTimerRunning || recovery.isStopwatchRunning) {
+            restoreCrashRecoverySession(recovery, saved: saved)
+        } else if let paused = saved.pausedSession {
+            restorePausedTimerSession(paused, saved: saved)
+        } else {
+            restoreIdleTimerConfiguration(saved: saved)
+        }
+    }
+
+    private func restoreCrashRecoverySession(_ recovery: ActiveSessionRecoveryState, saved: FocusAppData) {
+        self.didRecoverInterruptedSession = true
+        if self.recoveryNoticeMessage == nil {
+            self.recoveryNoticeMessage = "Interrupted session restored to paused state from last checkpoint."
+        }
+        self.showRecoveryNotice = true
+
         let minDuration = TimerViewModel.minSupportedTimerDuration
         let maxDuration = TimerViewModel.maxSupportedTimerDuration
 
-        if let paused = saved.pausedSession {
-            // Highest Priority: Existing Paused Timer Session
-            self.activePreset = paused.activePreset
-            self.activeMode = paused.activeMode
-            self.isBreakSession = paused.isBreakSession
-            self.totalTime = max(minDuration, min(paused.totalTime, maxDuration))
-            self.timeRemaining = max(1, min(paused.timeRemaining, self.totalTime))
-            self.currentSession = min(max(1, paused.currentSession), max(1, self.totalSessions))
-            self.pausedSession?.activeTaskIndex = self.activeTaskIndex
-            self.pausedSession?.totalTime = self.totalTime
-            self.pausedSession?.timeRemaining = self.timeRemaining
-
-            if paused.activeMode == "Custom Timer" || paused.activePreset == "Custom" {
-                self.customDurationSeconds = self.totalTime
-                self.customMinutes = self.totalTime / 60
-                self.customSeconds = self.totalTime % 60
-                self.pausedSession?.customMinutes = self.customMinutes
-                self.pausedSession?.customSeconds = self.customSeconds
-            } else if let m = saved.configuredCustomMinutes, let s = saved.configuredCustomSeconds {
-                let safeM = max(0, min(m, 360))
-                let safeS = max(0, min(s, 59))
-                let computed = safeM * 60 + safeS
-                let safeCustom = (computed >= minDuration) ? min(computed, maxDuration) : 25 * 60
-                self.customDurationSeconds = safeCustom
-                self.customMinutes = safeCustom / 60
-                self.customSeconds = safeCustom % 60
-            } else {
-                self.customMinutes = 25
-                self.customSeconds = 0
-                self.customDurationSeconds = 25 * 60
-            }
+        if recovery.isTimerRunning {
+            self.activePreset = recovery.activePreset
+            self.activeMode = recovery.activeMode
+            self.isBreakSession = recovery.isBreakSession
+            self.totalTime = max(minDuration, min(recovery.totalTime, maxDuration))
+            self.timeRemaining = max(1, min(recovery.timeRemaining, self.totalTime))
+            self.currentSession = min(max(1, recovery.currentSession), max(1, self.totalSessions))
+            self.customMinutes = max(0, min(recovery.customMinutes, 360))
+            self.customSeconds = max(0, min(recovery.customSeconds, 59))
+            self.customDurationSeconds = max(minDuration, min(self.customMinutes * 60 + self.customSeconds, maxDuration))
 
             if self.totalTime > 0 {
                 self.preciseProgress = min(max(Double(self.timeRemaining) / Double(self.totalTime), 0.0), 1.0)
             } else {
-                self.preciseProgress = paused.preciseProgress
+                self.preciseProgress = recovery.preciseProgress
             }
-            self.pausedSession?.preciseProgress = self.preciseProgress
+
             self.isTimerRunning = false
             self.targetEndDate = nil
-            self.fractionalRemaining = nil
+            self.fractionalRemaining = recovery.fractionalRemaining
+            self.sessionSegmentStartDate = nil
+            self.segmentCreditedSeconds = 0
             self.activeSessionTaskId = nil
+            self.activeTimerSessionId = UUID()
+
+            // Finalize interrupted focus segment if credited seconds > 0
+            if !recovery.isBreakSession && recovery.segmentCreditedSeconds > 0 {
+                let credited = recovery.segmentCreditedSeconds
+                let endTime = recovery.checkpointTimestamp
+                let startTime = recovery.sessionSegmentStartDate ?? endTime.addingTimeInterval(-Double(credited))
+                let boundedEnd = max(startTime, endTime)
+
+                let isAlreadyRecorded = self.sessionRecords.contains {
+                    $0.startTime == startTime && $0.durationSeconds == credited && $0.taskId == recovery.activeSessionTaskId
+                }
+                if !isAlreadyRecorded {
+                    let record = FocusSessionRecord(
+                        startTime: startTime,
+                        endTime: boundedEnd,
+                        durationSeconds: credited,
+                        mode: recovery.activePreset,
+                        taskId: recovery.activeSessionTaskId
+                    )
+                    self.sessionRecords.append(record)
+                    recalculateFocusMetrics(now: boundedEnd)
+                }
+            }
+
+            self.pausedSession = PausedTimerSession(
+                activePreset: self.activePreset,
+                activeMode: self.activeMode,
+                isBreakSession: self.isBreakSession,
+                totalTime: self.totalTime,
+                timeRemaining: self.timeRemaining,
+                preciseProgress: self.preciseProgress,
+                customMinutes: self.customMinutes,
+                customSeconds: self.customSeconds,
+                currentSession: self.currentSession,
+                activeTaskIndex: self.activeTaskIndex
+            )
+        } else if let paused = saved.pausedSession {
+            restorePausedTimerSession(paused, saved: saved)
         } else {
-            // Top-Level Idle Configuration or Legacy Defaults
-            let savedMode = saved.activeMode ?? (saved.activePreset == "Custom" ? "Custom Timer" : "Pomodoro")
-            self.activeMode = savedMode
+            restoreIdleTimerConfiguration(saved: saved)
+        }
 
-            let isBreak: Bool
-            if let savedIsBreak = saved.configuredIsBreakSession {
-                isBreak = savedIsBreak
-            } else {
-                isBreak = (saved.activePreset == "Short Break" || saved.activePreset == "Long Break" || saved.activePreset == "Break")
-            }
-            self.isBreakSession = isBreak
+        if recovery.isStopwatchRunning {
+            self.isStopwatchRunning = false
+            self.stopwatchStartDate = nil
+            let restoredElapsed = max(0.0, recovery.stopwatchElapsedSeconds)
+            self.stopwatchFractional = restoredElapsed
+            self.stopwatchTime = max(0, Int(restoredElapsed))
+            self.preciseStopwatchProgress = (restoredElapsed.truncatingRemainder(dividingBy: 60.0)) / 60.0
+        }
+    }
 
-            let savedTotalSessions = max(1, self.totalSessions)
-            if let savedCurrent = saved.configuredCurrentSession {
-                self.currentSession = min(max(1, savedCurrent), savedTotalSessions)
-            } else {
-                self.currentSession = min(max(1, self.currentSession), savedTotalSessions)
-            }
+    private func restorePausedTimerSession(_ paused: PausedTimerSession, saved: FocusAppData) {
+        let minDuration = TimerViewModel.minSupportedTimerDuration
+        let maxDuration = TimerViewModel.maxSupportedTimerDuration
 
-            let customM = max(0, min(saved.configuredCustomMinutes ?? 25, 360))
-            let customS = max(0, min(saved.configuredCustomSeconds ?? 0, 59))
-            let computedCustom = customM * 60 + customS
-            let safeCustom = (computedCustom >= minDuration) ? min(computedCustom, maxDuration) : 25 * 60
+        self.activePreset = paused.activePreset
+        self.activeMode = paused.activeMode
+        self.isBreakSession = paused.isBreakSession
+        self.totalTime = max(minDuration, min(paused.totalTime, maxDuration))
+        self.timeRemaining = max(1, min(paused.timeRemaining, self.totalTime))
+        self.currentSession = min(max(1, paused.currentSession), max(1, self.totalSessions))
+        self.pausedSession?.activeTaskIndex = self.activeTaskIndex
+        self.pausedSession?.totalTime = self.totalTime
+        self.pausedSession?.timeRemaining = self.timeRemaining
+
+        if paused.activeMode == "Custom Timer" || paused.activePreset == "Custom" {
+            self.customDurationSeconds = self.totalTime
+            self.customMinutes = self.totalTime / 60
+            self.customSeconds = self.totalTime % 60
+            self.pausedSession?.customMinutes = self.customMinutes
+            self.pausedSession?.customSeconds = self.customSeconds
+        } else if let m = saved.configuredCustomMinutes, let s = saved.configuredCustomSeconds {
+            let safeM = max(0, min(m, 360))
+            let safeS = max(0, min(s, 59))
+            let computed = safeM * 60 + safeS
+            let safeCustom = (computed >= minDuration) ? min(computed, maxDuration) : 25 * 60
             self.customDurationSeconds = safeCustom
             self.customMinutes = safeCustom / 60
             self.customSeconds = safeCustom % 60
-
-            let resolvedTotal: Int
-            if let savedTotal = saved.configuredTotalTime, savedTotal >= minDuration {
-                resolvedTotal = min(savedTotal, maxDuration)
-            } else if let savedTotal = saved.configuredTotalTime, savedTotal > 0 {
-                resolvedTotal = minDuration
-            } else if saved.activePreset == "Short Break" || saved.activePreset == "Break" {
-                resolvedTotal = 5 * 60
-            } else if saved.activePreset == "Long Break" {
-                resolvedTotal = 15 * 60
-            } else if saved.activePreset == "Custom" || savedMode == "Custom Timer" {
-                resolvedTotal = self.customDurationSeconds
-            } else {
-                resolvedTotal = 25 * 60
-            }
-
-            self.totalTime = max(minDuration, min(resolvedTotal, maxDuration))
-            self.timeRemaining = self.totalTime
-            self.preciseProgress = 1.0
-
-            if self.activePreset == "Custom" || savedMode == "Custom Timer" {
-                self.customDurationSeconds = self.totalTime
-                self.customMinutes = self.totalTime / 60
-                self.customSeconds = self.totalTime % 60
-            }
-
-            self.isTimerRunning = false
-            self.targetEndDate = nil
-            self.fractionalRemaining = nil
-            self.activeSessionTaskId = nil
+        } else {
+            self.customMinutes = 25
+            self.customSeconds = 0
+            self.customDurationSeconds = 25 * 60
         }
+
+        if self.totalTime > 0 {
+            self.preciseProgress = min(max(Double(self.timeRemaining) / Double(self.totalTime), 0.0), 1.0)
+        } else {
+            self.preciseProgress = paused.preciseProgress
+        }
+        self.pausedSession?.preciseProgress = self.preciseProgress
+        self.isTimerRunning = false
+        self.targetEndDate = nil
+        self.fractionalRemaining = nil
+        self.activeSessionTaskId = nil
+    }
+
+    private func restoreIdleTimerConfiguration(saved: FocusAppData) {
+        let minDuration = TimerViewModel.minSupportedTimerDuration
+        let maxDuration = TimerViewModel.maxSupportedTimerDuration
+
+        let savedMode = saved.activeMode ?? (saved.activePreset == "Custom" ? "Custom Timer" : "Pomodoro")
+        self.activeMode = savedMode
+
+        let isBreak: Bool
+        if let savedIsBreak = saved.configuredIsBreakSession {
+            isBreak = savedIsBreak
+        } else {
+            isBreak = (saved.activePreset == "Short Break" || saved.activePreset == "Long Break" || saved.activePreset == "Break")
+        }
+        self.isBreakSession = isBreak
+
+        let savedTotalSessions = max(1, self.totalSessions)
+        if let savedCurrent = saved.configuredCurrentSession {
+            self.currentSession = min(max(1, savedCurrent), savedTotalSessions)
+        } else {
+            self.currentSession = min(max(1, self.currentSession), savedTotalSessions)
+        }
+
+        let customM = max(0, min(saved.configuredCustomMinutes ?? 25, 360))
+        let customS = max(0, min(saved.configuredCustomSeconds ?? 0, 59))
+        let computedCustom = customM * 60 + customS
+        let safeCustom = (computedCustom >= minDuration) ? min(computedCustom, maxDuration) : 25 * 60
+        self.customDurationSeconds = safeCustom
+        self.customMinutes = safeCustom / 60
+        self.customSeconds = safeCustom % 60
+
+        let resolvedTotal: Int
+        if let savedTotal = saved.configuredTotalTime, savedTotal >= minDuration {
+            resolvedTotal = min(savedTotal, maxDuration)
+        } else if let savedTotal = saved.configuredTotalTime, savedTotal > 0 {
+            resolvedTotal = minDuration
+        } else if saved.activePreset == "Short Break" || saved.activePreset == "Break" {
+            resolvedTotal = 5 * 60
+        } else if saved.activePreset == "Long Break" {
+            resolvedTotal = 15 * 60
+        } else if saved.activePreset == "Custom" || savedMode == "Custom Timer" {
+            resolvedTotal = self.customDurationSeconds
+        } else {
+            resolvedTotal = 25 * 60
+        }
+
+        self.totalTime = max(minDuration, min(resolvedTotal, maxDuration))
+        self.timeRemaining = self.totalTime
+        self.preciseProgress = 1.0
+
+        if self.activePreset == "Custom" || savedMode == "Custom Timer" {
+            self.customDurationSeconds = self.totalTime
+            self.customMinutes = self.totalTime / 60
+            self.customSeconds = self.totalTime % 60
+        }
+
+        self.isTimerRunning = false
+        self.targetEndDate = nil
+        self.fractionalRemaining = nil
+        self.activeSessionTaskId = nil
     }
 
     public func persistData(force: Bool = false) {
@@ -783,6 +915,42 @@ public class TimerViewModel: ObservableObject {
             currentSelectedTaskId = nil
         }
 
+        let recoveryState: ActiveSessionRecoveryState?
+        if (isTimerRunning || isStopwatchRunning) && !hasTerminated {
+            let activeSwTaskId: UUID?
+            if isStopwatchRunning && tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted {
+                activeSwTaskId = tasks[activeTaskIndex].id
+            } else {
+                activeSwTaskId = nil
+            }
+
+            recoveryState = ActiveSessionRecoveryState(
+                version: 1,
+                isTimerRunning: isTimerRunning,
+                timerSessionId: activeTimerSessionId,
+                activePreset: activePreset,
+                activeMode: activeMode,
+                isBreakSession: isBreakPreset,
+                totalTime: totalTime,
+                timeRemaining: timeRemaining,
+                fractionalRemaining: fractionalRemaining,
+                preciseProgress: preciseProgress,
+                targetEndDate: targetEndDate,
+                sessionSegmentStartDate: sessionSegmentStartDate,
+                segmentCreditedSeconds: segmentCreditedSeconds,
+                activeSessionTaskId: activeSessionTaskId,
+                currentSession: currentSession,
+                customMinutes: customMinutes,
+                customSeconds: customSeconds,
+                isStopwatchRunning: isStopwatchRunning,
+                stopwatchElapsedSeconds: currentStopwatchElapsed,
+                stopwatchTaskId: activeSwTaskId,
+                checkpointTimestamp: now
+            )
+        } else {
+            recoveryState = nil
+        }
+
         let payload = FocusAppData(
             tasks: tasks,
             focusedSeconds: todayFocusedSeconds,
@@ -807,7 +975,8 @@ public class TimerViewModel: ObservableObject {
             configuredCustomMinutes: customMinutes,
             configuredCustomSeconds: customSeconds,
             configuredCurrentSession: currentSession,
-            configuredIsBreakSession: isBreakSession
+            configuredIsBreakSession: isBreakSession,
+            activeSessionRecovery: recoveryState
         )
         do {
             try storage.save(payload)
@@ -1432,6 +1601,15 @@ public class TimerViewModel: ObservableObject {
             }
             preciseStopwatchProgress = (elapsed.truncatingRemainder(dividingBy: 60.0)) / 60.0
         }
+
+        // 3. Periodic checkpoint for crash recovery
+        if (isTimerRunning || isStopwatchRunning) && !hasTerminated {
+            let elapsed = now.timeIntervalSince(lastCheckpointTime)
+            if elapsed >= checkpointInterval || elapsed < 0 {
+                lastCheckpointTime = now
+                performSave(now: now)
+            }
+        }
     }
 
     internal func tick() {
@@ -1444,6 +1622,7 @@ public class TimerViewModel: ObservableObject {
         guard !isTimerRunning else { return }
         // Ensure only one countdown timer runs at a time
         isTimerRunning = true
+        activeTimerSessionId = UUID()
         let now = currentDateProvider()
         let remainingInterval = fractionalRemaining ?? TimeInterval(timeRemaining)
         targetEndDate = now.addingTimeInterval(remainingInterval)
@@ -1457,8 +1636,9 @@ public class TimerViewModel: ObservableObject {
             activeSessionTaskId = nil
         }
         pausedSession = nil
+        lastCheckpointTime = now
         updateMasterEngine()
-        persistData()
+        persistData(force: true)
     }
 
     private func settleAndStopRunningCountdown(at now: Date) {
@@ -1533,7 +1713,8 @@ public class TimerViewModel: ObservableObject {
         } else {
             pausedSession = nil
         }
-        persistData()
+        lastCheckpointTime = now
+        persistData(force: true)
     }
 
     public func toggleTimer() {
@@ -1584,7 +1765,9 @@ public class TimerViewModel: ObservableObject {
         stopwatchStartDate = now.addingTimeInterval(-offset)
         preciseStopwatchProgress = (offset.truncatingRemainder(dividingBy: 60.0)) / 60.0
         stopwatchFractional = nil
+        lastCheckpointTime = now
         updateMasterEngine()
+        persistData(force: true)
     }
 
     public func stopStopwatch() {
@@ -1606,8 +1789,9 @@ public class TimerViewModel: ObservableObject {
         }
         isStopwatchRunning = false
         stopwatchStartDate = nil
+        lastCheckpointTime = now
         updateMasterEngine()
-        persistData()
+        persistData(force: true)
     }
 
     public func toggleStopwatch() {
@@ -1653,14 +1837,14 @@ public class TimerViewModel: ObservableObject {
         lastRecordedLapElapsedSeconds = currentTotal
         nextLapNumber += 1
         laps.insert(newLap, at: 0)
-        persistData()
+        persistData(force: true)
     }
 
     public func removeLap(at index: Int) {
         guard !isPersistenceBlocked else { return }
         guard laps.indices.contains(index) else { return }
         laps.remove(at: index)
-        persistData()
+        persistData(force: true)
     }
 
     public var fastestLapIndex: Int? {
@@ -1749,7 +1933,7 @@ public class TimerViewModel: ObservableObject {
         if pausedSession != nil {
             pausedSession?.activeTaskIndex = activeTaskIndex
         }
-        persistData()
+        persistData(force: true)
     }
 
     public func selectTask(at index: Int) {
@@ -1790,7 +1974,7 @@ public class TimerViewModel: ObservableObject {
         if pausedSession != nil {
             pausedSession?.activeTaskIndex = index
         }
-        persistData()
+        persistData(force: true)
     }
 
     public func toggleTaskCompletion(at index: Int) {
@@ -1875,7 +2059,7 @@ public class TimerViewModel: ObservableObject {
         if pausedSession != nil {
             pausedSession?.activeTaskIndex = activeTaskIndex
         }
-        persistData()
+        persistData(force: true)
     }
 
     public func removeTask(at index: Int) {
@@ -1958,14 +2142,14 @@ public class TimerViewModel: ObservableObject {
         if pausedSession != nil {
             pausedSession?.activeTaskIndex = activeTaskIndex
         }
-        persistData()
+        persistData(force: true)
     }
 
     public func resetTaskTime(at index: Int) {
         guard !isPersistenceBlocked else { return }
         guard tasks.indices.contains(index) else { return }
         tasks[index].timeSpentSeconds = 0
-        persistData()
+        persistData(force: true)
     }
 
     public func saveNote() {
