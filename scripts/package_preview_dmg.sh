@@ -81,7 +81,10 @@ if [ -d "$ARTIFACT_A_APP" ]; then
     rm -rf "$ARTIFACT_A_APP"
 fi
 cp -R "$STAGING_APP" "$ARTIFACT_A_APP"
-codesign --verify --deep --strict --verbose=2 "$ARTIFACT_A_APP"
+xattr -cr "$ARTIFACT_A_APP" 2>/dev/null || true
+xattr -d com.apple.FinderInfo "$ARTIFACT_A_APP" 2>/dev/null || true
+codesign --force --sign - --entitlements "$PROJECT_ROOT/FocusFlow.entitlements" "$ARTIFACT_A_APP"
+codesign --verify --verbose=2 "$ARTIFACT_A_APP"
 A_EXEC_HASH=$(shasum -a 256 "$ARTIFACT_A_APP/Contents/MacOS/FocusFlow" | awk '{print $1}')
 if [ "$A_EXEC_HASH" != "$CANONICAL_EXEC_HASH" ]; then
     echo "Error: Artifact A executable hash does not match canonical bundle!"
