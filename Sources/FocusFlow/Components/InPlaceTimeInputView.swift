@@ -61,33 +61,33 @@ public struct InPlaceTimeInputView: View {
 
     public var body: some View {
         let isStageCompact = isCompact || size < 340
-        let digitFontSize = max(38, min(size * 0.20, 84))
-        let colonFontSize = max(32, min(size * 0.17, 72))
-        let minutesBoxWidth = max(86, min(size * 0.29, 142))
-        let secondsBoxWidth = max(78, min(size * 0.26, 126))
-        let boxHeight = max(52, min(size * 0.17, 78))
-        let stepperSize = max(28, min(size * 0.08, 38))
-        let stepperIconSize = max(15, min(size * 0.045, 22))
+        let digitFontSize = max(36, min(size * 0.18, 76))
+        let colonFontSize = max(30, min(size * 0.15, 66))
+        let minutesBoxWidth = max(98, min(size * 0.29, 144))
+        let secondsBoxWidth = max(98, min(size * 0.29, 144))
+        let boxHeight = max(56, min(size * 0.18, 82))
+        let stepperSize = max(30, min(size * 0.085, 40))
+        let stepperIconSize = max(16, min(size * 0.048, 24))
 
         VStack(spacing: max(10, size * 0.026)) {
-            // MARK: - 1. Interactive Digits Row
-            HStack(alignment: .center, spacing: max(6, size * 0.022)) {
-                // -5m Quick Stepper
-                Button {
-                    adjustMinutes(by: -5)
-                } label: {
-                    Image(systemName: "minus.circle.fill")
-                        .font(.system(size: stepperIconSize, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.70))
-                        .frame(width: stepperSize, height: stepperSize)
-                        .background(Color.white.opacity(0.06), in: Circle())
-                        .overlay(Circle().stroke(Color.white.opacity(0.12), lineWidth: 1))
-                }
-                .buttonStyle(.plain)
-                .help("Subtract 5 minutes")
+            // MARK: - 1. Time Display & Quick Steppers (Optically Centered)
+            VStack(spacing: max(5, size * 0.014)) {
+                HStack(alignment: .center, spacing: max(8, size * 0.022)) {
+                    // -5m Quick Stepper
+                    Button {
+                        adjustMinutes(by: -5)
+                    } label: {
+                        Image(systemName: "minus.circle.fill")
+                            .font(.system(size: stepperIconSize, weight: .semibold))
+                            .foregroundColor(activeColor.opacity(0.85))
+                            .frame(width: stepperSize, height: stepperSize)
+                            .background(Color.white.opacity(0.06), in: Circle())
+                            .overlay(Circle().stroke(activeColor.opacity(0.30), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Subtract 5 minutes")
 
-                // Minutes Input Card
-                VStack(spacing: 3) {
+                    // Minutes Input Card
                     ZStack {
                         RoundedRectangle(cornerRadius: 14)
                             .fill(Color.white.opacity(model.activeEditingField == .minutes ? 0.08 : (isMinutesHovered ? 0.06 : 0.035)))
@@ -109,6 +109,9 @@ public struct InPlaceTimeInputView: View {
                                 .multilineTextAlignment(.center)
                                 .textFieldStyle(.plain)
                                 .foregroundColor(.white)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.60)
+                                .padding(.horizontal, 4)
                                 .focused($focusedField, equals: .minutes)
                                 .onSubmit {
                                     applyCustomInput()
@@ -124,6 +127,8 @@ public struct InPlaceTimeInputView: View {
                                 .multilineTextAlignment(.center)
                                 .foregroundColor(.white)
                                 .lineLimit(1)
+                                .minimumScaleFactor(0.60)
+                                .padding(.horizontal, 4)
                         }
                     }
                     .frame(width: minutesBoxWidth, height: boxHeight)
@@ -133,20 +138,12 @@ public struct InPlaceTimeInputView: View {
                         startEditing(.minutes)
                     }
 
-                    Text("MINUTES")
-                        .font(.system(size: max(8, min(size * 0.024, 10)), weight: .bold))
-                        .tracking(1.4)
-                        .foregroundColor(model.activeEditingField == .minutes ? activeColor : .gray.opacity(0.7))
-                }
+                    // Colon Separator
+                    Text(":")
+                        .font(.system(size: colonFontSize, weight: .bold, design: .rounded))
+                        .foregroundColor(.white.opacity(0.65))
 
-                // Colon Separator
-                Text(":")
-                    .font(.system(size: colonFontSize, weight: .bold, design: .rounded))
-                    .foregroundColor(.white.opacity(0.65))
-                    .offset(y: -6)
-
-                // Seconds Input Card
-                VStack(spacing: 3) {
+                    // Seconds Input Card
                     ZStack {
                         RoundedRectangle(cornerRadius: 14)
                             .fill(Color.white.opacity(model.activeEditingField == .seconds ? 0.08 : (isSecondsHovered ? 0.06 : 0.035)))
@@ -168,6 +165,9 @@ public struct InPlaceTimeInputView: View {
                                 .multilineTextAlignment(.center)
                                 .textFieldStyle(.plain)
                                 .foregroundColor(.white)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.60)
+                                .padding(.horizontal, 4)
                                 .focused($focusedField, equals: .seconds)
                                 .onSubmit {
                                     applyCustomInput()
@@ -183,6 +183,8 @@ public struct InPlaceTimeInputView: View {
                                 .multilineTextAlignment(.center)
                                 .foregroundColor(.white)
                                 .lineLimit(1)
+                                .minimumScaleFactor(0.60)
+                                .padding(.horizontal, 4)
                         }
                     }
                     .frame(width: secondsBoxWidth, height: boxHeight)
@@ -192,25 +194,43 @@ public struct InPlaceTimeInputView: View {
                         startEditing(.seconds)
                     }
 
+                    // +5m Quick Stepper
+                    Button {
+                        adjustMinutes(by: 5)
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: stepperIconSize, weight: .semibold))
+                            .foregroundColor(activeColor.opacity(0.85))
+                            .frame(width: stepperSize, height: stepperSize)
+                            .background(Color.white.opacity(0.06), in: Circle())
+                            .overlay(Circle().stroke(activeColor.opacity(0.30), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Add 5 minutes")
+                }
+
+                // Sublabels Row (Symmetrically aligned directly beneath the cards)
+                HStack(spacing: max(8, size * 0.022)) {
+                    Color.clear.frame(width: stepperSize, height: 1)
+
+                    Text("MINUTES")
+                        .font(.system(size: max(8, min(size * 0.024, 10)), weight: .bold))
+                        .tracking(1.4)
+                        .foregroundColor(model.activeEditingField == .minutes ? activeColor : .gray.opacity(0.7))
+                        .frame(width: minutesBoxWidth)
+
+                    Text(":")
+                        .font(.system(size: colonFontSize, weight: .bold, design: .rounded))
+                        .opacity(0)
+
                     Text("SECONDS")
                         .font(.system(size: max(8, min(size * 0.024, 10)), weight: .bold))
                         .tracking(1.4)
                         .foregroundColor(model.activeEditingField == .seconds ? activeColor : .gray.opacity(0.7))
-                }
+                        .frame(width: secondsBoxWidth)
 
-                // +5m Quick Stepper
-                Button {
-                    adjustMinutes(by: 5)
-                } label: {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.system(size: stepperIconSize, weight: .semibold))
-                        .foregroundColor(activeColor)
-                        .frame(width: stepperSize, height: stepperSize)
-                        .background(Color.white.opacity(0.06), in: Circle())
-                        .overlay(Circle().stroke(activeColor.opacity(0.30), lineWidth: 1))
+                    Color.clear.frame(width: stepperSize, height: 1)
                 }
-                .buttonStyle(.plain)
-                .help("Add 5 minutes")
             }
 
             // MARK: - 2. Shortcut Inputs Bar ("Click Put Time")
@@ -243,7 +263,7 @@ public struct InPlaceTimeInputView: View {
                         Text("+15m")
                             .font(.system(size: max(10, min(size * 0.026, 12)), weight: .semibold))
                             .foregroundColor(activeColor.opacity(0.95))
-                            .padding(.horizontal, isStageCompact ? 6 : 10)
+                            .padding(.horizontal, isStageCompact ? 6 : (size < 400 ? 8 : 10))
                             .frame(height: max(26, min(size * 0.066, 32)))
                             .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
                             .overlay(RoundedRectangle(cornerRadius: 8).stroke(activeColor.opacity(0.30), lineWidth: 1))
@@ -428,7 +448,7 @@ struct ShortcutChipButton: View {
             Text("\(minutes)m")
                 .font(.system(size: max(11, min(size * 0.028, 13)), weight: isCurrent ? .bold : .medium))
                 .foregroundColor(textColor)
-                .padding(.horizontal, isStageCompact ? 8 : 12)
+                .padding(.horizontal, isStageCompact ? 6 : (size < 400 ? 8 : 12))
                 .frame(height: max(26, min(size * 0.066, 32)))
                 .background(bgColor, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(borderColor, lineWidth: 1))

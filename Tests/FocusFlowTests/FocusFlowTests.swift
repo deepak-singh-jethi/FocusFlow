@@ -3842,6 +3842,37 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertFalse(containsEditableTextInput(in: hostingView), "MenuBarCompanion initial presentation must not render any editable text input field in display mode")
     }
 
+    private func collectAllRenderedStrings(in view: NSView) -> [String] {
+        var strings: [String] = []
+        if let tf = view as? NSTextField {
+            strings.append(tf.stringValue)
+        }
+        for subview in view.subviews {
+            strings.append(contentsOf: collectAllRenderedStrings(in: subview))
+        }
+        return strings
+    }
+
+    @MainActor
+    func testCustomTimerFocus09_SecondsAndMinutesDisplayNeverTruncateAtAnySize() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.setCustomDuration(minutes: 45, seconds: 0)
+        for testSize: CGFloat in [220, 280, 340, 400, 490] {
+            let view = InPlaceTimeInputView(viewModel: vm, size: testSize)
+            let hostingView = NSHostingView(rootView: view)
+            hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+            hostingView.layoutSubtreeIfNeeded()
+
+            let renderedStrings = collectAllRenderedStrings(in: hostingView)
+            for str in renderedStrings {
+                XCTAssertFalse(str.contains("..."), "Rendered string '\(str)' must not contain ellipsis at size \(testSize)")
+                XCTAssertFalse(str.contains("…"), "Rendered string '\(str)' must not contain Unicode ellipsis at size \(testSize)")
+            }
+        }
+    }
+
     // MARK: - Stopwatch Lap Integrity Tests
 
     // 1. Record first lap at 10.5s -> Lap 1 duration = 10.5s, total = 10.5s

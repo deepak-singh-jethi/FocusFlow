@@ -398,6 +398,9 @@ public struct MenuBarCompanionView: View {
                                     .monospacedDigit()
                                     .multilineTextAlignment(.center)
                                     .foregroundColor(.white)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.65)
+                                    .padding(.horizontal, 2)
                             }
                         }
                         .frame(width: 68, height: 38)
@@ -426,6 +429,9 @@ public struct MenuBarCompanionView: View {
                                     .multilineTextAlignment(.center)
                                     .textFieldStyle(.plain)
                                     .foregroundColor(.white)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.65)
+                                    .padding(.horizontal, 2)
                                     .focused($focusedCompanionField, equals: .seconds)
                                     .onSubmit {
                                         applyCustomInput()
@@ -446,9 +452,12 @@ public struct MenuBarCompanionView: View {
                                     .monospacedDigit()
                                     .multilineTextAlignment(.center)
                                     .foregroundColor(.white)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.65)
+                                    .padding(.horizontal, 2)
                             }
                         }
-                        .frame(width: 58, height: 38)
+                        .frame(width: 68, height: 38)
                         .contentShape(RoundedRectangle(cornerRadius: 8))
                         .onTapGesture {
                             startEditing(.seconds)
