@@ -15245,4 +15245,646 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(diskAfter.completedSessions, 1, "Stale callback must not regress completed state")
         XCTAssertEqual(diskAfter.sessionRecords.count, 1)
     }
+
+    // MARK: - Task 8 Final Corrections: Red Reproduction Tests
+
+    // Red Test for Defect A: Normal tick completion writes incomplete state to disk before delayed callbacks
+    @MainActor
+    func testTask8_Red_DefectA_NormalTickCompletion() throws {
+        let uniqueID = UUID().uuidString
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t8_red_a1_\(uniqueID)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let storageURL = tempDir.appendingPathComponent("focusflow_data.json")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let t0 = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = t0
+        let storage = FocusStorageService(storageURL: storageURL)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { simulatedNow })
+        vm.autoStartNextSession = false
+
+        // Withhold coalesced save callbacks to test what was durably written synchronously
+        var pendingCallbacks: [() -> Void] = []
+        vm.saveScheduler = { _, callback in
+            pendingCallbacks.append(callback)
+            return AnyCancellable {}
+        }
+
+        vm.startTimer() // Starts 1500s Focus
+        pendingCallbacks.removeAll()
+
+        // Advance to deadline and tick
+        simulatedNow = t0.addingTimeInterval(1500)
+        vm.tick()
+
+        // Inspect disk immediately without calling persistData(force: true) or executing pending callbacks
+        guard let disk = storage.load() else {
+            XCTFail("Disk data must exist after tick completion")
+            return
+        }
+
+        // Required disk assertions immediately after tick():
+        XCTAssertEqual(disk.sessionRecords.count, 1, "One Focus record must exist")
+        XCTAssertEqual(disk.sessionRecords.first?.durationSeconds, 1500)
+        XCTAssertEqual(disk.sessionRecords.first?.endTime, t0.addingTimeInterval(1500))
+        XCTAssertEqual(disk.completedSessions, 1, "Disk completedSessions must be 1 immediately after tick()")
+        XCTAssertEqual(disk.activePreset, "Short Break", "Disk activePreset must be Short Break immediately after tick()")
+        XCTAssertNil(disk.activeSessionRecovery, "activeSessionRecovery must be nil on disk immediately after tick()")
+
+        // Simulate crash / relaunch without handleAppTermination()
+        let relaunchVM = TimerViewModel(storage: storage, currentDateProvider: { t0.addingTimeInterval(3600) })
+        XCTAssertEqual(relaunchVM.completedSessions, 1, "Relaunch must see completedSessions == 1")
+        XCTAssertEqual(relaunchVM.sessionRecords.count, 1, "Relaunch must see exactly 1 Focus record")
+        XCTAssertEqual(relaunchVM.activePreset, "Short Break", "Short Break must remain selected on relaunch")
+        XCTAssertFalse(relaunchVM.isTimerRunning, "No timer running on relaunch")
+    }
+
+    // Red Test for Defect B: Legacy expired recovery inflates task-split Focus duration
+    @MainActor
+    func testTask8_Red_DefectB_MultiSegmentRecovery() throws {
+        let uniqueID = UUID().uuidString
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t8_red_b1_\(uniqueID)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let storageURL = tempDir.appendingPathComponent("focusflow_data.json")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let t0 = Date(timeIntervalSince1970: 1770000000)
+        let taskA = FocusTask(title: "Task A", estimatedMinutes: 25, timeSpentSeconds: 600)
+        let taskB = FocusTask(title: "Task B", estimatedMinutes: 25, timeSpentSeconds: 900)
+        let storage = FocusStorageService(storageURL: storageURL)
+
+        // Historical finalized record for Task A (600s)
+        let taskARecord = FocusSessionRecord(
+            id: UUID(),
+            startTime: t0,
+            endTime: t0.addingTimeInterval(600),
+            durationSeconds: 600,
+            mode: "Focus",
+            taskId: taskA.id
+        )
+
+        // Checkpoint representing legacy expired session with Task B active for final 900s
+        let initialData = FocusAppData(
+            tasks: [taskA, taskB],
+            completedSessions: 0,
+            activePreset: "Focus",
+            sessionRecords: [taskARecord],
+            activeSessionRecovery: ActiveSessionRecoveryState(
+                version: 1,
+                isTimerRunning: true,
+                timerSessionId: UUID(),
+                activePreset: "Focus",
+                totalTime: 1500,
+                timeRemaining: 0,
+                targetEndDate: t0.addingTimeInterval(1500),
+                sessionSegmentStartDate: t0.addingTimeInterval(600),
+                segmentCreditedSeconds: 900,
+                activeSessionTaskId: taskB.id,
+                checkpointTimestamp: t0.addingTimeInterval(1500)
+            )
+        )
+        try storage.save(initialData)
+
+        // Relaunch at T0 + 3600s
+        let relaunchVM = TimerViewModel(storage: storage, currentDateProvider: { t0.addingTimeInterval(3600) })
+
+        // Task credit assertions
+        XCTAssertEqual(relaunchVM.tasks.first(where: { $0.id == taskA.id })?.timeSpentSeconds, 600, "Task A credit must remain 600s")
+        XCTAssertEqual(relaunchVM.tasks.first(where: { $0.id == taskB.id })?.timeSpentSeconds, 900, "Task B credit must be 900s")
+
+        // Session record assertions
+        XCTAssertEqual(relaunchVM.sessionRecords.count, 2, "Must have exactly 2 records: Task A (600s) + Task B (900s)")
+        let taskBRecord = relaunchVM.sessionRecords.first(where: { $0.taskId == taskB.id })
+        XCTAssertNotNil(taskBRecord)
+        XCTAssertEqual(taskBRecord?.durationSeconds, 900, "Recovered Task B record duration must be 900s, NOT inflated to 1500s")
+        XCTAssertEqual(taskBRecord?.startTime, t0.addingTimeInterval(600))
+        XCTAssertEqual(taskBRecord?.endTime, t0.addingTimeInterval(1500))
+
+        let totalFocusDuration = relaunchVM.sessionRecords.reduce(0) { $0 + $1.durationSeconds }
+        XCTAssertEqual(totalFocusDuration, 1500, "Total Focus duration must be conserved at 1500s (600s + 900s), NOT inflated to 2100s")
+        XCTAssertEqual(relaunchVM.completedSessions, 1, "Completed sessions must be 1")
+    }
+
+    // MARK: - Group A: Normal Expiry Transaction Tests
+
+    @MainActor
+    func testTask8_Final_A2_NormalTickCompletion_AutoStartOn() throws {
+        let uniqueID = UUID().uuidString
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t8_fa2_\(uniqueID)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let storageURL = tempDir.appendingPathComponent("focusflow_data.json")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let t0 = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = t0
+        let storage = FocusStorageService(storageURL: storageURL)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { simulatedNow })
+        vm.autoStartNextSession = true
+
+        var pendingCallbacks: [() -> Void] = []
+        vm.saveScheduler = { _, callback in
+            pendingCallbacks.append(callback)
+            return AnyCancellable {}
+        }
+
+        vm.startTimer()
+        pendingCallbacks.removeAll()
+
+        simulatedNow = t0.addingTimeInterval(1500)
+        vm.tick()
+
+        guard let disk = storage.load() else {
+            XCTFail("Disk data must exist after tick completion")
+            return
+        }
+
+        XCTAssertEqual(disk.sessionRecords.count, 1)
+        XCTAssertEqual(disk.sessionRecords.first?.durationSeconds, 1500)
+        XCTAssertEqual(disk.sessionRecords.first?.endTime, t0.addingTimeInterval(1500))
+        XCTAssertEqual(disk.completedSessions, 1)
+        XCTAssertEqual(disk.activePreset, "Short Break")
+        XCTAssertNotNil(disk.activeSessionRecovery)
+        XCTAssertTrue(disk.activeSessionRecovery?.isTimerRunning == true)
+        XCTAssertEqual(disk.activeSessionRecovery?.activePreset, "Short Break")
+        XCTAssertTrue(disk.activeSessionRecovery?.isBreakSession == true)
+
+        // Relaunch without normal quit
+        let relaunchVM = TimerViewModel(storage: storage, currentDateProvider: { t0.addingTimeInterval(3600) })
+        XCTAssertEqual(relaunchVM.completedSessions, 1)
+        XCTAssertEqual(relaunchVM.sessionRecords.count, 1)
+        XCTAssertEqual(relaunchVM.activePreset, "Short Break")
+        XCTAssertFalse(relaunchVM.isTimerRunning)
+        XCTAssertNotNil(relaunchVM.pausedSession)
+        XCTAssertEqual(relaunchVM.pausedSession?.timeRemaining, 300)
+    }
+
+    @MainActor
+    func testTask8_Final_A3_NormalBreakCompletion_AutoStartOff() throws {
+        let uniqueID = UUID().uuidString
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t8_fa3_\(uniqueID)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let storageURL = tempDir.appendingPathComponent("focusflow_data.json")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let t0 = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = t0
+        let storage = FocusStorageService(storageURL: storageURL)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { simulatedNow })
+        vm.autoStartNextSession = false
+        vm.applyPreset(name: "Short Break", minutes: 5)
+
+        var pendingCallbacks: [() -> Void] = []
+        vm.saveScheduler = { _, callback in
+            pendingCallbacks.append(callback)
+            return AnyCancellable {}
+        }
+
+        vm.startTimer()
+        pendingCallbacks.removeAll()
+
+        simulatedNow = t0.addingTimeInterval(300)
+        vm.tick()
+
+        guard let disk = storage.load() else {
+            XCTFail("Disk data must exist after break expiry")
+            return
+        }
+
+        XCTAssertEqual(disk.activePreset, "Focus")
+        XCTAssertEqual(disk.sessionRecords.count, 0, "No Focus record created for Break session")
+        XCTAssertEqual(disk.completedSessions, 0, "completedSessions not incremented for Break")
+        XCTAssertNil(disk.activeSessionRecovery)
+    }
+
+    @MainActor
+    func testTask8_Final_A4_NormalBreakCompletion_AutoStartOn() throws {
+        let uniqueID = UUID().uuidString
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t8_fa4_\(uniqueID)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let storageURL = tempDir.appendingPathComponent("focusflow_data.json")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let t0 = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = t0
+        let storage = FocusStorageService(storageURL: storageURL)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { simulatedNow })
+        vm.autoStartNextSession = true
+        vm.applyPreset(name: "Short Break", minutes: 5)
+
+        var pendingCallbacks: [() -> Void] = []
+        vm.saveScheduler = { _, callback in
+            pendingCallbacks.append(callback)
+            return AnyCancellable {}
+        }
+
+        vm.startTimer()
+        pendingCallbacks.removeAll()
+
+        simulatedNow = t0.addingTimeInterval(300)
+        vm.tick()
+
+        guard let disk = storage.load() else {
+            XCTFail("Disk data must exist after break expiry")
+            return
+        }
+
+        XCTAssertEqual(disk.activePreset, "Focus")
+        XCTAssertEqual(disk.completedSessions, 0)
+        XCTAssertEqual(disk.sessionRecords.count, 0)
+        XCTAssertNotNil(disk.activeSessionRecovery)
+        XCTAssertTrue(disk.activeSessionRecovery?.isTimerRunning == true)
+        XCTAssertEqual(disk.activeSessionRecovery?.activePreset, "Focus")
+        XCTAssertFalse(disk.activeSessionRecovery?.isBreakSession == true)
+
+        // Relaunch
+        let relaunchVM = TimerViewModel(storage: storage, currentDateProvider: { t0.addingTimeInterval(3600) })
+        XCTAssertEqual(relaunchVM.completedSessions, 0)
+        XCTAssertEqual(relaunchVM.activePreset, "Focus")
+        XCTAssertFalse(relaunchVM.isTimerRunning)
+        XCTAssertNotNil(relaunchVM.pausedSession)
+    }
+
+    @MainActor
+    func testTask8_Final_A5_ImmediateKillBeforePendingSave() throws {
+        let uniqueID = UUID().uuidString
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t8_fa5_\(uniqueID)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let storageURL = tempDir.appendingPathComponent("focusflow_data.json")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let t0 = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = t0
+        let storage = FocusStorageService(storageURL: storageURL)
+        var vm: TimerViewModel? = TimerViewModel(storage: storage, currentDateProvider: { simulatedNow })
+        vm?.autoStartNextSession = false
+
+        var capturedCallbacks: [() -> Void] = []
+        vm?.saveScheduler = { _, callback in
+            capturedCallbacks.append(callback)
+            return AnyCancellable {}
+        }
+
+        vm?.startTimer()
+        capturedCallbacks.removeAll()
+
+        simulatedNow = t0.addingTimeInterval(1500)
+        vm?.tick()
+
+        let diskImmediate = storage.load()!
+        XCTAssertEqual(diskImmediate.completedSessions, 1, "Completed count is durable before any delayed callback")
+        XCTAssertEqual(diskImmediate.activePreset, "Short Break")
+        XCTAssertEqual(diskImmediate.sessionRecords.count, 1)
+
+        // Kill ViewModel without calling handleAppTermination() or executing callbacks
+        vm = nil
+
+        let relaunchVM = TimerViewModel(storage: storage, currentDateProvider: { t0.addingTimeInterval(3600) })
+        XCTAssertEqual(relaunchVM.completedSessions, 1)
+        XCTAssertEqual(relaunchVM.sessionRecords.count, 1)
+        XCTAssertEqual(relaunchVM.activePreset, "Short Break")
+        XCTAssertFalse(relaunchVM.isTimerRunning)
+    }
+
+    // MARK: - Group B: Multi-Segment Recovery Tests
+
+    @MainActor
+    func testTask8_Final_B2_ThreeTaskSegments() throws {
+        let uniqueID = UUID().uuidString
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t8_fb2_\(uniqueID)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let storageURL = tempDir.appendingPathComponent("focusflow_data.json")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let t0 = Date(timeIntervalSince1970: 1770000000)
+        let taskA = FocusTask(title: "Task A", estimatedMinutes: 25, timeSpentSeconds: 300)
+        let taskB = FocusTask(title: "Task B", estimatedMinutes: 25, timeSpentSeconds: 400)
+        let taskC = FocusTask(title: "Task C", estimatedMinutes: 25, timeSpentSeconds: 800)
+        let storage = FocusStorageService(storageURL: storageURL)
+
+        let recordA = FocusSessionRecord(
+            id: UUID(),
+            startTime: t0,
+            endTime: t0.addingTimeInterval(300),
+            durationSeconds: 300,
+            mode: "Focus",
+            taskId: taskA.id
+        )
+        let recordB = FocusSessionRecord(
+            id: UUID(),
+            startTime: t0.addingTimeInterval(300),
+            endTime: t0.addingTimeInterval(700),
+            durationSeconds: 400,
+            mode: "Focus",
+            taskId: taskB.id
+        )
+
+        let initialData = FocusAppData(
+            tasks: [taskA, taskB, taskC],
+            completedSessions: 0,
+            activePreset: "Focus",
+            sessionRecords: [recordA, recordB],
+            activeSessionRecovery: ActiveSessionRecoveryState(
+                version: 1,
+                isTimerRunning: true,
+                timerSessionId: UUID(),
+                activePreset: "Focus",
+                totalTime: 1500,
+                timeRemaining: 0,
+                targetEndDate: t0.addingTimeInterval(1500),
+                sessionSegmentStartDate: t0.addingTimeInterval(700),
+                segmentCreditedSeconds: 800,
+                activeSessionTaskId: taskC.id,
+                checkpointTimestamp: t0.addingTimeInterval(1500)
+            )
+        )
+        try storage.save(initialData)
+
+        let relaunchVM = TimerViewModel(storage: storage, currentDateProvider: { t0.addingTimeInterval(3600) })
+
+        XCTAssertEqual(relaunchVM.sessionRecords.count, 3)
+        let recordC = relaunchVM.sessionRecords.first(where: { $0.taskId == taskC.id })
+        XCTAssertEqual(recordC?.durationSeconds, 800)
+        XCTAssertEqual(recordC?.startTime, t0.addingTimeInterval(700))
+        XCTAssertEqual(recordC?.endTime, t0.addingTimeInterval(1500))
+
+        let totalDuration = relaunchVM.sessionRecords.reduce(0) { $0 + $1.durationSeconds }
+        XCTAssertEqual(totalDuration, 1500, "300 + 400 + 800 == 1500")
+        XCTAssertEqual(relaunchVM.completedSessions, 1)
+    }
+
+    @MainActor
+    func testTask8_Final_B3_UnassignedFinalSegment() throws {
+        let uniqueID = UUID().uuidString
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t8_fb3_\(uniqueID)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let storageURL = tempDir.appendingPathComponent("focusflow_data.json")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let t0 = Date(timeIntervalSince1970: 1770000000)
+        let taskA = FocusTask(title: "Task A", estimatedMinutes: 25, timeSpentSeconds: 600)
+        let storage = FocusStorageService(storageURL: storageURL)
+
+        let recordA = FocusSessionRecord(
+            id: UUID(),
+            startTime: t0,
+            endTime: t0.addingTimeInterval(600),
+            durationSeconds: 600,
+            mode: "Focus",
+            taskId: taskA.id
+        )
+
+        let initialData = FocusAppData(
+            tasks: [taskA],
+            completedSessions: 0,
+            activePreset: "Focus",
+            sessionRecords: [recordA],
+            activeSessionRecovery: ActiveSessionRecoveryState(
+                version: 1,
+                isTimerRunning: true,
+                timerSessionId: UUID(),
+                activePreset: "Focus",
+                totalTime: 1500,
+                timeRemaining: 0,
+                targetEndDate: t0.addingTimeInterval(1500),
+                sessionSegmentStartDate: t0.addingTimeInterval(600),
+                segmentCreditedSeconds: 900,
+                activeSessionTaskId: nil,
+                checkpointTimestamp: t0.addingTimeInterval(1500)
+            )
+        )
+        try storage.save(initialData)
+
+        let relaunchVM = TimerViewModel(storage: storage, currentDateProvider: { t0.addingTimeInterval(3600) })
+
+        XCTAssertEqual(relaunchVM.sessionRecords.count, 2)
+        XCTAssertEqual(relaunchVM.tasks[0].timeSpentSeconds, 600, "Task A retains 600s")
+        let unassignedRecord = relaunchVM.sessionRecords.first(where: { $0.taskId == nil })
+        XCTAssertNotNil(unassignedRecord)
+        XCTAssertEqual(unassignedRecord?.durationSeconds, 900)
+        XCTAssertEqual(relaunchVM.sessionRecords.reduce(0) { $0 + $1.durationSeconds }, 1500)
+        XCTAssertEqual(relaunchVM.completedSessions, 1)
+    }
+
+    @MainActor
+    func testTask8_Final_B4_ExistingCurrentSegmentRecord() throws {
+        let uniqueID = UUID().uuidString
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t8_fb4_\(uniqueID)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let storageURL = tempDir.appendingPathComponent("focusflow_data.json")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let t0 = Date(timeIntervalSince1970: 1770000000)
+        let taskA = FocusTask(title: "Task A", estimatedMinutes: 25, timeSpentSeconds: 1500)
+        let storage = FocusStorageService(storageURL: storageURL)
+        let recoveryId = UUID()
+
+        let recordA = FocusSessionRecord(
+            id: recoveryId,
+            startTime: t0,
+            endTime: t0.addingTimeInterval(1500),
+            durationSeconds: 1500,
+            mode: "Focus",
+            taskId: taskA.id
+        )
+
+        let initialData = FocusAppData(
+            tasks: [taskA],
+            completedSessions: 1,
+            activePreset: "Focus",
+            sessionRecords: [recordA],
+            activeSessionRecovery: ActiveSessionRecoveryState(
+                version: 1,
+                isTimerRunning: true,
+                timerSessionId: recoveryId,
+                activePreset: "Focus",
+                totalTime: 1500,
+                timeRemaining: 0,
+                targetEndDate: t0.addingTimeInterval(1500),
+                sessionSegmentStartDate: t0,
+                segmentCreditedSeconds: 1500,
+                activeSessionTaskId: taskA.id,
+                checkpointTimestamp: t0.addingTimeInterval(1500)
+            )
+        )
+        try storage.save(initialData)
+
+        let relaunchVM = TimerViewModel(storage: storage, currentDateProvider: { t0.addingTimeInterval(3600) })
+
+        XCTAssertEqual(relaunchVM.sessionRecords.count, 1, "No duplicate record created when already present")
+        XCTAssertEqual(relaunchVM.sessionRecords[0].durationSeconds, 1500)
+        XCTAssertEqual(relaunchVM.completedSessions, 1, "completedSessions remains 1")
+    }
+
+    @MainActor
+    func testTask8_Final_B5_RepeatedRecoveryAfterSaveFailure() throws {
+        let uniqueID = UUID().uuidString
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t8_fb5_\(uniqueID)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let storageURL = tempDir.appendingPathComponent("focusflow_data.json")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let t0 = Date(timeIntervalSince1970: 1770000000)
+        let taskA = FocusTask(title: "Task A", estimatedMinutes: 25, timeSpentSeconds: 1500)
+        let storage = FocusStorageService(storageURL: storageURL)
+
+        let initialData = FocusAppData(
+            tasks: [taskA],
+            completedSessions: 0,
+            activePreset: "Focus",
+            sessionRecords: [],
+            activeSessionRecovery: ActiveSessionRecoveryState(
+                version: 1,
+                isTimerRunning: true,
+                timerSessionId: UUID(),
+                activePreset: "Focus",
+                totalTime: 1500,
+                timeRemaining: 0,
+                targetEndDate: t0.addingTimeInterval(1500),
+                sessionSegmentStartDate: t0,
+                segmentCreditedSeconds: 1500,
+                activeSessionTaskId: taskA.id,
+                checkpointTimestamp: t0.addingTimeInterval(1500)
+            )
+        )
+        try storage.save(initialData)
+
+        storage.simulateWriteFailure = true
+        let vm1 = TimerViewModel(storage: storage, currentDateProvider: { t0.addingTimeInterval(3600) })
+        XCTAssertTrue(vm1.isSaveFailed)
+
+        // Retry saving after disk recovers
+        storage.simulateWriteFailure = false
+        vm1.retrySave()
+        XCTAssertFalse(vm1.isSaveFailed)
+
+        // Relaunch and verify idempotency
+        let relaunchVM = TimerViewModel(storage: storage, currentDateProvider: { t0.addingTimeInterval(7200) })
+        XCTAssertEqual(relaunchVM.sessionRecords.count, 1, "Exactly one record after successful retry and relaunch")
+        XCTAssertEqual(relaunchVM.completedSessions, 1)
+        XCTAssertNil(storage.load()?.activeSessionRecovery)
+    }
+
+    // MARK: - Group C: Storage Failure & Crash Safety Tests
+
+    @MainActor
+    func testTask8_Final_C1_NormalCompletionSaveFailure() throws {
+        let uniqueID = UUID().uuidString
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t8_fc1_\(uniqueID)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let storageURL = tempDir.appendingPathComponent("focusflow_data.json")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let t0 = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = t0
+        let storage = FocusStorageService(storageURL: storageURL)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { simulatedNow })
+        vm.autoStartNextSession = false
+        vm.startTimer()
+
+        // Inject storage write failure at deadline
+        simulatedNow = t0.addingTimeInterval(1500)
+        storage.simulateWriteFailure = true
+        vm.tick()
+
+        XCTAssertEqual(vm.completedSessions, 1, "In-memory state completed")
+        XCTAssertEqual(vm.activePreset, "Short Break")
+        XCTAssertTrue(vm.isSaveFailed, "Save failure is reported")
+
+        // Remove disk failure and retry
+        storage.simulateWriteFailure = false
+        vm.retrySave()
+        XCTAssertFalse(vm.isSaveFailed)
+
+        let disk = storage.load()!
+        XCTAssertEqual(disk.completedSessions, 1)
+        XCTAssertEqual(disk.activePreset, "Short Break")
+        XCTAssertEqual(disk.sessionRecords.count, 1)
+
+        // Relaunch
+        let relaunchVM = TimerViewModel(storage: storage, currentDateProvider: { t0.addingTimeInterval(3600) })
+        XCTAssertEqual(relaunchVM.completedSessions, 1)
+        XCTAssertEqual(relaunchVM.sessionRecords.count, 1)
+    }
+
+    @MainActor
+    func testTask8_Final_C2_NormalCompletionWithAutoStartOn_SaveFailure() throws {
+        let uniqueID = UUID().uuidString
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t8_fc2_\(uniqueID)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let storageURL = tempDir.appendingPathComponent("focusflow_data.json")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let t0 = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = t0
+        let storage = FocusStorageService(storageURL: storageURL)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { simulatedNow })
+        vm.autoStartNextSession = true
+        vm.startTimer()
+
+        simulatedNow = t0.addingTimeInterval(1500)
+        storage.simulateWriteFailure = true
+        vm.tick()
+
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertEqual(vm.activePreset, "Short Break")
+        XCTAssertTrue(vm.isTimerRunning)
+        XCTAssertTrue(vm.isSaveFailed)
+
+        storage.simulateWriteFailure = false
+        vm.retrySave()
+        XCTAssertFalse(vm.isSaveFailed)
+
+        let disk = storage.load()!
+        XCTAssertEqual(disk.completedSessions, 1)
+        XCTAssertNotNil(disk.activeSessionRecovery)
+        XCTAssertEqual(disk.activeSessionRecovery?.activePreset, "Short Break")
+        XCTAssertTrue(disk.activeSessionRecovery?.isTimerRunning == true)
+
+        let relaunchVM = TimerViewModel(storage: storage, currentDateProvider: { t0.addingTimeInterval(3600) })
+        XCTAssertEqual(relaunchVM.completedSessions, 1)
+        XCTAssertEqual(relaunchVM.activePreset, "Short Break")
+        XCTAssertFalse(relaunchVM.isTimerRunning)
+    }
+
+    @MainActor
+    func testTask8_Final_C3_StaleCoalescedCallbackAfterExpiry() throws {
+        let uniqueID = UUID().uuidString
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_t8_fc3_\(uniqueID)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let storageURL = tempDir.appendingPathComponent("focusflow_data.json")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let t0 = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = t0
+        let storage = FocusStorageService(storageURL: storageURL)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { simulatedNow })
+
+        var capturedCallbacks: [() -> Void] = []
+        vm.saveScheduler = { _, callback in
+            capturedCallbacks.append(callback)
+            return AnyCancellable {}
+        }
+
+        vm.startTimer()
+        vm.totalSessions = 6 // Triggers unforced save
+        XCTAssertFalse(capturedCallbacks.isEmpty)
+
+        // Expiry tick commits completed state immediately
+        simulatedNow = t0.addingTimeInterval(1500)
+        vm.tick()
+
+        let diskBefore = storage.load()!
+        XCTAssertEqual(diskBefore.completedSessions, 1)
+        XCTAssertEqual(diskBefore.activePreset, "Short Break")
+
+        // Execute stale callback
+        for cb in capturedCallbacks {
+            cb()
+        }
+
+        let diskAfter = storage.load()!
+        XCTAssertEqual(diskAfter.completedSessions, 1, "Stale callback must not regress completed state")
+        XCTAssertEqual(diskAfter.activePreset, "Short Break")
+        XCTAssertEqual(diskAfter.sessionRecords.count, 1)
+    }
 }

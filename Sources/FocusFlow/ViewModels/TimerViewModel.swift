@@ -418,6 +418,7 @@ public class TimerViewModel: ObservableObject {
     @Published public private(set) var didRecoverInterruptedSession: Bool = false
     private var isPerformingSave: Bool = false
     private var isReconcilingActiveTimers: Bool = false
+    private var isCompletingSessionTransaction: Bool = false
     private var pendingRecoveryNoticeMessage: String? = nil
 
     public func checkpointActiveTimers(now: Date? = nil) {
@@ -794,7 +795,7 @@ public class TimerViewModel: ObservableObject {
 
                 // 1. Finalize focus record if this was a focus session
                 if !recovery.isBreakSession {
-                    let credited = min(recovery.totalTime, max(recovery.segmentCreditedSeconds, recovery.totalTime - recovery.timeRemaining))
+                    let credited = min(recovery.totalTime, recovery.segmentCreditedSeconds)
                     let rawEnd = recovery.targetEndDate ?? recovery.checkpointTimestamp
                     let boundedEnd = min(recovery.checkpointTimestamp, rawEnd)
                     let startTime = recovery.sessionSegmentStartDate ?? boundedEnd.addingTimeInterval(-Double(credited))
@@ -1053,6 +1054,7 @@ public class TimerViewModel: ObservableObject {
 
     public func persistData(force: Bool = false) {
         guard !isLoadingPersistedData else { return }
+        guard !isCompletingSessionTransaction else { return }
         guard !isPersistenceBlocked else {
             cancelPendingSave()
             print("[TimerViewModel] Persistence blocked: Storage error state active.")
@@ -1126,6 +1128,7 @@ public class TimerViewModel: ObservableObject {
 
     private func performSave(now: Date) {
         guard !isLoadingPersistedData else { return }
+        guard !isCompletingSessionTransaction else { return }
         guard !isPerformingSave else { return }
         guard !isPersistenceBlocked else {
             cancelPendingSave()
@@ -1806,6 +1809,15 @@ public class TimerViewModel: ObservableObject {
         if isTimerRunning, let target = targetEndDate {
             let remaining = target.timeIntervalSince(now)
             if remaining <= 0 {
+                isCompletingSessionTransaction = true
+                defer {
+                    isCompletingSessionTransaction = false
+                    if !isPerformingSave && !isPersistenceBlocked {
+                        cancelPendingSave()
+                        performSave(now: now)
+                    }
+                }
+
                 let uncounted = timeRemaining
                 synchronizeCountdownRemaining(to: 0)
                 preciseProgress = 0.0
@@ -2569,6 +2581,20 @@ public class TimerViewModel: ObservableObject {
     }
 
     internal func handleSessionComplete(at date: Date? = nil) {
+        let isRootTransaction = !isCompletingSessionTransaction
+        if isRootTransaction {
+            isCompletingSessionTransaction = true
+        }
+        defer {
+            if isRootTransaction {
+                isCompletingSessionTransaction = false
+                if !isPerformingSave && !isPersistenceBlocked {
+                    cancelPendingSave()
+                    performSave(now: date ?? currentDateProvider())
+                }
+            }
+        }
+
         let now = date ?? currentDateProvider()
         stopTimer(at: now)
         fractionalRemaining = nil
