@@ -10767,4 +10767,287 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(vm2.sessionRecords[0].durationSeconds, 1500)
         XCTAssertEqual(vm2.todayFocusedSeconds, 1500)
     }
+
+    // MARK: - Task 7 Final Hardening Tests (Termination, Fractional Deadline, Skip Safety)
+
+    // Finding 1: Termination with autoStartNextSession enabled and expired timer
+    @MainActor
+    func testTask7_Hardening_TerminationWithAutoStart_ExpiredFocusCompletesWithoutNewRunningTimerOrPausedBreak() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+        vm.autoStartNextSession = true
+
+        vm.startTimer()
+
+        // Advance deterministic time by 2 hours past deadline without ticks
+        simulatedNow = baseDate.addingTimeInterval(7200)
+
+        // Call handleAppTermination() directly
+        vm.handleAppTermination()
+
+        // 1. Expired Focus Session completes exactly once
+        XCTAssertEqual(vm.completedSessions, 1, "Completed sessions must be incremented exactly once")
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 1500)
+        XCTAssertEqual(vm.sessionRecords[0].endTime, baseDate.addingTimeInterval(1500))
+
+        // 2. Focus credit capped at 1500s
+        XCTAssertEqual(vm.todayFocusedSeconds, 1500)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1500)
+
+        // 3. Termination remains terminal
+        XCTAssertTrue(vm.hasTerminated, "hasTerminated must remain true")
+
+        // 4. No new running timer survives app termination
+        XCTAssertFalse(vm.isTimerRunning, "Timer must not be running after termination")
+        XCTAssertFalse(vm.isStopwatchRunning, "Stopwatch must not be running after termination")
+
+        // 5. No unintended paused Break snapshot manufactured by auto-start during termination
+        XCTAssertNil(vm.pausedSession, "pausedSession must be nil after termination")
+
+        // 6. Persistence is synchronous and safe: reload from storage verifies clean disk state
+        let reloaded = TimerViewModel(storage: vm.storage)
+        reloaded.currentDateProvider = { simulatedNow }
+        reloaded.recalculateFocusMetrics()
+
+        XCTAssertEqual(reloaded.completedSessions, 1)
+        XCTAssertFalse(reloaded.isTimerRunning)
+        XCTAssertNil(reloaded.pausedSession)
+        XCTAssertEqual(reloaded.sessionRecords.count, 1)
+        XCTAssertEqual(reloaded.sessionRecords[0].durationSeconds, 1500)
+        XCTAssertEqual(reloaded.todayFocusedSeconds, 1500)
+    }
+
+    // Finding 1 (continued): Termination called twice is idempotent
+    @MainActor
+    func testTask7_Hardening_TerminationIdempotency_SecondInvocationIsNoOp() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+        vm.autoStartNextSession = true
+
+        vm.startTimer()
+        simulatedNow = baseDate.addingTimeInterval(7200)
+
+        vm.handleAppTermination()
+
+        let recordsCountFirst = vm.sessionRecords.count
+        let completedSessionsFirst = vm.completedSessions
+        let todayFocusedFirst = vm.todayFocusedSeconds
+
+        // Second invocation
+        vm.handleAppTermination()
+
+        XCTAssertTrue(vm.hasTerminated)
+        XCTAssertEqual(vm.completedSessions, completedSessionsFirst)
+        XCTAssertEqual(vm.sessionRecords.count, recordsCountFirst)
+        XCTAssertEqual(vm.todayFocusedSeconds, todayFocusedFirst)
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertNil(vm.pausedSession)
+    }
+
+    // Finding 2: Fractional task switch at T0 + 600.3s
+    @MainActor
+    func testTask7_Hardening_FractionalTaskSwitch_600_3s_ExactDeadlineAndConservation() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        let idA = vm.tasks[0].id
+        let idB = vm.tasks[1].id
+
+        vm.startTimer()
+
+        // Switch to Task B at T0 + 600.3 seconds
+        simulatedNow = baseDate.addingTimeInterval(600.3)
+        vm.selectTask(at: 1)
+
+        // Advance to exact deadline at T0 + 1500.0s
+        simulatedNow = baseDate.addingTimeInterval(1500.0)
+        vm.tick()
+
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertEqual(vm.sessionRecords.count, 2)
+
+        let recordA = vm.sessionRecords[0]
+        let recordB = vm.sessionRecords[1]
+
+        // Record A assertions
+        XCTAssertEqual(recordA.taskId, idA)
+        XCTAssertEqual(recordA.durationSeconds, 600)
+        XCTAssertEqual(recordA.startTime, baseDate)
+        XCTAssertEqual(recordA.endTime, baseDate.addingTimeInterval(600.3))
+        XCTAssertLessThanOrEqual(recordA.startTime, recordA.endTime)
+
+        // Record B assertions
+        XCTAssertEqual(recordB.taskId, idB)
+        XCTAssertEqual(recordB.durationSeconds, 900)
+        XCTAssertEqual(recordB.startTime, baseDate.addingTimeInterval(600.3))
+        // CRITICAL INVARIANT: End time must NOT be later than original targetEndDate (baseDate + 1500.0)
+        XCTAssertEqual(recordB.endTime, baseDate.addingTimeInterval(1500.0), "Record B endTime must be exact deadline (T0 + 1500.0s), NOT T0 + 1500.3s!")
+        XCTAssertLessThanOrEqual(recordB.startTime, recordB.endTime)
+
+        // Exact conservation of durations and credits
+        XCTAssertEqual(recordA.durationSeconds + recordB.durationSeconds, 1500, "Sum of record durations must equal exactly 1500s")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 600, "Task A credit must equal 600s")
+        XCTAssertEqual(vm.tasks[1].timeSpentSeconds, 900, "Task B credit must equal 900s")
+        XCTAssertEqual(vm.todayFocusedSeconds, 1500, "Today focus total must equal 1500s")
+    }
+
+    // Finding 2 (continued): Fractional task switch at T0 + 600.8s with intermediate ticks
+    @MainActor
+    func testTask7_Hardening_FractionalTaskSwitch_600_8s_WithIntermediateTicks() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        let idA = vm.tasks[0].id
+        let idB = vm.tasks[1].id
+
+        vm.startTimer()
+
+        // Switch to Task B at T0 + 600.8 seconds
+        simulatedNow = baseDate.addingTimeInterval(600.8)
+        vm.selectTask(at: 1)
+
+        // Intermediate tick at T0 + 900.0s
+        simulatedNow = baseDate.addingTimeInterval(900.0)
+        vm.tick()
+
+        // Expire at T0 + 1500.0s
+        simulatedNow = baseDate.addingTimeInterval(1500.0)
+        vm.tick()
+
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertEqual(vm.sessionRecords.count, 2)
+
+        let recordA = vm.sessionRecords[0]
+        let recordB = vm.sessionRecords[1]
+
+        XCTAssertEqual(recordA.taskId, idA)
+        XCTAssertEqual(recordA.durationSeconds, 600)
+        XCTAssertEqual(recordB.taskId, idB)
+        XCTAssertEqual(recordB.durationSeconds, 900)
+        XCTAssertEqual(recordB.endTime, baseDate.addingTimeInterval(1500.0), "Record B endTime must be exact deadline (T0 + 1500.0s), NOT T0 + 1500.8s!")
+
+        XCTAssertEqual(recordA.durationSeconds + recordB.durationSeconds, 1500)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 600)
+        XCTAssertEqual(vm.tasks[1].timeSpentSeconds, 900)
+        XCTAssertEqual(vm.todayFocusedSeconds, 1500)
+    }
+
+    // Finding 3: Skip action after overdue Focus Timer without auto-start
+    @MainActor
+    func testTask7_Hardening_SkipAfterOverdueFocus_NoDoubleTransition() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+        vm.autoStartNextSession = false
+
+        vm.startTimer()
+
+        // Advance beyond deadline to 1600s
+        simulatedNow = baseDate.addingTimeInterval(1600)
+
+        // Invoke skipSession() directly on overdue timer
+        vm.skipSession()
+
+        // Must complete the overdue focus session exactly once
+        XCTAssertEqual(vm.completedSessions, 1, "Overdue focus session must complete once")
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 1500)
+
+        // Must transition to Short Break, NOT double-skip to next Focus session!
+        XCTAssertEqual(vm.activePreset, "Short Break", "Must be Short Break, not double-skipped to Focus!")
+        XCTAssertEqual(vm.currentSession, 2)
+        XCTAssertFalse(vm.isTimerRunning, "Short Break should be idle when autoStart is false")
+    }
+
+    // Finding 3 (continued): Skip action after overdue Focus Timer WITH auto-start
+    @MainActor
+    func testTask7_Hardening_SkipAfterOverdueFocus_WithAutoStart_NoDoubleTransition() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+        vm.autoStartNextSession = true
+
+        vm.startTimer()
+
+        simulatedNow = baseDate.addingTimeInterval(1600)
+        vm.skipSession()
+
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 1500)
+
+        // Must transition to Short Break and start it, NOT double-skip to Focus
+        XCTAssertEqual(vm.activePreset, "Short Break", "Must be Short Break, not double-skipped to Focus!")
+        XCTAssertEqual(vm.currentSession, 2)
+        XCTAssertTrue(vm.isTimerRunning, "Short Break should be auto-started when autoStart is true")
+    }
+
+    // Finding 3 (continued): Skip action after overdue Break Timer without auto-start
+    @MainActor
+    func testTask7_Hardening_SkipAfterOverdueBreak_NoDoubleTransition() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+        vm.autoStartNextSession = false
+
+        // Switch to Short Break and start it
+        vm.switchToBreak(minutes: 5)
+        vm.startTimer()
+
+        // Advance beyond 5m (300s) to 400s
+        simulatedNow = baseDate.addingTimeInterval(400)
+        vm.skipSession()
+
+        // Break completed, should transition to Focus, NOT double-skip to Short Break!
+        XCTAssertEqual(vm.activePreset, "Focus", "Must be Focus, not double-skipped to Break!")
+        XCTAssertFalse(vm.isTimerRunning, "Focus should be idle when autoStart is false")
+    }
+
+    // Finding 3 (continued): Skip action after overdue Break Timer WITH auto-start
+    @MainActor
+    func testTask7_Hardening_SkipAfterOverdueBreak_WithAutoStart_NoDoubleTransition() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+        vm.autoStartNextSession = true
+
+        vm.switchToBreak(minutes: 5)
+        vm.startTimer()
+
+        simulatedNow = baseDate.addingTimeInterval(400)
+        vm.skipSession()
+
+        // Break completed, should transition to Focus and start it, NOT double-skip to Break!
+        XCTAssertEqual(vm.activePreset, "Focus", "Must be Focus, not double-skipped to Break!")
+        XCTAssertTrue(vm.isTimerRunning, "Focus should be running when autoStart is true")
+    }
 }

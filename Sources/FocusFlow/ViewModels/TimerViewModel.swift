@@ -871,7 +871,9 @@ public class TimerViewModel: ObservableObject {
             } else {
                 effectiveEnd = effectiveNow
             }
-            activeElapsed = max(0, Int(effectiveEnd.timeIntervalSince(start)))
+            let credited = segmentCreditedSeconds
+            let elapsed = max(0, Int(effectiveEnd.timeIntervalSince(start)))
+            activeElapsed = credited > 0 ? credited : elapsed
             activeStart = start
             activeEnd = effectiveEnd
         } else {
@@ -1103,23 +1105,27 @@ public class TimerViewModel: ObservableObject {
         }
     }
 
-    private func finalizeRunningFocusSegment(at effectiveEnd: Date, for taskId: UUID?) {
+    private func finalizeRunningFocusSegment(at effectiveEnd: Date, for taskId: UUID?, duration: Int? = nil) {
         guard let start = sessionSegmentStartDate else { return }
         sessionSegmentStartDate = nil
 
-        let elapsed = max(0, Int(effectiveEnd.timeIntervalSince(start)))
+        let credited = duration ?? segmentCreditedSeconds
+        segmentCreditedSeconds = 0
+
+        let boundedEnd = max(start, effectiveEnd)
+        let elapsed = credited > 0 ? credited : max(0, Int(boundedEnd.timeIntervalSince(start)))
         guard elapsed > 0 else { return }
 
         if isFocusPreset {
             let record = FocusSessionRecord(
                 startTime: start,
-                endTime: effectiveEnd,
+                endTime: boundedEnd,
                 durationSeconds: elapsed,
                 mode: activePreset,
                 taskId: taskId
             )
             sessionRecords.append(record)
-            recalculateFocusMetrics(now: effectiveEnd)
+            recalculateFocusMetrics(now: boundedEnd)
         }
     }
 
@@ -1131,7 +1137,11 @@ public class TimerViewModel: ObservableObject {
 
         let effectiveEnd: Date
         if let explicit = date {
-            effectiveEnd = explicit
+            if isFocusPreset, let target = targetEndDate, target >= start {
+                effectiveEnd = min(explicit, target)
+            } else {
+                effectiveEnd = explicit
+            }
         } else if isFocusPreset, let target = targetEndDate, target >= start, now > target {
             effectiveEnd = target
         } else {
@@ -1370,19 +1380,16 @@ public class TimerViewModel: ObservableObject {
                 }
 
                 let effectiveCompletionDate: Date
-                if let start = sessionSegmentStartDate {
-                    if let target = targetEndDate, target >= start {
-                        let nominalEnd = start.addingTimeInterval(TimeInterval(segmentCreditedSeconds))
-                        if abs(nominalEnd.timeIntervalSince(target)) <= 1.0 {
-                            effectiveCompletionDate = nominalEnd
-                        } else {
-                            effectiveCompletionDate = min(nominalEnd, target)
-                        }
+                if let target = targetEndDate {
+                    if let start = sessionSegmentStartDate, target < start {
+                        effectiveCompletionDate = start
                     } else {
-                        effectiveCompletionDate = start.addingTimeInterval(TimeInterval(segmentCreditedSeconds))
+                        effectiveCompletionDate = target
                     }
+                } else if let start = sessionSegmentStartDate {
+                    effectiveCompletionDate = start.addingTimeInterval(TimeInterval(segmentCreditedSeconds))
                 } else {
-                    effectiveCompletionDate = target
+                    effectiveCompletionDate = now
                 }
 
                 recordActiveSessionSegment(at: effectiveCompletionDate)
@@ -1430,9 +1437,8 @@ public class TimerViewModel: ObservableObject {
 
     // MARK: Focus Timer Core Controls
     public func startTimer() {
-        guard !isPersistenceBlocked else { return }
+        guard !isPersistenceBlocked, !hasTerminated else { return }
         guard !isTimerRunning else { return }
-        hasTerminated = false
         // Ensure only one countdown timer runs at a time
         isTimerRunning = true
         let now = currentDateProvider()
@@ -1545,9 +1551,8 @@ public class TimerViewModel: ObservableObject {
 
     // MARK: Stopwatch Core Controls (Priority 5)
     public func startStopwatch() {
-        guard !isPersistenceBlocked else { return }
+        guard !isPersistenceBlocked, !hasTerminated else { return }
         guard !isStopwatchRunning else { return }
-        hasTerminated = false
         isStopwatchRunning = true
         let now = currentDateProvider()
         let offset = stopwatchFractional ?? TimeInterval(stopwatchTime)
@@ -2038,11 +2043,12 @@ public class TimerViewModel: ObservableObject {
     }
 
     public func skipSession() {
-        guard !isPersistenceBlocked else { return }
+        guard !isPersistenceBlocked, !hasTerminated else { return }
         let now = currentDateProvider()
-        if !reconcileIfExpired(at: now) {
-            recordActiveSessionSegment()
+        if reconcileIfExpired(at: now) {
+            return
         }
+        recordActiveSessionSegment()
         stopTimer()
         fractionalRemaining = nil
         pausedSession = nil
@@ -2057,7 +2063,7 @@ public class TimerViewModel: ObservableObject {
 
             applyPresetDirectly(name: "Focus", minutes: 25, mode: "Pomodoro", isBreak: false)
             persistData()
-            if autoStartNextSession {
+            if autoStartNextSession && !hasTerminated {
                 startTimer()
             }
         } else {
@@ -2072,7 +2078,7 @@ public class TimerViewModel: ObservableObject {
 
             applyPresetDirectly(name: nextBreakPreset, minutes: nextBreakMinutes, mode: "Pomodoro", isBreak: true)
             persistData()
-            if autoStartNextSession {
+            if autoStartNextSession && !hasTerminated {
                 startTimer()
             }
         }
@@ -2113,7 +2119,7 @@ public class TimerViewModel: ObservableObject {
 
             applyPresetDirectly(name: nextBreakPreset, minutes: nextBreakMinutes, mode: "Pomodoro", isBreak: true)
             persistData()
-            if autoStartNextSession {
+            if autoStartNextSession && !hasTerminated {
                 startTimer()
             }
             return
@@ -2128,7 +2134,7 @@ public class TimerViewModel: ObservableObject {
 
             applyPresetDirectly(name: "Focus", minutes: 25, mode: "Pomodoro", isBreak: false)
             persistData()
-            if autoStartNextSession {
+            if autoStartNextSession && !hasTerminated {
                 startTimer()
             }
         }
