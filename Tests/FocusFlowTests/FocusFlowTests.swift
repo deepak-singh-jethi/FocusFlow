@@ -9280,4 +9280,932 @@ final class FocusFlowTests: XCTestCase {
         let saved = try vm.storage.decodeData(from: tempURL)
         XCTAssertEqual(saved.totalSessions, 11)
     }
+
+    // MARK: - Task 7 Regression Tests (Sleep/Wake Engine & Accuracy)
+    // MARK: Group A — Focus Timer Sleep/Wake (Tests 1–9)
+
+    // Test 1: Wake before deadline: correct remaining seconds
+    @MainActor
+    func testTask7_GroupA_Test01_WakeBeforeDeadline_CorrectRemainingSeconds() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+        XCTAssertTrue(vm.isTimerRunning)
+        XCTAssertEqual(vm.timeRemaining, 1500)
+
+        // Sleep for 10 minutes (600s), waking with 900s remaining before deadline
+        simulatedNow = baseDate.addingTimeInterval(600)
+        vm.handleDateOrLifecycleChange()
+
+        XCTAssertTrue(vm.isTimerRunning)
+        XCTAssertEqual(vm.timeRemaining, 900)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 600)
+    }
+
+    // Test 2: Wake exactly at deadline: complete once
+    @MainActor
+    func testTask7_GroupA_Test02_WakeExactlyAtDeadline_CompleteOnce() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+        XCTAssertTrue(vm.isTimerRunning)
+
+        // Wake exactly at 1500s deadline
+        simulatedNow = baseDate.addingTimeInterval(1500)
+        vm.handleDateOrLifecycleChange()
+
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 1500)
+    }
+
+    // Test 3: Wake two hours after a 25-minute session began: record exactly 1,500 seconds
+    @MainActor
+    func testTask7_GroupA_Test03_WakeTwoHoursAfterSessionBegan_RecordExactly1500s() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+        XCTAssertTrue(vm.isTimerRunning)
+
+        // Sleep 2 hours (7200s)
+        simulatedNow = baseDate.addingTimeInterval(7200)
+        vm.handleDateOrLifecycleChange()
+
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+
+        let record = try XCTUnwrap(vm.sessionRecords.first)
+        XCTAssertEqual(record.durationSeconds, 1500, "Focus duration must be strictly capped at 1500s")
+        XCTAssertEqual(record.startTime, baseDate)
+        XCTAssertEqual(record.endTime, baseDate.addingTimeInterval(1500), "Session end must match planned deadline, not wake time")
+        XCTAssertEqual(vm.todayFocusedSeconds, 1500, "Today analytics must receive exactly 1500s")
+    }
+
+    // Test 4: Very long sleep: no time beyond deadline added
+    @MainActor
+    func testTask7_GroupA_Test04_VeryLongSleep_NoTimeBeyondDeadlineAdded() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+
+        // 3 days sleep (259,200s)
+        simulatedNow = baseDate.addingTimeInterval(259200)
+        vm.handleDateOrLifecycleChange()
+
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        let record = try XCTUnwrap(vm.sessionRecords.first)
+        XCTAssertEqual(record.durationSeconds, 1500)
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 1500)
+    }
+
+    // Test 5: Wake with five seconds remaining before sleep: credit only those five remaining seconds
+    @MainActor
+    func testTask7_GroupA_Test05_WakeWithFiveSecondsRemaining_CreditOnlyFiveRemainingSeconds() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+        // Run 1495 seconds, leaving 5 seconds
+        simulatedNow = baseDate.addingTimeInterval(1495)
+        vm.reconcileActiveTimers()
+        XCTAssertEqual(vm.timeRemaining, 5)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1495)
+
+        // Mac sleeps 1 hour, expiring those 5 seconds during sleep
+        simulatedNow = baseDate.addingTimeInterval(1495 + 3600)
+        vm.handleDateOrLifecycleChange()
+
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertTrue(vm.isBreakPreset)
+        XCTAssertEqual(vm.timeRemaining, 300)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1500, "Task must receive only the 5 remaining seconds, not 3600s sleep")
+    }
+
+    // Test 6: Paused Focus Timer during sleep: remaining state unchanged
+    @MainActor
+    func testTask7_GroupA_Test06_PausedFocusTimerDuringSleep_RemainingStateUnchanged() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+        simulatedNow = baseDate.addingTimeInterval(600)
+        vm.reconcileActiveTimers()
+        vm.stopTimer()
+
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertEqual(vm.timeRemaining, 900)
+        XCTAssertNotNil(vm.pausedSession)
+
+        // 3 hours sleep while paused
+        simulatedNow = baseDate.addingTimeInterval(600 + 10800)
+        vm.handleDateOrLifecycleChange()
+
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertEqual(vm.timeRemaining, 900)
+        XCTAssertEqual(vm.pausedSession?.timeRemaining, 900)
+    }
+
+    // Test 7: Wake immediately followed by tick: no duplicate completion
+    @MainActor
+    func testTask7_GroupA_Test07_WakeImmediatelyFollowedByTick_NoDuplicateCompletion() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+        simulatedNow = baseDate.addingTimeInterval(7200)
+
+        // Wake event
+        vm.handleDateOrLifecycleChange()
+        // Immediate first post-wake tick
+        vm.reconcileActiveTimers()
+
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+    }
+
+    // Test 8: Tick before wake notification: no duplicate completion
+    @MainActor
+    func testTask7_GroupA_Test08_TickBeforeWakeNotification_NoDuplicateCompletion() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+        simulatedNow = baseDate.addingTimeInterval(7200)
+
+        // Master tick fires first
+        vm.reconcileActiveTimers()
+        // Wake notification arrives later
+        vm.handleDateOrLifecycleChange()
+
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+    }
+
+    // Test 9: Multiple wake notifications: idempotent reconciliation
+    @MainActor
+    func testTask7_GroupA_Test09_MultipleWakeNotifications_IdempotentReconciliation() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+        simulatedNow = baseDate.addingTimeInterval(7200)
+
+        for _ in 0..<5 {
+            vm.handleDateOrLifecycleChange()
+        }
+
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1500)
+    }
+
+    // MARK: Group B — Deadline and Manual Adjustments (Tests 10–15)
+
+    // Test 10: Expiration does not mutate the captured original deadline before it is used
+    @MainActor
+    func testTask7_GroupB_Test10_ExpirationDoesNotMutateCapturedDeadlineBeforeUse() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+        let expectedDeadline = baseDate.addingTimeInterval(1500)
+        XCTAssertEqual(vm.targetEndDate, expectedDeadline)
+
+        simulatedNow = baseDate.addingTimeInterval(5000)
+        vm.reconcileActiveTimers()
+
+        let record = try XCTUnwrap(vm.sessionRecords.first)
+        XCTAssertEqual(record.endTime, expectedDeadline, "Expired session record endTime must match the original target deadline")
+    }
+
+    // Test 11: Internal countdown synchronization preserves deadline
+    @MainActor
+    func testTask7_GroupB_Test11_InternalCountdownSync_PreservesDeadline() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        vm.currentDateProvider = { baseDate }
+
+        vm.startTimer()
+        let originalTarget = vm.targetEndDate
+
+        // Internal synchronization must not shift targetEndDate
+        vm.synchronizeCountdownRemaining(to: 1200)
+        XCTAssertEqual(vm.targetEndDate, originalTarget, "Internal sync must not mutate targetEndDate")
+    }
+
+    // Test 12: Explicit supported user duration change continues working
+    @MainActor
+    func testTask7_GroupB_Test12_ExplicitSupportedUserDurationChange_ContinuesWorking() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.applyPresetDirectly(name: "Custom", minutes: 30, seconds: 0, mode: "Custom Timer", isBreak: false)
+        XCTAssertEqual(vm.totalTime, 1800)
+        XCTAssertEqual(vm.timeRemaining, 1800)
+        XCTAssertEqual(vm.customMinutes, 30)
+    }
+
+    // Test 13: Pause and resume preserve accurate remaining time
+    @MainActor
+    func testTask7_GroupB_Test13_PauseAndResume_PreservesAccurateRemainingTime() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+        simulatedNow = baseDate.addingTimeInterval(300)
+        vm.reconcileActiveTimers()
+        vm.stopTimer()
+
+        XCTAssertEqual(vm.timeRemaining, 1200)
+
+        // Advance clock by 10 minutes while paused
+        simulatedNow = simulatedNow.addingTimeInterval(600)
+        vm.startTimer()
+
+        XCTAssertTrue(vm.isTimerRunning)
+        XCTAssertEqual(vm.timeRemaining, 1200)
+        XCTAssertEqual(vm.targetEndDate, simulatedNow.addingTimeInterval(1200))
+    }
+
+    // Test 14: Custom Timer expiration behaves correctly
+    @MainActor
+    func testTask7_GroupB_Test14_CustomTimerExpiration_BehavesCorrectly() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.applyPresetDirectly(name: "Custom", minutes: 10, seconds: 0, mode: "Custom Timer", isBreak: false)
+        vm.startTimer()
+        XCTAssertEqual(vm.totalTime, 600)
+
+        simulatedNow = baseDate.addingTimeInterval(3600)
+        vm.handleDateOrLifecycleChange()
+
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertEqual(vm.completedSessions, 1)
+        let record = try XCTUnwrap(vm.sessionRecords.first)
+        XCTAssertEqual(record.durationSeconds, 600)
+    }
+
+    // Test 15: Short Break and Long Break completion behave correctly
+    @MainActor
+    func testTask7_GroupB_Test15_ShortBreakAndLongBreakCompletion_BehaveCorrectly() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.switchToBreak(minutes: 5)
+        vm.startTimer()
+        XCTAssertTrue(vm.isBreakPreset)
+
+        simulatedNow = baseDate.addingTimeInterval(1800)
+        vm.handleDateOrLifecycleChange()
+
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertEqual(vm.sessionRecords.count, 0, "Break sessions must never create FocusSessionRecords")
+        XCTAssertEqual(vm.activePreset, "Focus", "Must automatically transition back to Focus mode")
+    }
+
+    // MARK: Group C — Focus Records and Task Attribution (Tests 16–22)
+
+    // Test 16: Session-record duration matches valid Focus time
+    @MainActor
+    func testTask7_GroupC_Test16_SessionRecordDuration_MatchesValidFocusTime() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+        simulatedNow = baseDate.addingTimeInterval(3600)
+        vm.handleDateOrLifecycleChange()
+
+        let record = try XCTUnwrap(vm.sessionRecords.first)
+        XCTAssertEqual(record.durationSeconds, 1500)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1500)
+        XCTAssertEqual(record.durationSeconds, vm.tasks[0].timeSpentSeconds)
+    }
+
+    // Test 17: Sleep crossing midnight allocates time to correct calendar days
+    @MainActor
+    func testTask7_GroupC_Test17_SleepCrossingMidnight_AllocatesTimeToCorrectCalendarDays() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let day1Start = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 23, minute: 50, second: 0))!
+        var simulatedNow = day1Start
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+        let plannedDeadline = day1Start.addingTimeInterval(1500) // 2026-10-21 00:15:00 UTC
+
+        // Mac sleeps from 23:55 to 02:00 on Day 2
+        simulatedNow = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 2, minute: 0, second: 0))!
+        vm.handleDateOrLifecycleChange()
+
+        let record = try XCTUnwrap(vm.sessionRecords.first)
+        XCTAssertEqual(record.durationSeconds, 1500)
+        XCTAssertEqual(record.startTime, day1Start)
+        XCTAssertEqual(record.endTime, plannedDeadline)
+
+        // Day 1 (Oct 20) receives 600s (23:50–00:00)
+        let day1Allocated = record.duration(on: day1Start, calendar: calendar)
+        XCTAssertEqual(day1Allocated, 600)
+
+        // Day 2 (Oct 21) receives 900s (00:00–00:15)
+        let day2Date = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 1, minute: 0, second: 0))!
+        let day2Allocated = record.duration(on: day2Date, calendar: calendar)
+        XCTAssertEqual(day2Allocated, 900)
+
+        // Sleep time between 00:15 and 02:00 received zero focus time
+        XCTAssertEqual(day1Allocated + day2Allocated, 1500)
+    }
+
+    // Test 18: Sleep spanning multiple calendar days never extends records beyond deadline
+    @MainActor
+    func testTask7_GroupC_Test18_SleepSpanningMultipleCalendarDays_NeverExtendsRecordsBeyondDeadline() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let fridayNight = calendar.date(from: DateComponents(year: 2026, month: 10, day: 23, hour: 23, minute: 50, second: 0))!
+        var simulatedNow = fridayNight
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+        let saturdayDeadline = fridayNight.addingTimeInterval(1500) // Saturday 00:15 UTC
+
+        // Mac sleeps over the weekend until Monday morning 09:00 UTC
+        simulatedNow = calendar.date(from: DateComponents(year: 2026, month: 10, day: 26, hour: 9, minute: 0, second: 0))!
+        vm.handleDateOrLifecycleChange()
+
+        let record = try XCTUnwrap(vm.sessionRecords.first)
+        XCTAssertEqual(record.durationSeconds, 1500)
+        XCTAssertEqual(record.endTime, saturdayDeadline)
+
+        let sundayDate = calendar.date(from: DateComponents(year: 2026, month: 10, day: 25, hour: 12, minute: 0, second: 0))!
+        let sundayAllocated = record.duration(on: sundayDate, calendar: calendar)
+        XCTAssertEqual(sundayAllocated, 0, "Sunday must receive 0 seconds")
+
+        let mondayDate = calendar.date(from: DateComponents(year: 2026, month: 10, day: 26, hour: 8, minute: 0, second: 0))!
+        let mondayAllocated = record.duration(on: mondayDate, calendar: calendar)
+        XCTAssertEqual(mondayAllocated, 0, "Monday must receive 0 seconds")
+    }
+
+    // Test 19: Task A to Task B segments conserve total duration
+    @MainActor
+    func testTask7_GroupC_Test19_TaskAToTaskBSegments_ConserveTotalDuration() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        let idA = vm.tasks[0].id
+        let idB = vm.tasks[1].id
+
+        vm.startTimer()
+        // Work 600s on A
+        simulatedNow = baseDate.addingTimeInterval(600)
+        vm.selectTask(at: 1) // Switch to B
+
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 600)
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords[0].taskId, idA)
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 600)
+
+        // Work remaining 900s on B across a 2-hour sleep
+        simulatedNow = baseDate.addingTimeInterval(7200)
+        vm.handleDateOrLifecycleChange()
+
+        XCTAssertEqual(vm.tasks[1].timeSpentSeconds, 900)
+        XCTAssertEqual(vm.sessionRecords.count, 2)
+        XCTAssertEqual(vm.sessionRecords[1].taskId, idB)
+        XCTAssertEqual(vm.sessionRecords[1].durationSeconds, 900)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds + vm.tasks[1].timeSpentSeconds, 1500)
+    }
+
+    // Test 20: Deleting or completing a task near expiry does not assign old time to another task
+    @MainActor
+    func testTask7_GroupC_Test20_DeletingOrCompletingTaskNearExpiry_DoesNotAssignOldTimeToAnotherTask() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+        // Run 1490s on Task A (10s remaining)
+        simulatedNow = baseDate.addingTimeInterval(1490)
+        vm.reconcileActiveTimers()
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1490)
+
+        // Complete Task A -> auto advances to Task B
+        vm.toggleTaskCompletion(at: 0)
+        XCTAssertTrue(vm.tasks[0].isCompleted)
+        XCTAssertEqual(vm.activeTaskIndex, 1)
+
+        // Sleep 1 hour, expiring the final 10s
+        simulatedNow = baseDate.addingTimeInterval(1490 + 3600)
+        vm.handleDateOrLifecycleChange()
+
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1490, "Task A must retain its 1490s")
+        XCTAssertEqual(vm.tasks[1].timeSpentSeconds, 10, "Task B must only receive the final 10s, never Task A's time")
+    }
+
+    // Test 21: Running timer without an assigned task still records unassigned Focus Time correctly
+    @MainActor
+    func testTask7_GroupC_Test21_RunningTimerWithoutAssignedTask_RecordsUnassignedFocusTimeCorrectly() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        // Complete all tasks so no task is active
+        for i in 0..<vm.tasks.count {
+            vm.tasks[i].isCompleted = true
+        }
+
+        vm.startTimer()
+        XCTAssertNil(vm.activeSessionTaskId)
+
+        simulatedNow = baseDate.addingTimeInterval(7200)
+        vm.handleDateOrLifecycleChange()
+
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        let record = try XCTUnwrap(vm.sessionRecords.first)
+        XCTAssertNil(record.taskId, "Unassigned focus session must have nil taskId")
+        XCTAssertEqual(record.durationSeconds, 1500)
+        XCTAssertEqual(vm.todayFocusedSeconds, 1500)
+    }
+
+    // Test 22: Simultaneous Focus Timer and Stopwatch retain their existing attribution semantics
+    @MainActor
+    func testTask7_GroupC_Test22_SimultaneousFocusTimerAndStopwatch_RetainAttributionSemantics() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+        vm.startStopwatch()
+
+        // 1 hour sleep (3600s)
+        simulatedNow = baseDate.addingTimeInterval(3600)
+        vm.handleDateOrLifecycleChange()
+
+        // Focus Timer expired at 1500s -> todayFocusedSeconds is 1500
+        XCTAssertEqual(vm.todayFocusedSeconds, 1500)
+        XCTAssertFalse(vm.isTimerRunning)
+
+        // Stopwatch is still running, has accumulated 3600s
+        XCTAssertTrue(vm.isStopwatchRunning)
+        XCTAssertEqual(vm.stopwatchTime, 3600)
+    }
+
+    // MARK: Group D — Stopwatch (Tests 23–27)
+
+    // Test 23: Stopwatch advances across sleep
+    @MainActor
+    func testTask7_GroupD_Test23_StopwatchAdvancesAcrossSleep() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startStopwatch()
+        XCTAssertTrue(vm.isStopwatchRunning)
+
+        simulatedNow = baseDate.addingTimeInterval(7200)
+        vm.handleDateOrLifecycleChange()
+
+        XCTAssertTrue(vm.isStopwatchRunning)
+        XCTAssertEqual(vm.stopwatchTime, 7200)
+    }
+
+    // Test 24: Paused Stopwatch remains unchanged
+    @MainActor
+    func testTask7_GroupD_Test24_PausedStopwatch_RemainsUnchanged() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startStopwatch()
+        simulatedNow = baseDate.addingTimeInterval(45)
+        vm.reconcileActiveTimers()
+        vm.stopStopwatch()
+
+        XCTAssertFalse(vm.isStopwatchRunning)
+        XCTAssertEqual(vm.stopwatchTime, 45)
+
+        // 2 hours pass while paused
+        simulatedNow = baseDate.addingTimeInterval(45 + 7200)
+        vm.handleDateOrLifecycleChange()
+
+        XCTAssertFalse(vm.isStopwatchRunning)
+        XCTAssertEqual(vm.stopwatchTime, 45)
+    }
+
+    // Test 25: Lap recorded after wake has correct fractional split
+    @MainActor
+    func testTask7_GroupD_Test25_LapRecordedAfterWake_HasCorrectFractionalSplit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startStopwatch()
+        simulatedNow = baseDate.addingTimeInterval(10)
+        vm.recordLap() // Lap 1: 10s
+
+        XCTAssertEqual(vm.laps.count, 1)
+        XCTAssertEqual(Int(vm.laps[0].lapDuration), 10)
+
+        // Sleep 50s
+        simulatedNow = baseDate.addingTimeInterval(60)
+        vm.handleDateOrLifecycleChange()
+        vm.recordLap() // Lap 2: 50s
+
+        XCTAssertEqual(vm.laps.count, 2)
+        XCTAssertEqual(Int(vm.laps[0].lapDuration), 50)
+        XCTAssertEqual(Int(vm.laps[0].totalTime), 60)
+    }
+
+    // Test 26: Wake plus tick does not duplicate task credit
+    @MainActor
+    func testTask7_GroupD_Test26_WakePlusTick_DoesNotDuplicateTaskCredit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startStopwatch()
+        simulatedNow = baseDate.addingTimeInterval(100)
+
+        // Wake notification
+        vm.handleDateOrLifecycleChange()
+        // Immediate tick
+        vm.reconcileActiveTimers()
+
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 100, "Wake followed by tick must not duplicate task credit")
+    }
+
+    // Test 27: Stopwatch running across midnight remains excluded from Focus Timer analytics
+    @MainActor
+    func testTask7_GroupD_Test27_StopwatchRunningAcrossMidnight_ExcludedFromFocusAnalytics() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let day1Start = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 23, minute: 50, second: 0))!
+        var simulatedNow = day1Start
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startStopwatch()
+
+        // 30 minutes pass across midnight to 00:20 on Day 2
+        simulatedNow = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 0, minute: 20, second: 0))!
+        vm.handleDateOrLifecycleChange()
+
+        XCTAssertEqual(vm.stopwatchTime, 1800)
+        XCTAssertEqual(vm.todayFocusedSeconds, 0, "Stopwatch activity must remain excluded from Focus Timer analytics")
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 0)
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 0)
+    }
+
+    // MARK: Group E — App Lifecycle & Persistence (Tests 28–35)
+
+    // Test 28: App becomes active after timer expiry
+    @MainActor
+    func testTask7_GroupE_Test28_AppBecomesActiveAfterExpiry() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+        XCTAssertTrue(vm.isTimerRunning)
+
+        // Expire while inactive
+        simulatedNow = baseDate.addingTimeInterval(3600)
+        vm.handleDateOrLifecycleChange()
+
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 1500)
+    }
+
+    // Test 29: Auto-start enabled: only one next session begins at wake, not a backlog of sessions
+    @MainActor
+    func testTask7_GroupE_Test29_AutoStartEnabled_OnlyOneNextSessionBeginsAtWake() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.autoStartNextSession = true
+        vm.startTimer()
+
+        // 4 hours sleep
+        simulatedNow = baseDate.addingTimeInterval(14400)
+        vm.handleDateOrLifecycleChange()
+
+        // Exactly one completed session record
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.completedSessions, 1)
+
+        // Only one next session (Short Break) begins at wake time
+        XCTAssertTrue(vm.isTimerRunning)
+        XCTAssertTrue(vm.isBreakPreset)
+        XCTAssertEqual(vm.timeRemaining, 300)
+        XCTAssertEqual(vm.targetEndDate, simulatedNow.addingTimeInterval(300))
+    }
+
+    // Test 30: Auto-start disabled: no new timer starts
+    @MainActor
+    func testTask7_GroupE_Test30_AutoStartDisabled_NoNewTimerStarts() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.autoStartNextSession = false
+        vm.startTimer()
+
+        simulatedNow = baseDate.addingTimeInterval(7200)
+        vm.handleDateOrLifecycleChange()
+
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertEqual(vm.completedSessions, 1)
+    }
+
+    // Test 31: Quit/Reopen following reconciliation restores correct records
+    @MainActor
+    func testTask7_GroupE_Test31_QuitAndReopenFollowingReconciliation_RestoresCorrectRecords() throws {
+        let (vm1, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm1.currentDateProvider = { simulatedNow }
+
+        vm1.startTimer()
+        simulatedNow = baseDate.addingTimeInterval(7200)
+        vm1.handleDateOrLifecycleChange()
+        vm1.persistData(force: true)
+
+        // Simulate relaunch: create second ViewModel with the same storage
+        let vm2 = TimerViewModel(storage: vm1.storage)
+        vm2.currentDateProvider = { simulatedNow }
+        vm2.recalculateFocusMetrics()
+        XCTAssertEqual(vm2.completedSessions, 1)
+        XCTAssertEqual(vm2.sessionRecords.count, 1)
+        XCTAssertEqual(vm2.sessionRecords[0].durationSeconds, 1500)
+        XCTAssertEqual(vm2.todayFocusedSeconds, 1500)
+        XCTAssertEqual(vm2.lifetimeFocusedSeconds, 1500)
+        XCTAssertFalse(vm2.isTimerRunning)
+    }
+
+    // Test 32: Successful persistence coalescing remains intact
+    @MainActor
+    func testTask7_GroupE_Test32_SuccessfulPersistenceCoalescing_RemainsIntact() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.persistData(force: true)
+        let initialSaves = vm.storage.saveAttemptCount
+
+        for i in 1...20 {
+            vm.totalSessions = i
+        }
+        XCTAssertTrue(vm.hasPendingSave)
+        XCTAssertEqual(vm.pendingSaveScheduledCount, 1)
+
+        // Force save flushes and invalidates pending save
+        vm.persistData(force: true)
+        XCTAssertFalse(vm.hasPendingSave)
+        XCTAssertEqual(vm.storage.saveAttemptCount, initialSaves + 1)
+    }
+
+    // Test 33: Corrupted storage blocks mutations safely
+    @MainActor
+    func testTask7_GroupE_Test33_CorruptedStorage_BlocksMutationsSafely() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Corrupt file
+        try "corrupted invalid json".write(to: tempURL, atomically: true, encoding: .utf8)
+        vm.loadPersistedData()
+
+        XCTAssertTrue(vm.isPersistenceBlocked)
+
+        // Wake reconciliation while persistence is blocked must suspend active timers safely
+        vm.handleDateOrLifecycleChange()
+        XCTAssertFalse(vm.isTimerRunning)
+    }
+
+    // Test 34: Temporary save errors remain visible and retryable
+    @MainActor
+    func testTask7_GroupE_Test34_TemporarySaveErrors_RemainVisibleAndRetryable() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.storage.simulateWriteFailure = true
+        vm.persistData(force: true)
+
+        XCTAssertTrue(vm.isSaveFailed)
+        XCTAssertNotNil(vm.saveErrorMessage)
+
+        // Clear simulation and retry
+        vm.storage.simulateWriteFailure = false
+        vm.retrySave()
+
+        XCTAssertFalse(vm.isSaveFailed)
+        XCTAssertNil(vm.saveErrorMessage)
+    }
+
+    // Test 35: Normal fullscreen/window closing does not affect running timer accuracy
+    @MainActor
+    func testTask7_GroupE_Test35_NormalWindowClose_DoesNotAffectRunningTimerAccuracy() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+        let initialDeadline = vm.targetEndDate
+
+        // Advance 200 seconds while window is hidden
+        simulatedNow = baseDate.addingTimeInterval(200)
+        vm.reconcileActiveTimers()
+
+        XCTAssertEqual(vm.timeRemaining, 1300)
+        XCTAssertEqual(vm.targetEndDate, initialDeadline)
+    }
+
+    // MARK: Group F — Clock-Change Boundary Investigation (Tests 36–38)
+
+    // Test 36: System clock jumps forward: completes safely without overflow
+    @MainActor
+    func testTask7_GroupF_Test36_SystemClockJumpsForward_CompletesSafelyWithoutOverflow() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+
+        // Clock suddenly jumps forward 10 hours
+        simulatedNow = baseDate.addingTimeInterval(36000)
+        vm.handleDateOrLifecycleChange()
+
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertEqual(vm.completedSessions, 1)
+        let record = try XCTUnwrap(vm.sessionRecords.first)
+        XCTAssertEqual(record.durationSeconds, 1500)
+        XCTAssertEqual(record.endTime, baseDate.addingTimeInterval(1500))
+    }
+
+    // Test 37: System clock jumps backward: maintains monotonic safety
+    @MainActor
+    func testTask7_GroupF_Test37_SystemClockJumpsBackward_MaintainsMonotonicSafety() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+        let originalTarget = vm.targetEndDate
+
+        // Clock jumps backwards 1 hour
+        simulatedNow = baseDate.addingTimeInterval(-3600)
+        vm.handleDateOrLifecycleChange()
+
+        // Must not crash, deadline remains valid, no negative records
+        XCTAssertTrue(vm.isTimerRunning)
+        XCTAssertEqual(vm.targetEndDate, originalTarget)
+        XCTAssertEqual(vm.sessionRecords.count, 0)
+    }
+
+    // Test 38: Time-zone changes while session is running: maintains accurate metrics
+    @MainActor
+    func testTask7_GroupF_Test38_TimeZoneChangesWhileSessionRunning_MaintainsAccurateMetrics() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let day1 = utcCalendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 12, minute: 0, second: 0))!
+        var simulatedNow = day1
+        vm.currentDateProvider = { simulatedNow }
+        vm.reportingCalendar = utcCalendar
+
+        vm.startTimer()
+        simulatedNow = day1.addingTimeInterval(500)
+        vm.reconcileActiveTimers()
+
+        // System time-zone change occurs
+        vm.handleSystemTimeZoneChange(newCalendar: utcCalendar)
+
+        XCTAssertTrue(vm.isTimerRunning)
+        XCTAssertEqual(vm.timeRemaining, 1000)
+        XCTAssertEqual(vm.todayFocusedSeconds, 500)
+    }
 }

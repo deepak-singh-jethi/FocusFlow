@@ -9,12 +9,25 @@ public class TimerViewModel: ObservableObject {
     public static let minSupportedTimerDuration: Int = 5
     public static let maxSupportedTimerDuration: Int = 360 * 60 + 59 // 21,659 seconds (360m 59s)
 
+    /// Flag indicating whether timeRemaining is being synchronized internally by countdown tick or wake reconciliation.
+    /// When true, timeRemaining.didSet does not shift or overwrite targetEndDate.
+    private var isInternalTimerSync: Bool = false
+
+    /// Synchronizes remaining countdown time from active countdown/deadline without shifting the deadline.
+    internal func synchronizeCountdownRemaining(to newRemaining: Int) {
+        isInternalTimerSync = true
+        timeRemaining = newRemaining
+        isInternalTimerSync = false
+    }
+
     @Published public var timeRemaining: Int = 25 * 60 {
         didSet {
+            guard !isInternalTimerSync else { return }
             if isTimerRunning, let target = targetEndDate {
-                let currentSecs = Int(ceil(target.timeIntervalSinceNow))
+                let now = currentDateProvider()
+                let currentSecs = Int(ceil(target.timeIntervalSince(now)))
                 if abs(currentSecs - timeRemaining) > 1 {
-                    targetEndDate = Date().addingTimeInterval(TimeInterval(timeRemaining))
+                    targetEndDate = now.addingTimeInterval(TimeInterval(timeRemaining))
                     fractionalRemaining = nil
                 }
             }
@@ -748,7 +761,7 @@ public class TimerViewModel: ObservableObject {
 
         let currentStopwatchElapsed: TimeInterval
         if isStopwatchRunning, let start = stopwatchStartDate {
-            currentStopwatchElapsed = max(0.0, Date().timeIntervalSince(start))
+            currentStopwatchElapsed = max(0.0, now.timeIntervalSince(start))
         } else if let frac = stopwatchFractional {
             currentStopwatchElapsed = max(0.0, frac)
         } else {
@@ -842,12 +855,21 @@ public class TimerViewModel: ObservableObject {
 
         let activeElapsed: Int
         let activeStart: Date?
+        let activeEnd: Date
         if isTimerRunning, isFocusPreset, let start = sessionSegmentStartDate {
-            activeElapsed = max(0, Int(effectiveNow.timeIntervalSince(start)))
+            let effectiveEnd: Date
+            if let target = targetEndDate, target >= start, effectiveNow > target {
+                effectiveEnd = target
+            } else {
+                effectiveEnd = effectiveNow
+            }
+            activeElapsed = max(0, Int(effectiveEnd.timeIntervalSince(start)))
             activeStart = start
+            activeEnd = effectiveEnd
         } else {
             activeElapsed = 0
             activeStart = nil
+            activeEnd = effectiveNow
         }
 
         let startOfToday = cal.startOfDay(for: effectiveNow)
@@ -861,7 +883,7 @@ public class TimerViewModel: ObservableObject {
         if activeElapsed > 0, let start = activeStart {
             activeToday = FocusIntervalAllocator.allocatedDuration(
                 recordStart: start,
-                recordEnd: effectiveNow,
+                recordEnd: activeEnd,
                 durationSeconds: activeElapsed,
                 intervalStart: startOfToday,
                 intervalEnd: effectiveTodayEnd
@@ -881,7 +903,7 @@ public class TimerViewModel: ObservableObject {
         if activeElapsed > 0, let start = activeStart {
             activeWeekly = FocusIntervalAllocator.allocatedDuration(
                 recordStart: start,
-                recordEnd: effectiveNow,
+                recordEnd: activeEnd,
                 durationSeconds: activeElapsed,
                 intervalStart: sevenDaysAgo,
                 intervalEnd: effectiveWeeklyEnd
@@ -903,6 +925,7 @@ public class TimerViewModel: ObservableObject {
     // MARK: - Date Change & Midnight Lifecycle Monitoring
     public func handleDateOrLifecycleChange(now: Date? = nil) {
         let effectiveNow = now ?? currentDateProvider()
+        reconcileActiveTimers(at: effectiveNow)
         recalculateFocusMetrics(now: effectiveNow)
         scheduleNextMidnightRefresh(now: effectiveNow)
     }
@@ -913,6 +936,7 @@ public class TimerViewModel: ObservableObject {
         }
         timeZoneChangeHandledCount += 1
         let effectiveNow = now ?? currentDateProvider()
+        reconcileActiveTimers(at: effectiveNow)
         recalculateFocusMetrics(now: effectiveNow)
         scheduleNextMidnightRefresh(now: effectiveNow)
     }
@@ -1037,7 +1061,7 @@ public class TimerViewModel: ObservableObject {
             if remaining <= 0 {
                 preciseProgress = 0.0
                 let uncounted = timeRemaining
-                timeRemaining = 0
+                synchronizeCountdownRemaining(to: 0)
                 if isFocusPreset && uncounted > 0 {
                     creditTaskTime(taskId: taskId, seconds: uncounted)
                 }
@@ -1047,7 +1071,7 @@ public class TimerViewModel: ObservableObject {
                     let delta = timeRemaining - newRemaining
                     creditTaskTime(taskId: taskId, seconds: delta)
                 }
-                timeRemaining = newRemaining
+                synchronizeCountdownRemaining(to: newRemaining)
                 if totalTime > 0 {
                     preciseProgress = min(max(remaining / Double(totalTime), 0.0), 1.0)
                 }
@@ -1069,31 +1093,42 @@ public class TimerViewModel: ObservableObject {
         }
     }
 
-    private func finalizeRunningFocusSegment(at now: Date, for taskId: UUID?) {
+    private func finalizeRunningFocusSegment(at effectiveEnd: Date, for taskId: UUID?) {
         guard let start = sessionSegmentStartDate else { return }
         sessionSegmentStartDate = nil
-        let elapsed = max(0, Int(now.timeIntervalSince(start)))
+
+        let elapsed = max(0, Int(effectiveEnd.timeIntervalSince(start)))
         guard elapsed > 0 else { return }
 
         if isFocusPreset {
             let record = FocusSessionRecord(
                 startTime: start,
-                endTime: now,
+                endTime: effectiveEnd,
                 durationSeconds: elapsed,
                 mode: activePreset,
                 taskId: taskId
             )
             sessionRecords.append(record)
-            recalculateFocusMetrics(now: now)
+            recalculateFocusMetrics(now: effectiveEnd)
         }
     }
 
-    private func recordActiveSessionSegment() {
+    private func recordActiveSessionSegment(at date: Date? = nil) {
         guard sessionSegmentStartDate != nil else { return }
-        let now = Date()
+        let now = date ?? currentDateProvider()
         let recordingTaskId = activeSessionTaskId
         activeSessionTaskId = nil
-        finalizeRunningFocusSegment(at: now, for: recordingTaskId)
+
+        let effectiveEnd: Date
+        if date != nil {
+            effectiveEnd = now
+        } else if let target = targetEndDate, target >= (sessionSegmentStartDate ?? target), now > target {
+            effectiveEnd = target
+        } else {
+            effectiveEnd = now
+        }
+
+        finalizeRunningFocusSegment(at: effectiveEnd, for: recordingTaskId)
         persistData()
     }
 
@@ -1288,33 +1323,47 @@ public class TimerViewModel: ObservableObject {
         }
     }
 
-    internal func tick() {
+    /// Reconciles running Focus Timer and Stopwatch against the current wall-clock deadline.
+    /// Safe and idempotent across sleep/wake, application activation, and high-frequency master ticks.
+    public func reconcileActiveTimers(at date: Date? = nil) {
         guard !isPersistenceBlocked else {
             suspendActiveTimersForBlockedStorage()
             return
         }
-        let now = Date()
+        let now = date ?? currentDateProvider()
 
-        // 1. Tick Focus Timer smoothly if running
+        // 1. Reconcile running Focus / Break countdown timer
         if isTimerRunning, let target = targetEndDate {
-            let remaining = target.timeIntervalSinceNow
+            let remaining = target.timeIntervalSince(now)
             if remaining <= 0 {
-                preciseProgress = 0.0
                 let uncounted = timeRemaining
-                timeRemaining = 0
+                synchronizeCountdownRemaining(to: 0)
+                preciseProgress = 0.0
+
                 if isFocusPreset && uncounted > 0 {
                     creditTaskTime(taskId: activeSessionTaskId, seconds: uncounted)
                 }
-                recordActiveSessionSegment()
+
+                let effectiveCompletionDate: Date
+                if let start = sessionSegmentStartDate, uncounted > 0 {
+                    let nominalEnd = start.addingTimeInterval(TimeInterval(uncounted))
+                    effectiveCompletionDate = min(now, nominalEnd)
+                } else if target >= (sessionSegmentStartDate ?? target) && now > target {
+                    effectiveCompletionDate = target
+                } else {
+                    effectiveCompletionDate = now
+                }
+
+                recordActiveSessionSegment(at: effectiveCompletionDate)
                 handleSessionComplete()
             } else {
                 if totalTime > 0 {
                     preciseProgress = min(max(remaining / Double(totalTime), 0.0), 1.0)
                 }
-                let newTime = Int(ceil(remaining))
+                let newTime = max(Int(ceil(remaining)), 0)
                 if timeRemaining != newTime {
                     let delta = timeRemaining - newTime
-                    timeRemaining = newTime
+                    synchronizeCountdownRemaining(to: newTime)
                     if isFocusPreset && delta > 0 {
                         creditTaskTime(taskId: activeSessionTaskId, seconds: delta)
                     }
@@ -1323,7 +1372,7 @@ public class TimerViewModel: ObservableObject {
             }
         }
 
-        // 2. Tick Stopwatch smoothly if running
+        // 2. Reconcile running Stopwatch
         if isStopwatchRunning, let start = stopwatchStartDate {
             let elapsed = now.timeIntervalSince(start)
             let newTime = max(Int(elapsed), 0)
@@ -1339,6 +1388,10 @@ public class TimerViewModel: ObservableObject {
         }
     }
 
+    internal func tick() {
+        reconcileActiveTimers(at: currentDateProvider())
+    }
+
     // MARK: Focus Timer Core Controls
     public func startTimer() {
         guard !isPersistenceBlocked else { return }
@@ -1346,11 +1399,12 @@ public class TimerViewModel: ObservableObject {
         hasTerminated = false
         // Ensure only one countdown timer runs at a time
         isTimerRunning = true
+        let now = currentDateProvider()
         let remainingInterval = fractionalRemaining ?? TimeInterval(timeRemaining)
-        targetEndDate = Date().addingTimeInterval(remainingInterval)
+        targetEndDate = now.addingTimeInterval(remainingInterval)
         preciseProgress = totalTime > 0 ? min(max(remainingInterval / Double(totalTime), 0.0), 1.0) : 1.0
         fractionalRemaining = nil
-        sessionSegmentStartDate = Date()
+        sessionSegmentStartDate = now
         if tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted {
             activeSessionTaskId = tasks[activeTaskIndex].id
         } else {
@@ -1363,26 +1417,27 @@ public class TimerViewModel: ObservableObject {
 
     public func stopTimer() {
         guard !isPersistenceBlocked else { return }
+        let now = currentDateProvider()
         var capturedRemaining = timeRemaining
         var capturedProgress = preciseProgress
         let wasRunning = isTimerRunning
 
         if isTimerRunning, let target = targetEndDate {
-            let remaining = max(0, target.timeIntervalSinceNow)
+            let remaining = max(0, target.timeIntervalSince(now))
             fractionalRemaining = remaining
             let newRemaining = max(Int(ceil(remaining)), 0)
             if isFocusPreset, newRemaining < timeRemaining {
                 let delta = timeRemaining - newRemaining
                 creditTaskTime(taskId: activeSessionTaskId, seconds: delta)
             }
-            timeRemaining = newRemaining
+            synchronizeCountdownRemaining(to: newRemaining)
             capturedRemaining = newRemaining
             if totalTime > 0 {
                 preciseProgress = min(max(remaining / Double(totalTime), 0.0), 1.0)
                 capturedProgress = preciseProgress
             }
         }
-        recordActiveSessionSegment()
+        recordActiveSessionSegment(at: now)
         isTimerRunning = false
         targetEndDate = nil
         updateMasterEngine()
@@ -1441,8 +1496,9 @@ public class TimerViewModel: ObservableObject {
         guard !isStopwatchRunning else { return }
         hasTerminated = false
         isStopwatchRunning = true
+        let now = currentDateProvider()
         let offset = stopwatchFractional ?? TimeInterval(stopwatchTime)
-        stopwatchStartDate = Date().addingTimeInterval(-offset)
+        stopwatchStartDate = now.addingTimeInterval(-offset)
         preciseStopwatchProgress = (offset.truncatingRemainder(dividingBy: 60.0)) / 60.0
         stopwatchFractional = nil
         updateMasterEngine()
@@ -1450,8 +1506,9 @@ public class TimerViewModel: ObservableObject {
 
     public func stopStopwatch() {
         guard !isPersistenceBlocked else { return }
+        let now = currentDateProvider()
         if isStopwatchRunning, let start = stopwatchStartDate {
-            let elapsed = Date().timeIntervalSince(start)
+            let elapsed = now.timeIntervalSince(start)
             let newTime = max(Int(elapsed), 0)
             if newTime > stopwatchTime {
                 let delta = newTime - stopwatchTime
@@ -1493,9 +1550,10 @@ public class TimerViewModel: ObservableObject {
 
     public func recordLap() {
         guard !isPersistenceBlocked else { return }
+        let now = currentDateProvider()
         let currentTotal: TimeInterval
         if isStopwatchRunning, let start = stopwatchStartDate {
-            currentTotal = max(0, Date().timeIntervalSince(start))
+            currentTotal = max(0, now.timeIntervalSince(start))
         } else {
             currentTotal = max(0, stopwatchFractional ?? TimeInterval(stopwatchTime))
         }
@@ -1507,7 +1565,7 @@ public class TimerViewModel: ObservableObject {
             lapNumber: lapNum,
             lapDuration: lapDuration,
             totalTime: currentTotal,
-            timestamp: Date()
+            timestamp: now
         )
         lastRecordedLapElapsedSeconds = currentTotal
         nextLapNumber += 1
@@ -1580,7 +1638,7 @@ public class TimerViewModel: ObservableObject {
         let newTask = FocusTask(title: title, estimatedMinutes: expectedMinutes, icon: "checkmark.circle", iconColor: .cyan)
         let shouldBecomeActive = tasks.isEmpty || !tasks.indices.contains(activeTaskIndex) || tasks[activeTaskIndex].isCompleted
 
-        let now = Date()
+        let now = currentDateProvider()
         if shouldBecomeActive {
             let oldTaskId = (isTimerRunning && isFocusPreset) ? activeSessionTaskId : (isStopwatchRunning && tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted ? tasks[activeTaskIndex].id : nil)
 
@@ -1620,7 +1678,7 @@ public class TimerViewModel: ObservableObject {
             return
         }
 
-        let now = Date()
+        let now = currentDateProvider()
         let oldTaskId = currentActiveId
 
         // 1. Settle pending elapsed time under the old task
@@ -1658,7 +1716,7 @@ public class TimerViewModel: ObservableObject {
             let isCompletingActive = (activeTaskIndex == index)
 
             if isCompletingActive {
-                let now = Date()
+                let now = currentDateProvider()
                 let oldTaskId = targetTask.id
 
                 // 1. Settle pending elapsed time under the old task before marking complete
@@ -1694,7 +1752,7 @@ public class TimerViewModel: ObservableObject {
             let shouldBecomeActive = (!tasks.indices.contains(activeTaskIndex) || tasks[activeTaskIndex].isCompleted || activeTaskIndex == index)
 
             if shouldBecomeActive {
-                let now = Date()
+                let now = currentDateProvider()
                 let oldTaskId = isRunningFocus ? activeSessionTaskId : (isStopwatchRunning && tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted ? tasks[activeTaskIndex].id : nil)
 
                 // 1. Settle pending elapsed time under old identity (nil if unassigned)
@@ -1735,7 +1793,7 @@ public class TimerViewModel: ObservableObject {
             (!isRunningFocus && isStopwatchRunning && activeTaskIndex == index && !deletingTask.isCompleted)
 
         if isDeletingAssigned {
-            let now = Date()
+            let now = currentDateProvider()
             let oldTaskId = deletingTask.id
 
             // 1. Settle pending elapsed time under the deleting task
