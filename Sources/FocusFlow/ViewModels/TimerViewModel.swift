@@ -29,6 +29,9 @@ public class TimerViewModel: ObservableObject {
                 if abs(currentSecs - timeRemaining) > 1 {
                     targetEndDate = now.addingTimeInterval(TimeInterval(timeRemaining))
                     fractionalRemaining = nil
+                    if totalTime > 0 {
+                        preciseProgress = min(max(Double(timeRemaining) / Double(totalTime), 0.0), 1.0)
+                    }
                 }
             }
         }
@@ -119,6 +122,7 @@ public class TimerViewModel: ObservableObject {
 
     // Wall-clock segment tracking (prevents duplicate counting on pause/resume/tick)
     internal var sessionSegmentStartDate: Date?
+    internal var segmentCreditedSeconds: Int = 0
 
     // MARK: Stopwatch States (Priority 5)
     @Published public var stopwatchTime: Int = 0
@@ -443,6 +447,9 @@ public class TimerViewModel: ObservableObject {
         cancelPendingSave()
         guard !isPersistenceBlocked else { return }
 
+        let now = currentDateProvider()
+        reconcileIfExpired(at: now)
+
         if isTimerRunning {
             stopTimer()
         } else {
@@ -549,6 +556,7 @@ public class TimerViewModel: ObservableObject {
         self.pendingTimerRequest = nil
         self.conflictOrigin = nil
         self.activeSessionTaskId = nil
+        self.segmentCreditedSeconds = 0
     }
 
     private func applyLoadedData(_ saved: FocusAppData) {
@@ -1064,12 +1072,14 @@ public class TimerViewModel: ObservableObject {
                 synchronizeCountdownRemaining(to: 0)
                 if isFocusPreset && uncounted > 0 {
                     creditTaskTime(taskId: taskId, seconds: uncounted)
+                    segmentCreditedSeconds += uncounted
                 }
             } else {
                 let newRemaining = max(Int(ceil(remaining)), 0)
                 if isFocusPreset && newRemaining < timeRemaining {
                     let delta = timeRemaining - newRemaining
                     creditTaskTime(taskId: taskId, seconds: delta)
+                    segmentCreditedSeconds += delta
                 }
                 synchronizeCountdownRemaining(to: newRemaining)
                 if totalTime > 0 {
@@ -1114,15 +1124,15 @@ public class TimerViewModel: ObservableObject {
     }
 
     private func recordActiveSessionSegment(at date: Date? = nil) {
-        guard sessionSegmentStartDate != nil else { return }
+        guard let start = sessionSegmentStartDate else { return }
         let now = date ?? currentDateProvider()
         let recordingTaskId = activeSessionTaskId
         activeSessionTaskId = nil
 
         let effectiveEnd: Date
-        if date != nil {
-            effectiveEnd = now
-        } else if let target = targetEndDate, target >= (sessionSegmentStartDate ?? target), now > target {
+        if let explicit = date {
+            effectiveEnd = explicit
+        } else if isFocusPreset, let target = targetEndDate, target >= start, now > target {
             effectiveEnd = target
         } else {
             effectiveEnd = now
@@ -1152,6 +1162,8 @@ public class TimerViewModel: ObservableObject {
         origin: ConflictPresentationOrigin = .mainWindow
     ) {
         guard !isPersistenceBlocked else { return }
+        let now = currentDateProvider()
+        reconcileIfExpired(at: now)
         let isSame = (activePreset == name && activeMode == mode && totalTime == (minutes * 60 + seconds))
         if isSame { return }
 
@@ -1303,6 +1315,7 @@ public class TimerViewModel: ObservableObject {
         stopwatchStartDate = nil
         sessionSegmentStartDate = nil
         activeSessionTaskId = nil
+        segmentCreditedSeconds = 0
         timerSubscription?.cancel()
         timerSubscription = nil
     }
@@ -1321,6 +1334,17 @@ public class TimerViewModel: ObservableObject {
             timerSubscription?.cancel()
             timerSubscription = nil
         }
+    }
+
+    /// Reconciles an active countdown timer if it has reached or exceeded its deadline.
+    /// Returns true if expiration reconciliation was performed.
+    @discardableResult
+    internal func reconcileIfExpired(at now: Date) -> Bool {
+        if isTimerRunning, let target = targetEndDate, now >= target {
+            reconcileActiveTimers(at: now)
+            return true
+        }
+        return false
     }
 
     /// Reconciles running Focus Timer and Stopwatch against the current wall-clock deadline.
@@ -1342,19 +1366,30 @@ public class TimerViewModel: ObservableObject {
 
                 if isFocusPreset && uncounted > 0 {
                     creditTaskTime(taskId: activeSessionTaskId, seconds: uncounted)
+                    segmentCreditedSeconds += uncounted
                 }
 
                 let effectiveCompletionDate: Date
-                if let start = sessionSegmentStartDate, uncounted > 0 {
-                    let nominalEnd = start.addingTimeInterval(TimeInterval(uncounted))
-                    effectiveCompletionDate = min(now, nominalEnd)
-                } else if target >= (sessionSegmentStartDate ?? target) && now > target {
-                    effectiveCompletionDate = target
+                if let start = sessionSegmentStartDate {
+                    if let target = targetEndDate, target >= start {
+                        let nominalEnd = start.addingTimeInterval(TimeInterval(segmentCreditedSeconds))
+                        if abs(nominalEnd.timeIntervalSince(target)) <= 1.0 {
+                            effectiveCompletionDate = nominalEnd
+                        } else {
+                            effectiveCompletionDate = min(nominalEnd, target)
+                        }
+                    } else {
+                        effectiveCompletionDate = start.addingTimeInterval(TimeInterval(segmentCreditedSeconds))
+                    }
                 } else {
-                    effectiveCompletionDate = now
+                    effectiveCompletionDate = target
                 }
 
                 recordActiveSessionSegment(at: effectiveCompletionDate)
+                isTimerRunning = false
+                targetEndDate = nil
+                fractionalRemaining = nil
+                updateMasterEngine()
                 handleSessionComplete()
             } else {
                 if totalTime > 0 {
@@ -1366,6 +1401,7 @@ public class TimerViewModel: ObservableObject {
                     synchronizeCountdownRemaining(to: newTime)
                     if isFocusPreset && delta > 0 {
                         creditTaskTime(taskId: activeSessionTaskId, seconds: delta)
+                        segmentCreditedSeconds += delta
                     }
                     recalculateFocusMetrics(now: now)
                 }
@@ -1405,6 +1441,7 @@ public class TimerViewModel: ObservableObject {
         preciseProgress = totalTime > 0 ? min(max(remainingInterval / Double(totalTime), 0.0), 1.0) : 1.0
         fractionalRemaining = nil
         sessionSegmentStartDate = now
+        segmentCreditedSeconds = 0
         if tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted {
             activeSessionTaskId = tasks[activeTaskIndex].id
         } else {
@@ -1418,6 +1455,14 @@ public class TimerViewModel: ObservableObject {
     public func stopTimer() {
         guard !isPersistenceBlocked else { return }
         let now = currentDateProvider()
+
+        if reconcileIfExpired(at: now) {
+            if isTimerRunning {
+                stopTimer()
+            }
+            return
+        }
+
         var capturedRemaining = timeRemaining
         var capturedProgress = preciseProgress
         let wasRunning = isTimerRunning
@@ -1429,6 +1474,7 @@ public class TimerViewModel: ObservableObject {
             if isFocusPreset, newRemaining < timeRemaining {
                 let delta = timeRemaining - newRemaining
                 creditTaskTime(taskId: activeSessionTaskId, seconds: delta)
+                segmentCreditedSeconds += delta
             }
             synchronizeCountdownRemaining(to: newRemaining)
             capturedRemaining = newRemaining
@@ -1462,6 +1508,10 @@ public class TimerViewModel: ObservableObject {
 
     public func toggleTimer() {
         guard !isPersistenceBlocked else { return }
+        let now = currentDateProvider()
+        if reconcileIfExpired(at: now) {
+            return
+        }
         if isTimerRunning {
             stopTimer()
         } else {
@@ -1476,7 +1526,10 @@ public class TimerViewModel: ObservableObject {
 
     public func resetFocusTimer() {
         guard !isPersistenceBlocked else { return }
-        recordActiveSessionSegment()
+        let now = currentDateProvider()
+        if !reconcileIfExpired(at: now) {
+            recordActiveSessionSegment()
+        }
         stopTimer()
         fractionalRemaining = nil
         timeRemaining = totalTime
@@ -1635,10 +1688,12 @@ public class TimerViewModel: ObservableObject {
 
     public func addTask(title: String = "New Task", expectedMinutes: Int = 25) {
         guard !isPersistenceBlocked else { return }
+        let now = currentDateProvider()
+        reconcileIfExpired(at: now)
+
         let newTask = FocusTask(title: title, estimatedMinutes: expectedMinutes, icon: "checkmark.circle", iconColor: .cyan)
         let shouldBecomeActive = tasks.isEmpty || !tasks.indices.contains(activeTaskIndex) || tasks[activeTaskIndex].isCompleted
 
-        let now = currentDateProvider()
         if shouldBecomeActive {
             let oldTaskId = (isTimerRunning && isFocusPreset) ? activeSessionTaskId : (isStopwatchRunning && tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted ? tasks[activeTaskIndex].id : nil)
 
@@ -1655,6 +1710,7 @@ public class TimerViewModel: ObservableObject {
 
             if isTimerRunning && isFocusPreset {
                 sessionSegmentStartDate = now
+                segmentCreditedSeconds = 0
                 activeSessionTaskId = newTask.id
             } else {
                 activeSessionTaskId = newTask.id
@@ -1670,6 +1726,9 @@ public class TimerViewModel: ObservableObject {
         guard !isPersistenceBlocked else { return }
         guard tasks.indices.contains(index), !tasks[index].isCompleted else { return }
 
+        let now = currentDateProvider()
+        reconcileIfExpired(at: now)
+
         let targetTask = tasks[index]
         let currentActiveId = (isTimerRunning && isFocusPreset) ? activeSessionTaskId : (isStopwatchRunning && tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted ? tasks[activeTaskIndex].id : nil)
 
@@ -1678,7 +1737,6 @@ public class TimerViewModel: ObservableObject {
             return
         }
 
-        let now = currentDateProvider()
         let oldTaskId = currentActiveId
 
         // 1. Settle pending elapsed time under the old task
@@ -1693,6 +1751,7 @@ public class TimerViewModel: ObservableObject {
         // 4. If focus timer running, begin next segment under new task
         if isTimerRunning && isFocusPreset {
             sessionSegmentStartDate = now
+            segmentCreditedSeconds = 0
             activeSessionTaskId = targetTask.id
         } else {
             activeSessionTaskId = targetTask.id
@@ -1707,6 +1766,9 @@ public class TimerViewModel: ObservableObject {
     public func toggleTaskCompletion(at index: Int) {
         guard !isPersistenceBlocked else { return }
         guard tasks.indices.contains(index) else { return }
+
+        let now = currentDateProvider()
+        reconcileIfExpired(at: now)
 
         let targetTask = tasks[index]
         let isRunningFocus = isTimerRunning && isFocusPreset
@@ -1733,6 +1795,7 @@ public class TimerViewModel: ObservableObject {
                     activeTaskIndex = nextIndex
                     if isRunningFocus {
                         sessionSegmentStartDate = now
+                        segmentCreditedSeconds = 0
                         activeSessionTaskId = tasks[nextIndex].id
                     } else {
                         activeSessionTaskId = tasks[nextIndex].id
@@ -1741,6 +1804,7 @@ public class TimerViewModel: ObservableObject {
                     activeSessionTaskId = nil
                     if isRunningFocus {
                         sessionSegmentStartDate = now
+                        segmentCreditedSeconds = 0
                     }
                 }
             } else {
@@ -1768,6 +1832,7 @@ public class TimerViewModel: ObservableObject {
                 // 4. Begin next focus segment under the reopened task's UUID at the exact same timestamp
                 if isRunningFocus {
                     sessionSegmentStartDate = now
+                    segmentCreditedSeconds = 0
                     activeSessionTaskId = targetTask.id
                 } else {
                     activeSessionTaskId = targetTask.id
@@ -1786,6 +1851,9 @@ public class TimerViewModel: ObservableObject {
     public func removeTask(at index: Int) {
         guard !isPersistenceBlocked else { return }
         guard tasks.indices.contains(index) else { return }
+
+        let now = currentDateProvider()
+        reconcileIfExpired(at: now)
 
         let deletingTask = tasks[index]
         let isRunningFocus = isTimerRunning && isFocusPreset
@@ -1811,6 +1879,7 @@ public class TimerViewModel: ObservableObject {
                 activeSessionTaskId = nil
                 if isRunningFocus {
                     sessionSegmentStartDate = now
+                    segmentCreditedSeconds = 0
                 }
             } else {
                 let candidateIndex = min(index, tasks.count - 1)
@@ -1818,6 +1887,7 @@ public class TimerViewModel: ObservableObject {
                     activeTaskIndex = nextIndex
                     if isRunningFocus {
                         sessionSegmentStartDate = now
+                        segmentCreditedSeconds = 0
                         activeSessionTaskId = tasks[nextIndex].id
                     } else {
                         activeSessionTaskId = tasks[nextIndex].id
@@ -1827,6 +1897,7 @@ public class TimerViewModel: ObservableObject {
                     activeSessionTaskId = nil
                     if isRunningFocus {
                         sessionSegmentStartDate = now
+                        segmentCreditedSeconds = 0
                     }
                 }
             }
@@ -1968,7 +2039,10 @@ public class TimerViewModel: ObservableObject {
 
     public func skipSession() {
         guard !isPersistenceBlocked else { return }
-        recordActiveSessionSegment()
+        let now = currentDateProvider()
+        if !reconcileIfExpired(at: now) {
+            recordActiveSessionSegment()
+        }
         stopTimer()
         fractionalRemaining = nil
         pausedSession = nil
