@@ -299,6 +299,14 @@ public class TimerViewModel: ObservableObject {
     /// Total count of cancelled pending saves.
     public private(set) var pendingSaveCancelledCount: Int = 0
 
+    /// Monotonically increasing generation identity for pending coalesced save callbacks.
+    public private(set) var activePendingSaveGeneration: UInt64 = 0
+
+    /// Alias for active generation identity.
+    public var pendingSaveGeneration: UInt64 {
+        activePendingSaveGeneration
+    }
+
     /// Injectable scheduler seam for test determinism.
     /// Signature: (delay: TimeInterval, action: @escaping @MainActor () -> Void) -> AnyCancellable?
     /// If nil, production `DispatchQueue.main.asyncAfter` with `DispatchWorkItem` is used.
@@ -309,6 +317,7 @@ public class TimerViewModel: ObservableObject {
 
     public func cancelPendingSave() {
         guard hasPendingSave || pendingSaveWorkItem != nil || pendingSaveCancellable != nil else { return }
+        activePendingSaveGeneration &+= 1
         pendingSaveWorkItem?.cancel()
         pendingSaveWorkItem = nil
         pendingSaveCancellable?.cancel()
@@ -322,18 +331,20 @@ public class TimerViewModel: ObservableObject {
     private func schedulePendingSave(delay: TimeInterval) {
         hasPendingSave = true
         pendingSaveScheduledCount += 1
+        activePendingSaveGeneration &+= 1
+        let generation = activePendingSaveGeneration
 
         if let customScheduler = saveScheduler {
             pendingSaveCancellable = customScheduler(delay) { [weak self] in
                 guard let self = self else { return }
-                self.executePendingSave()
+                self.executePendingSave(generation: generation)
             }
             return
         }
 
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
-            self.executePendingSave()
+            self.executePendingSave(generation: generation)
         }
         self.pendingSaveWorkItem = workItem
         self.pendingSaveCancellable = AnyCancellable { [weak workItem] in
@@ -343,8 +354,8 @@ public class TimerViewModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
-    private func executePendingSave() {
-        guard hasPendingSave else { return }
+    private func executePendingSave(generation: UInt64) {
+        guard hasPendingSave, generation == activePendingSaveGeneration else { return }
         if let workItem = pendingSaveWorkItem, workItem.isCancelled {
             cancelPendingSave()
             return
@@ -361,6 +372,7 @@ public class TimerViewModel: ObservableObject {
         pendingSaveWorkItem = nil
         pendingSaveCancellable = nil
         hasPendingSave = false
+        activePendingSaveGeneration &+= 1
         pendingSaveExecutedCount += 1
 
         performSave(now: currentDateProvider())

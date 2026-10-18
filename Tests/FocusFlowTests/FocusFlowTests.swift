@@ -8991,4 +8991,293 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertFalse(vm2.isPersistenceBlocked)
         XCTAssertTrue(vm2.tasks.contains(where: { $0.title == "Initial Valid Data" }))
     }
+
+    // MARK: - Task 6 Final Hardening: Stale Save Callback Identity
+    // 1. Race condition: Stale callback A must not execute or cancel newer pending Save B.
+    @MainActor
+    func testTask6_Hardening_StaleSaveCallbackDoesNotPrematurelyExecuteNewerPendingSave() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var capturedCallbacks: [() -> Void] = []
+        vm.saveScheduler = { _, action in
+            capturedCallbacks.append(action)
+            return AnyCancellable {}
+        }
+
+        // 1. Establish a successful initial save.
+        vm.persistData(force: true)
+        XCTAssertEqual(vm.storage.saveAttemptCount, 1)
+
+        // 2. Schedule Save A.
+        vm.totalSessions = 5
+        XCTAssertTrue(vm.hasPendingSave, "Save A must be scheduled")
+        XCTAssertEqual(capturedCallbacks.count, 1, "Save A callback must be captured")
+        let callbackA = capturedCallbacks[0]
+
+        // 3. Force-save or otherwise cancel A.
+        vm.persistData(force: true)
+        XCTAssertEqual(vm.storage.saveAttemptCount, 2, "Forced save executed")
+        XCTAssertFalse(vm.hasPendingSave, "Save A must be cancelled")
+
+        // 4. Make another mutation and schedule Save B.
+        vm.totalSessions = 10
+        XCTAssertTrue(vm.hasPendingSave, "Save B must be scheduled")
+        XCTAssertEqual(capturedCallbacks.count, 2, "Save B callback must be captured")
+        let callbackB = capturedCallbacks[1]
+        let saveAttemptsBeforeStaleCallback = vm.storage.saveAttemptCount
+        let bGeneration = vm.activePendingSaveGeneration
+
+        // 5. Invoke A's previously captured callback deliberately, even though its cancellation was requested.
+        callbackA()
+
+        // 6. Assert no additional storage save attempt.
+        XCTAssertEqual(vm.storage.saveAttemptCount, saveAttemptsBeforeStaleCallback, "Stale callback A must not trigger an additional save")
+
+        // 7. Assert B remains pending.
+        XCTAssertTrue(vm.hasPendingSave, "Save B must remain pending after stale callback A was invoked")
+
+        // 8. Assert B's pending identity/state remains unchanged.
+        XCTAssertEqual(vm.activePendingSaveGeneration, bGeneration, "Save B's generation token must remain unchanged by stale callback A")
+        XCTAssertEqual(vm.pendingSaveGeneration, bGeneration)
+
+        // 9. Invoke B's callback.
+        callbackB()
+
+        // 10. Assert exactly one appropriate save occurs.
+        XCTAssertEqual(vm.storage.saveAttemptCount, saveAttemptsBeforeStaleCallback + 1, "Save B must execute exactly one save")
+        XCTAssertFalse(vm.hasPendingSave, "Save B must no longer be pending after execution")
+
+        // 11. Decode JSON and verify it contains the latest changes.
+        let savedData = try vm.storage.decodeData(from: tempURL)
+        XCTAssertEqual(savedData.totalSessions, 10, "Decoded data must contain the latest state from Save B")
+    }
+
+    // 2. A cancelled callback with no new pending save does not execute any write.
+    @MainActor
+    func testTask6_Hardening_CancelledCallbackWithNoNewPendingSaveDoesNotWrite() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var capturedAction: (() -> Void)?
+        vm.saveScheduler = { _, action in
+            capturedAction = action
+            return AnyCancellable {}
+        }
+
+        vm.persistData(force: true)
+        let initialAttempts = vm.storage.saveAttemptCount
+
+        vm.totalSessions = 6
+        XCTAssertTrue(vm.hasPendingSave)
+        XCTAssertNotNil(capturedAction)
+
+        // Explicitly cancel pending save without scheduling a new one
+        vm.cancelPendingSave()
+        XCTAssertFalse(vm.hasPendingSave)
+
+        // Invoke obsolete callback
+        capturedAction?()
+
+        XCTAssertEqual(vm.storage.saveAttemptCount, initialAttempts, "Cancelled callback must not trigger any storage write")
+        XCTAssertFalse(vm.hasPendingSave)
+    }
+
+    // 3. Forced save invalidates a pending callback and prevents duplicate writes.
+    @MainActor
+    func testTask6_Hardening_ForcedSaveInvalidatesPendingCallback() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var capturedAction: (() -> Void)?
+        vm.saveScheduler = { _, action in
+            capturedAction = action
+            return AnyCancellable {}
+        }
+
+        vm.persistData(force: true)
+        XCTAssertEqual(vm.storage.saveAttemptCount, 1)
+
+        vm.totalSessions = 7
+        XCTAssertTrue(vm.hasPendingSave)
+        XCTAssertNotNil(capturedAction)
+
+        // Forced save occurs
+        vm.persistData(force: true)
+        XCTAssertEqual(vm.storage.saveAttemptCount, 2)
+        XCTAssertFalse(vm.hasPendingSave)
+
+        // Trigger obsolete callback
+        capturedAction?()
+
+        XCTAssertEqual(vm.storage.saveAttemptCount, 2, "Obsolete callback after forced save must not write again")
+        let saved = try vm.storage.decodeData(from: tempURL)
+        XCTAssertEqual(saved.totalSessions, 7)
+    }
+
+    // 4. Multiple consecutive generations with stale callbacks invoked out of order.
+    @MainActor
+    func testTask6_Hardening_MultipleGenerationsInvokedOutOfOrder() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var capturedCallbacks: [() -> Void] = []
+        vm.saveScheduler = { _, action in
+            capturedCallbacks.append(action)
+            return AnyCancellable {}
+        }
+
+        // Gen A
+        vm.persistData(force: true)
+        vm.totalSessions = 1
+        XCTAssertEqual(capturedCallbacks.count, 1)
+        vm.cancelPendingSave()
+
+        // Gen B
+        vm.totalSessions = 2
+        XCTAssertEqual(capturedCallbacks.count, 2)
+        vm.cancelPendingSave()
+
+        // Gen C
+        vm.totalSessions = 3
+        XCTAssertEqual(capturedCallbacks.count, 3)
+        vm.cancelPendingSave()
+
+        // Gen D (active pending save)
+        vm.totalSessions = 4
+        XCTAssertEqual(capturedCallbacks.count, 4)
+        XCTAssertTrue(vm.hasPendingSave)
+        let activeGenerationD = vm.activePendingSaveGeneration
+        let attemptsBeforeStaleInvocations = vm.storage.saveAttemptCount
+
+        // Invoke stale callbacks in arbitrary out-of-order sequence (B, then A, then C)
+        capturedCallbacks[1]() // Callback B
+        XCTAssertEqual(vm.storage.saveAttemptCount, attemptsBeforeStaleInvocations)
+        XCTAssertTrue(vm.hasPendingSave)
+        XCTAssertEqual(vm.activePendingSaveGeneration, activeGenerationD)
+
+        capturedCallbacks[0]() // Callback A
+        XCTAssertEqual(vm.storage.saveAttemptCount, attemptsBeforeStaleInvocations)
+        XCTAssertTrue(vm.hasPendingSave)
+        XCTAssertEqual(vm.activePendingSaveGeneration, activeGenerationD)
+
+        capturedCallbacks[2]() // Callback C
+        XCTAssertEqual(vm.storage.saveAttemptCount, attemptsBeforeStaleInvocations)
+        XCTAssertTrue(vm.hasPendingSave)
+        XCTAssertEqual(vm.activePendingSaveGeneration, activeGenerationD)
+
+        // Finally invoke active callback D
+        capturedCallbacks[3]() // Callback D
+        XCTAssertEqual(vm.storage.saveAttemptCount, attemptsBeforeStaleInvocations + 1, "Only active Gen D callback should execute")
+        XCTAssertFalse(vm.hasPendingSave)
+
+        // Attempting to invoke D again must be rejected as well
+        capturedCallbacks[3]()
+        XCTAssertEqual(vm.storage.saveAttemptCount, attemptsBeforeStaleInvocations + 1, "Duplicate invocation of Gen D must be rejected")
+
+        let saved = try vm.storage.decodeData(from: tempURL)
+        XCTAssertEqual(saved.totalSessions, 4, "Saved data must reflect final generation mutation")
+    }
+
+    // 5. Application termination invalidates all outstanding callbacks.
+    @MainActor
+    func testTask6_Hardening_AppTerminationInvalidatesOutstandingCallbacks() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var capturedAction: (() -> Void)?
+        vm.saveScheduler = { _, action in
+            capturedAction = action
+            return AnyCancellable {}
+        }
+
+        vm.persistData(force: true)
+        XCTAssertEqual(vm.storage.saveAttemptCount, 1)
+
+        vm.totalSessions = 9
+        XCTAssertTrue(vm.hasPendingSave)
+        XCTAssertNotNil(capturedAction)
+
+        // Terminate app
+        vm.handleAppTermination()
+        XCTAssertTrue(vm.hasTerminated)
+        XCTAssertFalse(vm.hasPendingSave)
+        XCTAssertEqual(vm.storage.saveAttemptCount, 2, "Termination should save current state synchronously")
+
+        // Try to invoke obsolete callback after termination
+        capturedAction?()
+
+        XCTAssertEqual(vm.storage.saveAttemptCount, 2, "Obsolete callback after termination must not trigger additional writes")
+        XCTAssertTrue(vm.hasTerminated)
+        let saved = try vm.storage.decodeData(from: tempURL)
+        XCTAssertEqual(saved.totalSessions, 9)
+    }
+
+    // 6. Blocked / corrupted persistence refuses pending callback execution.
+    @MainActor
+    func testTask6_Hardening_BlockedPersistenceRefusesPendingCallbackExecution() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.persistData(force: true)
+        XCTAssertFalse(vm.isPersistenceBlocked)
+
+        var capturedAction: (() -> Void)?
+        vm.saveScheduler = { _, action in
+            capturedAction = action
+            return AnyCancellable {}
+        }
+
+        vm.totalSessions = 8
+        XCTAssertTrue(vm.hasPendingSave)
+
+        // Corrupt primary file with sentinel data to trigger corruption protection
+        let sentinel = Data("CORRUPTED_SENTINEL_HARDENING_06".utf8)
+        try sentinel.write(to: tempURL)
+
+        // Fire pending save callback
+        capturedAction?()
+
+        // Storage corruption protection must engage and block persistence
+        XCTAssertTrue(vm.isPersistenceBlocked)
+        XCTAssertNotNil(vm.storageErrorMessage)
+        XCTAssertFalse(vm.hasPendingSave)
+
+        // Corrupted bytes on disk must remain pristine
+        let primaryOnDisk = try Data(contentsOf: tempURL)
+        XCTAssertEqual(primaryOnDisk, sentinel, "Original corrupted bytes must be preserved intact")
+    }
+
+    // 7. Valid current callback executes exactly once.
+    @MainActor
+    func testTask6_Hardening_ValidCurrentCallbackExecutesExactlyOnce() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var capturedAction: (() -> Void)?
+        vm.saveScheduler = { _, action in
+            capturedAction = action
+            return AnyCancellable {}
+        }
+
+        vm.persistData(force: true)
+        XCTAssertEqual(vm.storage.saveAttemptCount, 1)
+
+        vm.totalSessions = 11
+        XCTAssertTrue(vm.hasPendingSave)
+
+        // First invocation: valid execution
+        capturedAction?()
+        XCTAssertEqual(vm.storage.saveAttemptCount, 2)
+        XCTAssertFalse(vm.hasPendingSave)
+        XCTAssertEqual(vm.pendingSaveExecutedCount, 1)
+
+        // Second invocation: should be rejected
+        capturedAction?()
+        XCTAssertEqual(vm.storage.saveAttemptCount, 2, "Repeated invocation of the same callback must not execute again")
+        XCTAssertEqual(vm.pendingSaveExecutedCount, 1)
+
+        let saved = try vm.storage.decodeData(from: tempURL)
+        XCTAssertEqual(saved.totalSessions, 11)
+    }
 }
