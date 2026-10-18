@@ -133,25 +133,29 @@ Following the completion of Task 9, the production distribution pipeline must ex
    - Application icon in `FocusFlow.app/Contents/Resources/AppIcon.icns`
    - Bundle metadata in `FocusFlow.app/Contents/Info.plist`
    *(Note: `FocusFlow.entitlements` is a code signing configuration input, not a runtime application asset inside `Contents/Resources`.)*
-7. **Developer ID Code Signing & Hardened Runtime**: Sign the assembled `FocusFlow.app` bundle using an official Apple Developer ID Application certificate, supplying `FocusFlow.entitlements` and enabling Hardened Runtime:
+7. **Developer ID Code Signing & Hardened Runtime**: Sign the assembled `FocusFlow.app` bundle using an official Apple Developer ID Application certificate, passing `FocusFlow.entitlements`, enabling Hardened Runtime (`--options runtime`), and including a secure timestamp (`--timestamp`). Apple explicitly recommends against using `--deep` for signing; any nested executable code (such as frameworks, helper executables, or XPC services, if present in the bundle) must be signed individually from the inside outward before signing the top-level app bundle:
    ```bash
-   codesign --force --options runtime --deep --sign "Developer ID Application: YourName (TeamID)" --entitlements FocusFlow.entitlements FocusFlow.app
+   # If nested binaries, dynamic libraries, or frameworks are present, sign each individually first:
+   # codesign --force --options runtime --timestamp --sign "Developer ID Application: YourName (TeamID)" FocusFlow.app/Contents/Frameworks/Nested.framework
+
+   # Sign the outer application bundle directly (without --deep):
+   codesign --force --options runtime --timestamp --sign "Developer ID Application: YourName (TeamID)" --entitlements FocusFlow.entitlements FocusFlow.app
    ```
-8. **Application Signature Verification**: Verify code signature validity, certificate chain, and entitlement conformance before packaging:
+8. **Application Signature Verification**: Verify code signature validity, certificate chain, and entitlement conformance before packaging. Using `--deep` here is technically appropriate for recursive verification:
    ```bash
    codesign --verify --deep --strict --verbose=2 FocusFlow.app
-   spctl --assess --type execute --verbose FocusFlow.app
    ```
+   *(Note: Do not treat a pre-notarization Gatekeeper rejection from `spctl` as definitive evidence of invalid signing; modern macOS Gatekeeper evaluation requires notarization tickets that are only attached in subsequent steps.)*
 9. **Distribution DMG Packaging**: Package the signed, verified `FocusFlow.app` bundle into a clean, read-only UDZO compressed disk image (`FocusFlow-macOS14-arm64.dmg`).
-10. **DMG Code Signing**: Sign the distribution disk image with the Developer ID Application certificate:
+10. **DMG Code Signing**: Sign the distribution disk image with the Developer ID Application certificate and secure timestamp:
     ```bash
-    codesign --sign "Developer ID Application: YourName (TeamID)" releases/FocusFlow-macOS14-arm64.dmg
+    codesign --sign "Developer ID Application: YourName (TeamID)" --timestamp releases/FocusFlow-macOS14-arm64.dmg
     ```
 11. **Apple Notarization**: Submit the distribution DMG to the Apple Notary Service via `notarytool`:
     ```bash
     xcrun notarytool submit releases/FocusFlow-macOS14-arm64.dmg --keychain-profile "notarytool-profile" --wait
     ```
-12. **Ticket Stapling & Gatekeeper Verification**: Staple the notarization ticket to the disk image and assess Gatekeeper installation acceptance:
+12. **Ticket Stapling & Final Gatekeeper Acceptance Verification**: Staple the notarization ticket to the disk image and perform the definitive Gatekeeper acceptance assessment post-stapling:
     ```bash
     xcrun stapler staple releases/FocusFlow-macOS14-arm64.dmg
     spctl -a -vv -t install releases/FocusFlow-macOS14-arm64.dmg
