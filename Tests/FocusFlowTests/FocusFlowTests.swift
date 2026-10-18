@@ -8246,9 +8246,41 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertNil(appDelegate.viewModel.storageErrorMessage)
     }
 
-    // Regression Requirement 10: Failed fullscreen exit handles cleanup gracefully.
+    // Regression Requirement 10: Failed fullscreen exit handles cleanup gracefully and preserves visibility.
     @MainActor
     func testFullScreenClose_FailedExit_CleansUpPendingState() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let appDelegate = FocusFlowAppDelegate(viewModel: vm)
+        appDelegate.fullScreenExitAction = { _ in }
+        let fsWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled, .closable, .resizable, .fullScreen],
+            backing: .buffered,
+            defer: false
+        )
+        fsWindow.makeKeyAndOrderFront(nil)
+        XCTAssertTrue(fsWindow.isVisible, "Window must be visible initially")
+
+        _ = appDelegate.windowShouldClose(fsWindow)
+        XCTAssertTrue(appDelegate.isPendingCloseAfterFullScreenExit, "Pending close flag must become true")
+        XCTAssertTrue(fsWindow.isVisible, "Window must remain visible while awaiting fullscreen exit")
+
+        // AppKit reports failure to exit fullscreen
+        appDelegate.windowDidFailToExitFullScreen(fsWindow)
+
+        XCTAssertFalse(appDelegate.isPendingCloseAfterFullScreenExit, "Failed exit must reset pending close flag")
+        XCTAssertTrue(fsWindow.isVisible, "Failed fullscreen exit must not hide the window")
+        XCTAssertFalse(appDelegate.viewModel.hasTerminated, "Application must remain running")
+    }
+
+    // MARK: - Fullscreen Exit Failure Fallback Regression Tests (Scenarios A through F)
+
+    // Scenario A: Failed exit preserves visibility.
+    // Simulated AppKit delegate lifecycle test: A visible fullscreen window must remain visible after windowDidFailToExitFullScreen.
+    @MainActor
+    func testFullScreenExitFailure_PreservesWindowVisibility() {
         let (vm, tempURL) = makeIsolatedViewModel()
         defer { cleanup(url: tempURL) }
 
@@ -8265,11 +8297,184 @@ final class FocusFlowTests: XCTestCase {
         _ = appDelegate.windowShouldClose(fsWindow)
         XCTAssertTrue(appDelegate.isPendingCloseAfterFullScreenExit)
 
-        // AppKit reports failure to exit fullscreen
         appDelegate.windowDidFailToExitFullScreen(fsWindow)
 
-        XCTAssertFalse(appDelegate.isPendingCloseAfterFullScreenExit, "Failed exit must reset pending close flag")
-        XCTAssertFalse(fsWindow.isVisible, "Window must be hidden as fallback")
+        XCTAssertFalse(appDelegate.isPendingCloseAfterFullScreenExit)
+        XCTAssertTrue(fsWindow.isVisible, "Failed fullscreen exit must keep window visible")
+    }
+
+    // Scenario B: Retry after failed exit.
+    // Simulated AppKit delegate lifecycle test:
+    // 1. Initiate fullscreen close. 2. Simulate failed exit. 3. Verify pending state clears.
+    // 4. Request close again. 5. Verify a second fullscreen exit attempt is initiated exactly once.
+    // 6. Verify a successful exit callback can subsequently hide the window.
+    @MainActor
+    func testFullScreenExitFailure_AllowsSubsequentRetryAndSuccessfulClose() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let appDelegate = FocusFlowAppDelegate(viewModel: vm)
+        var exitAttemptCount = 0
+        appDelegate.fullScreenExitAction = { _ in
+            exitAttemptCount += 1
+        }
+
+        let fsWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled, .closable, .resizable, .fullScreen],
+            backing: .buffered,
+            defer: false
+        )
+        fsWindow.makeKeyAndOrderFront(nil)
+
+        // 1. Initiate fullscreen close (attempt 1)
+        _ = appDelegate.windowShouldClose(fsWindow)
+        XCTAssertTrue(appDelegate.isPendingCloseAfterFullScreenExit)
+        XCTAssertEqual(exitAttemptCount, 1)
+        XCTAssertEqual(appDelegate.fullScreenExitInitiatedCount, 1)
+
+        // 2. Simulate failed exit
+        appDelegate.windowDidFailToExitFullScreen(fsWindow)
+
+        // 3. Verify pending state clears and window remains visible
+        XCTAssertFalse(appDelegate.isPendingCloseAfterFullScreenExit)
+        XCTAssertTrue(fsWindow.isVisible)
+
+        // 4. Request close again (attempt 2)
+        _ = appDelegate.windowShouldClose(fsWindow)
+
+        // 5. Verify a second fullscreen exit attempt was initiated exactly once
+        XCTAssertTrue(appDelegate.isPendingCloseAfterFullScreenExit)
+        XCTAssertEqual(exitAttemptCount, 2)
+        XCTAssertEqual(appDelegate.fullScreenExitInitiatedCount, 2)
+
+        // 6. Verify successful exit callback can subsequently hide the window
+        appDelegate.windowDidExitFullScreen(Notification(name: NSWindow.didExitFullScreenNotification, object: fsWindow))
+        XCTAssertFalse(appDelegate.isPendingCloseAfterFullScreenExit)
+        XCTAssertFalse(fsWindow.isVisible, "Successful exit after retry must hide the window")
+    }
+
+    // Scenario C: Failure callback without pending close.
+    // Simulated AppKit delegate lifecycle test: A failed-exit callback received when no app-initiated close is pending must not hide the window.
+    @MainActor
+    func testFullScreenExitFailure_WithoutPendingClose_DoesNotHideWindow() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let appDelegate = FocusFlowAppDelegate(viewModel: vm)
+        let fsWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled, .closable, .resizable, .fullScreen],
+            backing: .buffered,
+            defer: false
+        )
+        fsWindow.makeKeyAndOrderFront(nil)
+        XCTAssertTrue(fsWindow.isVisible)
+        XCTAssertFalse(appDelegate.isPendingCloseAfterFullScreenExit)
+
+        // Spontaneous or system failure callback with no pending close
+        appDelegate.windowDidFailToExitFullScreen(fsWindow)
+
+        XCTAssertFalse(appDelegate.isPendingCloseAfterFullScreenExit)
+        XCTAssertTrue(fsWindow.isVisible, "Spontaneous failure callback without pending close must not hide the window")
+    }
+
+    // Scenario D: Successful close remains unchanged.
+    // Simulated AppKit delegate lifecycle test: On windowDidExitFullScreen, a pending close still hides the window exactly as intended.
+    @MainActor
+    func testFullScreenExitSuccess_StillHidesWindowWhenClosePending() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let appDelegate = FocusFlowAppDelegate(viewModel: vm)
+        appDelegate.fullScreenExitAction = { _ in }
+        let fsWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled, .closable, .resizable, .fullScreen],
+            backing: .buffered,
+            defer: false
+        )
+        fsWindow.makeKeyAndOrderFront(nil)
+
+        _ = appDelegate.windowShouldClose(fsWindow)
+        XCTAssertTrue(appDelegate.isPendingCloseAfterFullScreenExit)
+
+        appDelegate.windowDidExitFullScreen(Notification(name: NSWindow.didExitFullScreenNotification, object: fsWindow))
+
+        XCTAssertFalse(appDelegate.isPendingCloseAfterFullScreenExit)
+        XCTAssertFalse(fsWindow.isVisible, "Successful exit must hide window")
+    }
+
+    // Scenario E: Ordinary fullscreen exit remains unchanged.
+    // Simulated AppKit delegate lifecycle test: Exiting with the green button or Control + Command + F (without pending close) must leave the window visible.
+    @MainActor
+    func testFullScreenExitSuccess_WithoutPendingClose_LeavesWindowVisible() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let appDelegate = FocusFlowAppDelegate(viewModel: vm)
+        let fsWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled, .closable, .resizable, .fullScreen],
+            backing: .buffered,
+            defer: false
+        )
+        fsWindow.makeKeyAndOrderFront(nil)
+        XCTAssertFalse(appDelegate.isPendingCloseAfterFullScreenExit)
+
+        // Ordinary fullscreen exit without red close button
+        appDelegate.windowDidExitFullScreen(Notification(name: NSWindow.didExitFullScreenNotification, object: fsWindow))
+
+        XCTAssertFalse(appDelegate.isPendingCloseAfterFullScreenExit)
+        XCTAssertTrue(fsWindow.isVisible, "Ordinary fullscreen exit without close must leave window visible")
+    }
+
+    // Scenario F: Timer and stopwatch integrity across failed fullscreen exit.
+    // Simulated AppKit delegate lifecycle test: A failed fullscreen transition must not pause/stop timer, reset stopwatch, alter records/tasks, terminate app, or cause storage corruption.
+    @MainActor
+    func testFullScreenExitFailure_PreservesTimerAndStopwatchIntegrity() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let appDelegate = FocusFlowAppDelegate(viewModel: vm)
+        appDelegate.fullScreenExitAction = { _ in }
+
+        // Setup running timer and stopwatch with assigned task
+        vm.addTask(title: "Important Deep Work", expectedMinutes: 25)
+        vm.activeTaskIndex = 0
+        let selectedTaskId = vm.tasks[0].id
+
+        vm.startTimer()
+        XCTAssertTrue(vm.isTimerRunning)
+
+        vm.startStopwatch()
+        vm.stopwatchTime = 45
+        XCTAssertTrue(vm.isStopwatchRunning)
+
+        let initialRecordsCount = vm.sessionRecords.count
+
+        let fsWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled, .closable, .resizable, .fullScreen],
+            backing: .buffered,
+            defer: false
+        )
+        fsWindow.makeKeyAndOrderFront(nil)
+
+        // Initiate close and fail exit
+        _ = appDelegate.windowShouldClose(fsWindow)
+        appDelegate.windowDidFailToExitFullScreen(fsWindow)
+
+        // Verify timer and stopwatch integrity
+        XCTAssertTrue(vm.isTimerRunning, "Timer must continue running after failed fullscreen exit")
+        XCTAssertTrue(vm.isStopwatchRunning, "Stopwatch must continue running after failed fullscreen exit")
+        XCTAssertEqual(vm.stopwatchTime, 45, "Stopwatch time must not reset")
+        XCTAssertEqual(vm.sessionRecords.count, initialRecordsCount, "Session records must not change")
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].id, selectedTaskId, "Selected task must remain unchanged")
+        XCTAssertFalse(vm.hasTerminated, "App must not terminate on failed exit")
+        XCTAssertFalse(vm.isPersistenceBlocked, "Persistence must remain unblocked")
+        XCTAssertNil(vm.storageErrorMessage)
+        XCTAssertTrue(fsWindow.isVisible, "Window must remain visible")
     }
 
     // MARK: - Task 6 Tests: Persistence Write Coalescing & Pending Save Safety

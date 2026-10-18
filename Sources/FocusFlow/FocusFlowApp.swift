@@ -77,10 +77,13 @@ public final class FocusFlowAppDelegate: NSObject, NSApplicationDelegate, NSWind
     }
 
     public func windowDidFailToExitFullScreen(_ window: NSWindow) {
-        if isPendingCloseAfterFullScreenExit {
-            isPendingCloseAfterFullScreenExit = false
-            window.orderOut(nil)
+        guard isPendingCloseAfterFullScreenExit else {
+            return
         }
+
+        isPendingCloseAfterFullScreenExit = false
+        // Exit failed: leave the window visible and usable.
+        // Never call orderOut(nil) on a window that may still occupy a native fullscreen Space.
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
