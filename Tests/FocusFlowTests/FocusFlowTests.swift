@@ -3916,6 +3916,433 @@ final class FocusFlowTests: XCTestCase {
         }
     }
 
+    // MARK: - Custom Timer Input UX Reengineering Tests (01 - 20)
+
+    @MainActor
+    func testCustomTimerUX_01_Typing45FromSelected25DoesNotMutateAuthoritativeDurationUntilCommit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+        XCTAssertEqual(vm.totalTime, 1500)
+        XCTAssertEqual(controller.inputMinutes, "25")
+
+        // User clicks minutes to begin editing
+        controller.startEditing(.minutes)
+        XCTAssertEqual(controller.activeEditingField, .minutes)
+        XCTAssertEqual(vm.totalTime, 1500, "Opening edit mode must not mutate timer")
+
+        // User types '4' (first keystroke of '45')
+        controller.updateDraft(field: .minutes, text: "4")
+        XCTAssertEqual(controller.inputMinutes, "4")
+        XCTAssertEqual(vm.totalTime, 1500, "Drafting '4' must NOT mutate authoritative duration to 4 minutes!")
+
+        // User types '5' (second keystroke)
+        controller.updateDraft(field: .minutes, text: "45")
+        XCTAssertEqual(controller.inputMinutes, "45")
+        XCTAssertEqual(vm.totalTime, 1500, "Drafting '45' must NOT mutate authoritative duration until commit!")
+
+        // User commits (e.g. presses Return or Start)
+        let success = controller.commitEditing()
+        XCTAssertTrue(success)
+        XCTAssertNil(controller.activeEditingField)
+        XCTAssertEqual(vm.totalTime, 2700, "Committing draft must set authoritative duration to 45:00 (2700s) exactly once")
+    }
+
+    @MainActor
+    func testCustomTimerUX_02_TemporaryEmptyFieldDuringReplacementDoesNotResetOrCrash() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        controller.startEditing(.minutes)
+        // User selects all and presses Backspace
+        controller.updateDraft(field: .minutes, text: "")
+        XCTAssertEqual(controller.inputMinutes, "", "Temporary empty draft is allowed during replacement")
+        XCTAssertEqual(vm.totalTime, 1500, "Temporary empty draft must not mutate timer")
+
+        // User types new value '30'
+        controller.updateDraft(field: .minutes, text: "30")
+        XCTAssertEqual(controller.inputMinutes, "30")
+
+        let success = controller.commitEditing()
+        XCTAssertTrue(success)
+        XCTAssertEqual(vm.totalTime, 1800)
+    }
+
+    @MainActor
+    func testCustomTimerUX_03_SecondsEditingWithPartialDigitsDoesNotMutateDurationUntilCommit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        controller.startEditing(.seconds)
+        XCTAssertEqual(controller.activeEditingField, .seconds)
+
+        // User types '3'
+        controller.updateDraft(field: .seconds, text: "3")
+        XCTAssertEqual(controller.inputSeconds, "3")
+        XCTAssertEqual(vm.totalTime, 1500, "Partial seconds typing must not mutate timer duration")
+
+        // User types '0'
+        controller.updateDraft(field: .seconds, text: "30")
+        XCTAssertEqual(controller.inputSeconds, "30")
+        XCTAssertEqual(vm.totalTime, 1500)
+
+        controller.commitEditing()
+        XCTAssertEqual(vm.totalTime, 25 * 60 + 30)
+    }
+
+    @MainActor
+    func testCustomTimerUX_04_ValidCommitPublishesExactlyOnce() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        var commitCount = 0
+        controller.onCommit = { m, s in
+            commitCount += 1
+            vm.setCustomDuration(minutes: m, seconds: s)
+        }
+
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "50")
+        XCTAssertEqual(commitCount, 0, "No commit callback while typing")
+
+        controller.commitEditing()
+        XCTAssertEqual(commitCount, 1, "Committing must invoke onCommit exactly once")
+        XCTAssertEqual(vm.totalTime, 3000)
+    }
+
+    @MainActor
+    func testCustomTimerUX_05_InvalidCommitPreservesPreviousDuration() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "0")
+        controller.updateDraft(field: .seconds, text: "02") // 2s < 5s min
+
+        let committed = controller.commitEditing()
+        XCTAssertFalse(committed, "Durations below minimum must be rejected")
+        XCTAssertTrue(controller.hasInvalidDraft)
+        XCTAssertEqual(vm.totalTime, 1500, "Previous valid duration must be preserved upon invalid commit")
+        XCTAssertEqual(controller.inputMinutes, "25", "Draft must be restored to previous valid duration")
+    }
+
+    @MainActor
+    func testCustomTimerUX_06_EscapeRestoresCompleteOriginalDuration() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 30)
+        let controller = vm.customTimeInputController
+
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "99")
+        controller.updateDraft(field: .seconds, text: "59")
+
+        controller.cancelEditing()
+        XCTAssertNil(controller.activeEditingField)
+        XCTAssertEqual(controller.inputMinutes, "25")
+        XCTAssertEqual(controller.inputSeconds, "30")
+        XCTAssertEqual(vm.totalTime, 25 * 60 + 30)
+    }
+
+    @MainActor
+    func testCustomTimerUX_07_TabSwitchesCorrectlyBetweenMinutesAndSeconds() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "45")
+
+        controller.commitAndSwitchField(to: .seconds)
+        XCTAssertEqual(controller.activeEditingField, .seconds)
+        XCTAssertEqual(controller.inputMinutes, "45")
+        XCTAssertEqual(vm.totalTime, 1500, "Tabbing between fields does not prematurely commit to viewModel")
+    }
+
+    @MainActor
+    func testCustomTimerUX_08_FocusLossDoesNotDoubleCommit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        var commitEventCount = 0
+        controller.onCommit = { m, s in
+            commitEventCount += 1
+            vm.setCustomDuration(minutes: m, seconds: s)
+        }
+
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "35")
+
+        // First blur / commit
+        let res1 = controller.commitEditing()
+        XCTAssertTrue(res1)
+        XCTAssertEqual(commitEventCount, 1)
+
+        // Subsequent blur when already not editing
+        let res2 = controller.commitEditing()
+        XCTAssertTrue(res2)
+        XCTAssertEqual(commitEventCount, 1, "Subsequent commit calls when already committed must not re-trigger callbacks")
+    }
+
+    @MainActor
+    func testCustomTimerUX_09_PresetDiscardsStaleDraftAndSetsExactDuration() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "77")
+
+        controller.selectPreset(minutes: 15)
+        XCTAssertNil(controller.activeEditingField)
+        XCTAssertEqual(controller.inputMinutes, "15")
+        XCTAssertEqual(controller.inputSeconds, "00")
+        XCTAssertEqual(vm.totalTime, 15 * 60)
+    }
+
+    @MainActor
+    func testCustomTimerUX_10_StepperPreservesSecondsAccurately() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 10, seconds: 30)
+        let controller = vm.customTimeInputController
+        XCTAssertEqual(vm.totalTime, 630)
+        XCTAssertEqual(controller.inputMinutes, "10")
+        XCTAssertEqual(controller.inputSeconds, "30")
+
+        // +5m on 10:30 -> 15:30
+        controller.adjustMinutes(by: 5)
+        XCTAssertEqual(vm.totalTime, 930)
+        XCTAssertEqual(controller.inputMinutes, "15")
+        XCTAssertEqual(controller.inputSeconds, "30", "Seconds must be preserved upon +5m adjustment")
+
+        // -5m on 15:30 -> 10:30
+        controller.adjustMinutes(by: -5)
+        XCTAssertEqual(vm.totalTime, 630)
+        XCTAssertEqual(controller.inputMinutes, "10")
+        XCTAssertEqual(controller.inputSeconds, "30", "Seconds must be preserved upon -5m adjustment")
+
+        // +15m on 10:30 -> 25:30
+        controller.adjustMinutes(by: 15)
+        XCTAssertEqual(vm.totalTime, 1530)
+        XCTAssertEqual(controller.inputMinutes, "25")
+        XCTAssertEqual(controller.inputSeconds, "30", "Seconds must be preserved upon +15m adjustment")
+    }
+
+    @MainActor
+    func testCustomTimerUX_11_ZeroMinuteValidDurationSupported() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "0")
+        controller.updateDraft(field: .seconds, text: "30")
+
+        let success = controller.commitEditing()
+        XCTAssertTrue(success, "00:30 (30 seconds >= 5s minimum) is a valid duration")
+        XCTAssertEqual(vm.totalTime, 30)
+        XCTAssertEqual(controller.inputMinutes, "00")
+        XCTAssertEqual(controller.inputSeconds, "30")
+    }
+
+    @MainActor
+    func testCustomTimerUX_12_MaximumDurationBoundaryEnforced() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "500")
+
+        let success = controller.commitEditing()
+        XCTAssertFalse(success, "Minutes > 360 must be rejected or clamped")
+        XCTAssertTrue(controller.hasInvalidDraft)
+        XCTAssertLessThanOrEqual(vm.totalTime, TimerViewModel.maxSupportedTimerDuration)
+    }
+
+    @MainActor
+    func testCustomTimerUX_13_ChangingToShorterDurationWorksWithoutMaxClobber() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 45, seconds: 0)
+        XCTAssertEqual(vm.totalTime, 2700)
+
+        let controller = vm.customTimeInputController
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "10")
+
+        let success = controller.commitEditing()
+        XCTAssertTrue(success)
+        XCTAssertEqual(vm.totalTime, 600, "Decreasing duration to 10 minutes must not be clobbered back to 45 by max()")
+        XCTAssertEqual(controller.inputMinutes, "10")
+    }
+
+    @MainActor
+    func testCustomTimerUX_14_ReturningFromSidebarNavigationPreservesDisplayStateWithoutAutofocus() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        hostingView.layoutSubtreeIfNeeded()
+
+        // Verify initial state has nil editing field
+        XCTAssertNil(view.activeEditingField)
+        XCTAssertFalse(containsEditableTextInput(in: hostingView))
+    }
+
+    @MainActor
+    func testCustomTimerUX_15_MainWindowAndMenuBarInputConsistency() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let mainController = vm.customTimeInputController
+        let menuBarController = TimeInputController(totalTime: vm.totalTime)
+
+        // Both must start with identical committed values
+        XCTAssertEqual(mainController.committedTotalSeconds, menuBarController.committedTotalSeconds)
+        XCTAssertEqual(mainController.inputMinutes, menuBarController.inputMinutes)
+        XCTAssertEqual(mainController.inputSeconds, menuBarController.inputSeconds)
+
+        // Both must enforce identical bounds
+        XCTAssertEqual(TimeInputController.minDurationSeconds, 5)
+        XCTAssertEqual(TimeInputController.maxMinutes, 360)
+        XCTAssertEqual(TimeInputController.maxSeconds, 59)
+    }
+
+    @MainActor
+    func testCustomTimerUX_16_ClickToEditFirstResponderBehavior() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        XCTAssertNil(view.activeEditingField)
+
+        view.startEditing(.minutes)
+        XCTAssertEqual(view.activeEditingField, .minutes)
+
+        view.startEditing(.seconds)
+        XCTAssertEqual(view.activeEditingField, .seconds)
+
+        view.stopEditing()
+        XCTAssertNil(view.activeEditingField)
+    }
+
+    @MainActor
+    func testCustomTimerUX_17_NoInitialTextSelectionOnFreshLaunch() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        hostingView.layoutSubtreeIfNeeded()
+
+        XCTAssertFalse(containsEditableTextInput(in: hostingView), "Display mode must not have any editable text responder")
+        XCTAssertNil(view.activeEditingField)
+    }
+
+    @MainActor
+    func testCustomTimerUX_18_NoDigitTruncationAtNarrowWidths() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 120, seconds: 45)
+        for size: CGFloat in [220, 260, 316, 380, 500] {
+            let view = InPlaceTimeInputView(viewModel: vm, size: size)
+            let hostingView = NSHostingView(rootView: view)
+            hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+            hostingView.layoutSubtreeIfNeeded()
+
+            let strings = collectAllRenderedStrings(in: hostingView)
+            for s in strings {
+                XCTAssertFalse(s.contains("..."), "No truncation ellipsis allowed at size \(size)")
+                XCTAssertFalse(s.contains("…"), "No unicode ellipsis allowed at size \(size)")
+            }
+        }
+    }
+
+    @MainActor
+    func testCustomTimerUX_19_StartButtonInteractionWithActiveDraft() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        // User starts editing minutes and types 45
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "45")
+
+        // User presses Start (toggleTimer) without pressing Enter first
+        vm.toggleTimer()
+
+        // Draft must be committed and timer must start with 45 minutes!
+        XCTAssertFalse(controller.isEditing, "Active draft must conclude upon starting timer")
+        XCTAssertEqual(vm.totalTime, 2700, "Timer must start with the valid committed draft (45m)")
+        XCTAssertTrue(vm.isTimerRunning, "Timer must be running")
+
+        // Stop timer for next phase
+        vm.toggleTimer()
+        XCTAssertFalse(vm.isTimerRunning)
+
+        // Now test invalid draft: user types 00:02 (< 5s)
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "0")
+        controller.updateDraft(field: .seconds, text: "02")
+
+        vm.toggleTimer()
+        XCTAssertFalse(vm.isTimerRunning, "Timer must NOT start when draft is invalid")
+        XCTAssertEqual(vm.totalTime, 2700, "Timer duration must not be corrupted by invalid draft")
+    }
+
+    @MainActor
+    func testCustomTimerUX_20_SessionConflictBehaviorRemainsCorrect() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.startTimer()
+        // Simulate elapsed time
+        vm.timeRemaining = 20 * 60 // 5m elapsed
+
+        // Changing preset while active timer has elapsed time must request confirmation
+        vm.switchToBreak(minutes: 5)
+        XCTAssertTrue(vm.showConflictModal, "Switching presets while session is active must show conflict modal")
+        XCTAssertEqual(vm.pendingTimerRequest?.name, "Short Break")
+
+        // User cancels / keeps session
+        vm.continueCurrentTimer()
+        XCTAssertFalse(vm.showConflictModal)
+        XCTAssertTrue(vm.isFocusPreset)
+    }
+
     // MARK: - Stopwatch Lap Integrity Tests
 
     // 1. Record first lap at 10.5s -> Lap 1 duration = 10.5s, total = 10.5s

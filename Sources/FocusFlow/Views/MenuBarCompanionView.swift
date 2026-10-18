@@ -50,17 +50,7 @@ public struct MenuBarCompanionView: View {
     private var selectedMode: TimerViewModel.CompanionMode {
         viewModel.selectedCompanionMode
     }
-    @State private var inputMinutes: String = "25"
-    @State private var inputSeconds: String = "00"
-    @State private var isEditingDirectTime: Bool = false
-    @State private var isSyncingFields: Bool = false
-
-    private enum CompanionTimeInputField: Hashable {
-        case minutes
-        case seconds
-    }
-    @FocusState private var focusedCompanionField: CompanionTimeInputField?
-    @State private var activeCompanionField: CompanionTimeInputField? = nil
+    @StateObject private var companionController = TimeInputController()
 
     @State private var isPlayHovered: Bool = false
     @State private var isLapHovered: Bool = false
@@ -77,10 +67,6 @@ public struct MenuBarCompanionView: View {
     public init(viewModel: TimerViewModel, audioPlayer: AmbientAudioPlayer) {
         self.viewModel = viewModel
         self.audioPlayer = audioPlayer
-        let m = viewModel.totalTime >= 60 ? viewModel.totalTime / 60 : 0
-        let s = viewModel.totalTime % 60
-        _inputMinutes = State(initialValue: "\(m)")
-        _inputSeconds = State(initialValue: String(format: "%02d", s))
     }
 
     private var isBreak: Bool {
@@ -129,7 +115,16 @@ public struct MenuBarCompanionView: View {
         .frame(width: 316)
         .background(Color(red: 0.08, green: 0.09, blue: 0.13))
         .onAppear {
-            syncInputFields()
+            companionController.sync(from: viewModel.totalTime)
+            companionController.onCommit = { [weak targetVM = viewModel] minutes, seconds in
+                guard let viewModel = targetVM else { return }
+                if viewModel.isBreakPreset {
+                    let name = (minutes >= 15) ? "Long Break" : "Short Break"
+                    viewModel.requestModeOrPresetChange(name: name, minutes: minutes, seconds: seconds, mode: "Pomodoro", isBreak: true, origin: .menuBar)
+                } else {
+                    viewModel.setCustomDuration(minutes: minutes, seconds: seconds, origin: .menuBar)
+                }
+            }
             if viewModel.isStopwatchRunning && !viewModel.isTimerRunning && !viewModel.isTimerActive {
                 viewModel.selectedCompanionMode = .stopwatch
             } else if viewModel.isTimerRunning && !viewModel.isStopwatchRunning {
@@ -137,38 +132,10 @@ public struct MenuBarCompanionView: View {
             }
         }
         .onChange(of: viewModel.totalTime) { _, _ in
-            if !isEditingDirectTime {
-                syncInputFields()
-            }
+            companionController.sync(from: viewModel.totalTime)
         }
         .onExitCommand {
-            stopEditing()
-        }
-        .onChange(of: focusedCompanionField) { _, newField in
-            if newField == nil {
-                activeCompanionField = nil
-                isEditingDirectTime = false
-            } else {
-                activeCompanionField = newField
-                isEditingDirectTime = true
-            }
-        }
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: viewModel.activePreset)
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: viewModel.isTimerRunning)
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: viewModel.isStopwatchRunning)
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: audioPlayer.isPlaying)
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: audioPlayer.selectedSound)
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: viewModel.showConflictModal)
-    }
-
-    private func syncInputFields() {
-        isSyncingFields = true
-        let m = viewModel.totalTime / 60
-        let s = viewModel.totalTime % 60
-        inputMinutes = "\(m)"
-        inputSeconds = String(format: "%02d", s)
-        DispatchQueue.main.async {
-            isSyncingFields = false
+            companionController.cancelEditing()
         }
     }
 
@@ -351,49 +318,52 @@ public struct MenuBarCompanionView: View {
                 // Direct Input Area: Click/type right inside where time is shown!
                 VStack(spacing: 6) {
                     HStack(alignment: .center, spacing: 6) {
-                        // -5m quick stepper
+                        // -5m quick stepper (seconds-preserving)
                         Button {
-                            adjustMinutes(by: -5)
+                            companionController.adjustMinutes(by: -5)
                         } label: {
                             Image(systemName: "minus.circle.fill")
                                 .font(.system(size: 18))
                                 .foregroundColor(.gray.opacity(0.8))
                         }
                         .buttonStyle(.plain)
-                        .help("Subtract 5 minutes")
+                        .accessibilityLabel("Subtract 5 minutes")
+                        .help("Subtract 5 minutes (preserves seconds)")
 
                         // Minutes Direct Input Field
                         ZStack {
                             RoundedRectangle(cornerRadius: 8)
-                                .fill(Color.white.opacity(activeCompanionField == .minutes ? 0.10 : 0.08))
+                                .fill(Color.white.opacity(companionController.activeEditingField == .minutes ? 0.12 : 0.08))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 8)
-                                        .stroke(activeCompanionField == .minutes ? Color.orange : Color.orange.opacity(0.40), lineWidth: activeCompanionField == .minutes ? 2 : 1)
+                                        .stroke(companionController.activeEditingField == .minutes ? Color.orange : Color.orange.opacity(0.40), lineWidth: companionController.activeEditingField == .minutes ? 2 : 1)
                                 )
 
-                            if activeCompanionField == .minutes {
-                                TextField("25", text: $inputMinutes)
-                                    .font(.system(size: 24, weight: .bold, design: .rounded))
-                                    .monospacedDigit()
-                                    .multilineTextAlignment(.center)
-                                    .textFieldStyle(.plain)
-                                    .foregroundColor(.white)
-                                    .focused($focusedCompanionField, equals: .minutes)
-                                    .onSubmit {
-                                        applyCustomInput()
-                                        startEditing(.seconds)
+                            if companionController.activeEditingField == .minutes {
+                                TimeDigitField(
+                                    text: $companionController.inputMinutes,
+                                    placeholder: "25",
+                                    fontSize: 24,
+                                    maxLength: 3,
+                                    onTab: {
+                                        companionController.commitAndSwitchField(to: .seconds)
+                                    },
+                                    onBacktab: {
+                                        companionController.commitEditing()
+                                    },
+                                    onReturn: {
+                                        companionController.commitEditing()
+                                    },
+                                    onEscape: {
+                                        companionController.cancelEditing()
+                                    },
+                                    onFocusLost: {
+                                        companionController.commitEditing()
                                     }
-                                    .onChange(of: inputMinutes) { _, newVal in
-                                        guard !isSyncingFields else { return }
-                                        let digits = newVal.filter { $0.isNumber }
-                                        let val = min(Int(digits) ?? 0, 360)
-                                        if digits != newVal {
-                                            inputMinutes = "\(val)"
-                                        }
-                                        applyCustomInput()
-                                    }
+                                )
+                                .padding(.horizontal, 2)
                             } else {
-                                Text(inputMinutes)
+                                Text(companionController.inputMinutes)
                                     .font(.system(size: 24, weight: .bold, design: .rounded))
                                     .monospacedDigit()
                                     .multilineTextAlignment(.center)
@@ -407,8 +377,13 @@ public struct MenuBarCompanionView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .contentShape(RoundedRectangle(cornerRadius: 8))
                         .onTapGesture {
-                            startEditing(.minutes)
+                            if companionController.activeEditingField != .minutes {
+                                companionController.startEditing(.minutes)
+                            }
                         }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("Minutes, \(companionController.inputMinutes)")
+                        .accessibilityHint("Click to edit minutes")
 
                         Text(":")
                             .font(.system(size: 22, weight: .bold, design: .rounded))
@@ -417,38 +392,37 @@ public struct MenuBarCompanionView: View {
                         // Seconds Direct Input Field
                         ZStack {
                             RoundedRectangle(cornerRadius: 8)
-                                .fill(Color.white.opacity(activeCompanionField == .seconds ? 0.10 : 0.08))
+                                .fill(Color.white.opacity(companionController.activeEditingField == .seconds ? 0.12 : 0.08))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 8)
-                                        .stroke(activeCompanionField == .seconds ? Color.orange : Color.white.opacity(0.15), lineWidth: activeCompanionField == .seconds ? 2 : 1)
+                                        .stroke(companionController.activeEditingField == .seconds ? Color.orange : Color.white.opacity(0.15), lineWidth: companionController.activeEditingField == .seconds ? 2 : 1)
                                 )
 
-                            if activeCompanionField == .seconds {
-                                TextField("00", text: $inputSeconds)
-                                    .font(.system(size: 24, weight: .bold, design: .rounded))
-                                    .monospacedDigit()
-                                    .multilineTextAlignment(.center)
-                                    .textFieldStyle(.plain)
-                                    .foregroundColor(.white)
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.65)
-                                    .padding(.horizontal, 2)
-                                    .focused($focusedCompanionField, equals: .seconds)
-                                    .onSubmit {
-                                        applyCustomInput()
-                                        stopEditing()
+                            if companionController.activeEditingField == .seconds {
+                                TimeDigitField(
+                                    text: $companionController.inputSeconds,
+                                    placeholder: "00",
+                                    fontSize: 24,
+                                    maxLength: 2,
+                                    onTab: {
+                                        companionController.commitEditing()
+                                    },
+                                    onBacktab: {
+                                        companionController.commitAndSwitchField(to: .minutes)
+                                    },
+                                    onReturn: {
+                                        companionController.commitEditing()
+                                    },
+                                    onEscape: {
+                                        companionController.cancelEditing()
+                                    },
+                                    onFocusLost: {
+                                        companionController.commitEditing()
                                     }
-                                    .onChange(of: inputSeconds) { _, newVal in
-                                        guard !isSyncingFields else { return }
-                                        let digits = newVal.filter { $0.isNumber }
-                                        let val = min(Int(digits) ?? 0, 59)
-                                        if digits != newVal {
-                                            inputSeconds = String(format: "%02d", val)
-                                        }
-                                        applyCustomInput()
-                                    }
+                                )
+                                .padding(.horizontal, 2)
                             } else {
-                                Text(inputSeconds)
+                                Text(companionController.inputSeconds)
                                     .font(.system(size: 24, weight: .bold, design: .rounded))
                                     .monospacedDigit()
                                     .multilineTextAlignment(.center)
@@ -462,19 +436,25 @@ public struct MenuBarCompanionView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .contentShape(RoundedRectangle(cornerRadius: 8))
                         .onTapGesture {
-                            startEditing(.seconds)
+                            if companionController.activeEditingField != .seconds {
+                                companionController.startEditing(.seconds)
+                            }
                         }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("Seconds, \(companionController.inputSeconds)")
+                        .accessibilityHint("Click to edit seconds")
 
-                        // +5m quick stepper
+                        // +5m quick stepper (seconds-preserving)
                         Button {
-                            adjustMinutes(by: 5)
+                            companionController.adjustMinutes(by: 5)
                         } label: {
                             Image(systemName: "plus.circle.fill")
                                 .font(.system(size: 18))
                                 .foregroundColor(.orange)
                         }
                         .buttonStyle(.plain)
-                        .help("Add 5 minutes")
+                        .accessibilityLabel("Add 5 minutes")
+                        .help("Add 5 minutes (preserves seconds)")
                     }
 
                     // Quick Chips directly inside the time input area
@@ -482,7 +462,7 @@ public struct MenuBarCompanionView: View {
                         ForEach([10, 15, 25, 30, 45, 60], id: \.self) { chipM in
                             let isCurrent = (viewModel.totalTime / 60) == chipM && (viewModel.totalTime % 60) == 0
                             Button {
-                                selectQuickDuration(minutes: chipM)
+                                companionController.selectPreset(minutes: chipM)
                             } label: {
                                 Text("\(chipM)m")
                                     .font(.system(size: 10, weight: isCurrent ? .bold : .medium))
@@ -512,65 +492,14 @@ public struct MenuBarCompanionView: View {
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.06), lineWidth: 1))
     }
 
-    private func startEditing(_ field: CompanionTimeInputField) {
-        activeCompanionField = field
-        focusedCompanionField = field
-        isEditingDirectTime = true
-        DispatchQueue.main.async {
-            NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
-        }
-    }
-
-    private func stopEditing() {
-        focusedCompanionField = nil
-        activeCompanionField = nil
-        isEditingDirectTime = false
-    }
-
-    private func adjustMinutes(by delta: Int) {
-        stopEditing()
-        let currentM = Int(inputMinutes.filter { $0.isNumber }) ?? (viewModel.totalTime / 60)
-        let newM = min(max(currentM + delta, 1), 360)
-        inputMinutes = "\(newM)"
-        inputSeconds = "00"
-        if viewModel.isBreakPreset {
-            viewModel.switchToBreak(minutes: newM, origin: .menuBar)
-        } else {
-            viewModel.setCustomDuration(minutes: newM, seconds: 0, origin: .menuBar)
-        }
-    }
-
-    private func selectQuickDuration(minutes: Int) {
-        stopEditing()
-        inputMinutes = "\(minutes)"
-        inputSeconds = "00"
-        if viewModel.isBreakPreset {
-            viewModel.switchToBreak(minutes: minutes, origin: .menuBar)
-        } else {
-            viewModel.setCustomDuration(minutes: minutes, seconds: 0, origin: .menuBar)
-        }
-    }
-
-    private func applyCustomInput() {
-        guard !isSyncingFields else { return }
-        let m = min(max(Int(inputMinutes.filter { $0.isNumber }) ?? 0, 0), 360)
-        let s = min(max(Int(inputSeconds.filter { $0.isNumber }) ?? 0, 0), 59)
-        let total = m * 60 + s
-        if total >= 5 {
-            if viewModel.isBreakPreset {
-                let name = (m >= 15) ? "Long Break" : "Short Break"
-                viewModel.requestModeOrPresetChange(name: name, minutes: m, seconds: s, mode: "Pomodoro", isBreak: true, origin: .menuBar)
-            } else {
-                viewModel.setCustomDuration(minutes: m, seconds: s, origin: .menuBar)
-            }
-        }
-    }
-
     // MARK: - 4. Timer Action Buttons
     private var timerActionButtonsRow: some View {
         HStack(spacing: 8) {
             // Start / Pause
             Button {
+                if companionController.isEditing {
+                    guard companionController.commitEditing() else { return }
+                }
                 viewModel.toggleTimer()
             } label: {
                 HStack(spacing: 5) {
@@ -602,7 +531,8 @@ public struct MenuBarCompanionView: View {
             // Reset
             Button {
                 viewModel.resetFocusTimer()
-                syncInputFields()
+                companionController.cancelEditing()
+                companionController.sync(from: viewModel.totalTime)
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.counterclockwise")
@@ -624,7 +554,8 @@ public struct MenuBarCompanionView: View {
             // Skip
             Button {
                 viewModel.skipSession()
-                syncInputFields()
+                companionController.cancelEditing()
+                companionController.sync(from: viewModel.totalTime)
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "forward.end.fill")
@@ -663,7 +594,7 @@ public struct MenuBarCompanionView: View {
             } else {
                 viewModel.requestPresetChange(name: name, minutes: minutes, origin: .menuBar)
             }
-            syncInputFields()
+            companionController.sync(from: viewModel.totalTime)
         } label: {
             HStack(spacing: 3) {
                 Image(systemName: icon)
@@ -703,7 +634,7 @@ public struct MenuBarCompanionView: View {
 
                 Button {
                     viewModel.continueCurrentTimer()
-                    syncInputFields()
+                    companionController.sync(from: viewModel.totalTime)
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 9, weight: .bold))
@@ -774,7 +705,7 @@ public struct MenuBarCompanionView: View {
             HStack(spacing: 8) {
                 Button {
                     viewModel.continueCurrentTimer()
-                    syncInputFields()
+                    companionController.sync(from: viewModel.totalTime)
                 } label: {
                     Text("Keep Current Session")
                         .font(.system(size: 10.5, weight: .medium))
@@ -792,7 +723,7 @@ public struct MenuBarCompanionView: View {
 
                 Button {
                     viewModel.endAndSwitch()
-                    syncInputFields()
+                    companionController.sync(from: viewModel.totalTime)
                 } label: {
                     Text("End & Switch")
                         .font(.system(size: 10.5, weight: .bold))

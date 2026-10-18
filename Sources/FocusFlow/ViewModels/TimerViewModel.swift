@@ -36,7 +36,14 @@ public class TimerViewModel: ObservableObject {
             }
         }
     }
-    @Published public var totalTime: Int = 25 * 60
+
+    public let customTimeInputController = TimeInputController()
+
+    @Published public var totalTime: Int = 25 * 60 {
+        didSet {
+            customTimeInputController.sync(from: totalTime)
+        }
+    }
     @Published public var currentSession: Int = 1 {
         didSet {
             if pausedSession != nil {
@@ -539,6 +546,28 @@ public class TimerViewModel: ObservableObject {
         loadPersistedData()
         NotificationService.shared.requestAuthorization()
         setupDateChangeMonitoring()
+        setupCustomTimeInputController()
+    }
+
+    private func setupCustomTimeInputController() {
+        customTimeInputController.sync(from: totalTime)
+        customTimeInputController.onCommit = { [weak self] minutes, seconds in
+            guard let self = self else { return }
+            if self.isBreakPreset {
+                let name = (minutes >= 15) ? "Long Break" : "Short Break"
+                self.requestModeOrPresetChange(name: name, minutes: minutes, seconds: seconds, mode: "Pomodoro", isBreak: true)
+            } else {
+                self.setCustomDuration(minutes: minutes, seconds: seconds)
+            }
+        }
+    }
+
+    @discardableResult
+    public func commitActiveTimeInputBeforeStart() -> Bool {
+        if customTimeInputController.isEditing {
+            return customTimeInputController.commitEditing()
+        }
+        return true
     }
 
     deinit {
@@ -2013,6 +2042,9 @@ public class TimerViewModel: ObservableObject {
 
     public func toggleTimer() {
         guard !isPersistenceBlocked else { return }
+        if !isTimerRunning && customTimeInputController.isEditing {
+            guard commitActiveTimeInputBeforeStart() else { return }
+        }
         let now = currentDateProvider()
         if reconcileIfExpired(at: now) {
             return
