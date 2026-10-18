@@ -373,7 +373,7 @@ public struct MenuBarCompanionView: View {
 
                             if activeCompanionField == .minutes {
                                 TextField("25", text: $inputMinutes)
-                                    .font(.system(size: 34, weight: .bold, design: .rounded))
+                                    .font(.system(size: 24, weight: .bold, design: .rounded))
                                     .monospacedDigit()
                                     .multilineTextAlignment(.center)
                                     .textFieldStyle(.plain)
@@ -394,7 +394,7 @@ public struct MenuBarCompanionView: View {
                                     }
                             } else {
                                 Text(inputMinutes)
-                                    .font(.system(size: 34, weight: .bold, design: .rounded))
+                                    .font(.system(size: 24, weight: .bold, design: .rounded))
                                     .monospacedDigit()
                                     .multilineTextAlignment(.center)
                                     .foregroundColor(.white)
@@ -404,13 +404,14 @@ public struct MenuBarCompanionView: View {
                             }
                         }
                         .frame(width: 68, height: 38)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
                         .contentShape(RoundedRectangle(cornerRadius: 8))
                         .onTapGesture {
                             startEditing(.minutes)
                         }
 
                         Text(":")
-                            .font(.system(size: 28, weight: .bold, design: .rounded))
+                            .font(.system(size: 22, weight: .bold, design: .rounded))
                             .foregroundColor(.gray.opacity(0.7))
 
                         // Seconds Direct Input Field
@@ -424,7 +425,7 @@ public struct MenuBarCompanionView: View {
 
                             if activeCompanionField == .seconds {
                                 TextField("00", text: $inputSeconds)
-                                    .font(.system(size: 34, weight: .bold, design: .rounded))
+                                    .font(.system(size: 24, weight: .bold, design: .rounded))
                                     .monospacedDigit()
                                     .multilineTextAlignment(.center)
                                     .textFieldStyle(.plain)
@@ -448,7 +449,7 @@ public struct MenuBarCompanionView: View {
                                     }
                             } else {
                                 Text(inputSeconds)
-                                    .font(.system(size: 34, weight: .bold, design: .rounded))
+                                    .font(.system(size: 24, weight: .bold, design: .rounded))
                                     .monospacedDigit()
                                     .multilineTextAlignment(.center)
                                     .foregroundColor(.white)
@@ -458,6 +459,7 @@ public struct MenuBarCompanionView: View {
                             }
                         }
                         .frame(width: 68, height: 38)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
                         .contentShape(RoundedRectangle(cornerRadius: 8))
                         .onTapGesture {
                             startEditing(.seconds)

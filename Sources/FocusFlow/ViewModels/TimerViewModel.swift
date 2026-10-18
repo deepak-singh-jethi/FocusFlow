@@ -546,6 +546,11 @@ public class TimerViewModel: ObservableObject {
         midnightRefreshCancellable?.cancel()
         pendingSaveWorkItem?.cancel()
         pendingSaveCancellable?.cancel()
+        dateChangeCancellables.removeAll()
+    }
+
+    public func cancelDateChangeMonitoring() {
+        dateChangeCancellables.removeAll()
     }
 
     public private(set) var hasTerminated: Bool = false
@@ -1395,7 +1400,8 @@ public class TimerViewModel: ObservableObject {
         NotificationCenter.default.publisher(for: .NSCalendarDayChanged)
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    self?.handleDateOrLifecycleChange()
+                    guard let self = self, !self.hasTerminated else { return }
+                    self.handleDateOrLifecycleChange()
                 }
             }
             .store(in: &dateChangeCancellables)
@@ -1403,7 +1409,8 @@ public class TimerViewModel: ObservableObject {
         NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    self?.handleDateOrLifecycleChange()
+                    guard let self = self, !self.hasTerminated else { return }
+                    self.handleDateOrLifecycleChange()
                 }
             }
             .store(in: &dateChangeCancellables)
@@ -1411,7 +1418,8 @@ public class TimerViewModel: ObservableObject {
         NotificationCenter.default.publisher(for: .NSSystemTimeZoneDidChange)
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    self?.handleSystemTimeZoneChange()
+                    guard let self = self, !self.hasTerminated else { return }
+                    self.handleSystemTimeZoneChange()
                 }
             }
             .store(in: &dateChangeCancellables)
@@ -1419,7 +1427,8 @@ public class TimerViewModel: ObservableObject {
         NotificationCenter.default.publisher(for: .NSSystemClockDidChange)
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    self?.handleDateOrLifecycleChange()
+                    guard let self = self, !self.hasTerminated else { return }
+                    self.handleDateOrLifecycleChange()
                 }
             }
             .store(in: &dateChangeCancellables)
@@ -1427,7 +1436,8 @@ public class TimerViewModel: ObservableObject {
         NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    self?.handleDateOrLifecycleChange()
+                    guard let self = self, !self.hasTerminated else { return }
+                    self.handleDateOrLifecycleChange()
                 }
             }
             .store(in: &dateChangeCancellables)

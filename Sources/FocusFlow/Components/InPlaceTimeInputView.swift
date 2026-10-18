@@ -61,17 +61,17 @@ public struct InPlaceTimeInputView: View {
 
     public var body: some View {
         let isStageCompact = isCompact || size < 340
-        let digitFontSize = max(36, min(size * 0.18, 76))
-        let colonFontSize = max(30, min(size * 0.15, 66))
-        let minutesBoxWidth = max(98, min(size * 0.29, 144))
-        let secondsBoxWidth = max(98, min(size * 0.29, 144))
-        let boxHeight = max(56, min(size * 0.18, 82))
-        let stepperSize = max(30, min(size * 0.085, 40))
-        let stepperIconSize = max(16, min(size * 0.048, 24))
+        let digitFontSize = max(32, min(size * 0.125, 48))
+        let colonFontSize = max(26, min(size * 0.09, 36))
+        let minutesBoxWidth = max(100, min(size * 0.30, 136))
+        let secondsBoxWidth = max(100, min(size * 0.30, 136))
+        let boxHeight = max(60, min(size * 0.19, 78))
+        let stepperSize = max(30, min(size * 0.085, 38))
+        let stepperIconSize = max(16, min(size * 0.048, 22))
 
         VStack(spacing: max(10, size * 0.026)) {
             // MARK: - 1. Time Display & Quick Steppers (Optically Centered)
-            VStack(spacing: max(5, size * 0.014)) {
+            VStack(spacing: max(8, size * 0.022)) {
                 HStack(alignment: .center, spacing: max(8, size * 0.022)) {
                     // -5m Quick Stepper
                     Button {
@@ -132,6 +132,7 @@ public struct InPlaceTimeInputView: View {
                         }
                     }
                     .frame(width: minutesBoxWidth, height: boxHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
                     .contentShape(RoundedRectangle(cornerRadius: 14))
                     .onHover { h in isMinutesHovered = h }
                     .onTapGesture {
@@ -188,6 +189,7 @@ public struct InPlaceTimeInputView: View {
                         }
                     }
                     .frame(width: secondsBoxWidth, height: boxHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
                     .contentShape(RoundedRectangle(cornerRadius: 14))
                     .onHover { h in isSecondsHovered = h }
                     .onTapGesture {
@@ -211,7 +213,7 @@ public struct InPlaceTimeInputView: View {
 
                 // Sublabels Row (Symmetrically aligned directly beneath the cards)
                 HStack(spacing: max(8, size * 0.022)) {
-                    Color.clear.frame(width: stepperSize, height: 1)
+                    Color.clear.frame(width: stepperSize, height: 12)
 
                     Text("MINUTES")
                         .font(.system(size: max(8, min(size * 0.024, 10)), weight: .bold))
@@ -222,6 +224,7 @@ public struct InPlaceTimeInputView: View {
                     Text(":")
                         .font(.system(size: colonFontSize, weight: .bold, design: .rounded))
                         .opacity(0)
+                        .frame(height: 12)
 
                     Text("SECONDS")
                         .font(.system(size: max(8, min(size * 0.024, 10)), weight: .bold))
@@ -229,7 +232,7 @@ public struct InPlaceTimeInputView: View {
                         .foregroundColor(model.activeEditingField == .seconds ? activeColor : .gray.opacity(0.7))
                         .frame(width: secondsBoxWidth)
 
-                    Color.clear.frame(width: stepperSize, height: 1)
+                    Color.clear.frame(width: stepperSize, height: 12)
                 }
             }
 

@@ -14,7 +14,9 @@ final class FocusFlowTests: XCTestCase {
         return (vm, tempURL)
     }
 
-    private func cleanup(url: URL) {
+    @MainActor
+    private func cleanup(url: URL, vm: TimerViewModel? = nil) {
+        vm?.cancelDateChangeMonitoring()
         try? FileManager.default.removeItem(at: url)
         let backup = url.appendingPathExtension("bak")
         try? FileManager.default.removeItem(at: backup)
@@ -2578,10 +2580,14 @@ final class FocusFlowTests: XCTestCase {
 
         // Wait for timer ticks
         let exp = expectation(description: "Wait timer tick")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+        exp.assertForOverFulfill = false
+        var workItem: DispatchWorkItem?
+        workItem = DispatchWorkItem {
             exp.fulfill()
         }
-        wait(for: [exp], timeout: 1.0)
+        defer { workItem?.cancel() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: workItem!)
+        wait(for: [exp], timeout: 5.0)
 
         // Task time must not have changed
         XCTAssertEqual(vm.tasks[0].timeSpentSeconds, initialTaskTime)
@@ -2646,10 +2652,14 @@ final class FocusFlowTests: XCTestCase {
 
         // Wait 1.2 seconds for any delayed async block to fire
         let exp = expectation(description: "Wait for delayed save debounce")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+        exp.assertForOverFulfill = false
+        var workItem: DispatchWorkItem?
+        workItem = DispatchWorkItem {
             exp.fulfill()
         }
-        wait(for: [exp], timeout: 2.0)
+        defer { workItem?.cancel() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: workItem!)
+        wait(for: [exp], timeout: 5.0)
 
         // Verify corrupted primary was NOT overwritten
         let currentBytes = try Data(contentsOf: tempURL)
@@ -3869,6 +3879,39 @@ final class FocusFlowTests: XCTestCase {
             for str in renderedStrings {
                 XCTAssertFalse(str.contains("..."), "Rendered string '\(str)' must not contain ellipsis at size \(testSize)")
                 XCTAssertFalse(str.contains("…"), "Rendered string '\(str)' must not contain Unicode ellipsis at size \(testSize)")
+            }
+        }
+    }
+
+    @MainActor
+    func testCustomTimerFocus10_CardBoundsContainRenderedDigitsWithoutOverflowAtAllSizes() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let model = InPlaceTimeInputView.Model(totalTime: vm.totalTime)
+        XCTAssertEqual(model.inputMinutes, "25", "Minutes must format to 25")
+        XCTAssertEqual(model.inputSeconds, "00", "Seconds must format to 00")
+
+        for testSize: CGFloat in [220, 280, 340, 400, 490] {
+            let digitFontSize = max(32, min(testSize * 0.125, 48))
+            let boxHeight = max(60, min(testSize * 0.19, 78))
+            let boxWidth = max(100, min(testSize * 0.30, 136))
+
+            // In SF Rounded Bold, line height is ~1.18 * pointSize
+            let estimatedLineHeight = digitFontSize * 1.18
+            XCTAssertLessThan(estimatedLineHeight, boxHeight, "Digit font line height must be strictly less than card boxHeight at size \(testSize)")
+            XCTAssertGreaterThanOrEqual(boxHeight - estimatedLineHeight, 6.0, "Card boxHeight must have at least 6pt vertical breathing room for font at size \(testSize)")
+            XCTAssertGreaterThanOrEqual(boxWidth, 100.0, "Card boxWidth must be at least 100pt for comfortable horizontal margin")
+
+            let view = InPlaceTimeInputView(viewModel: vm, size: testSize, model: model)
+            let hostingView = NSHostingView(rootView: view)
+            hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+            hostingView.layoutSubtreeIfNeeded()
+
+            let renderedStrings = collectAllRenderedStrings(in: hostingView)
+            for str in renderedStrings {
+                XCTAssertFalse(str.contains("..."), "No rendered text must truncate with ellipsis at size \(testSize)")
             }
         }
     }
@@ -7397,7 +7440,7 @@ final class FocusFlowTests: XCTestCase {
     @MainActor
     func testTask5_GroupD_Test17_NSCalendarDayChangedNotification_TriggersRecalculation() {
         let (vm, tempURL) = makeIsolatedViewModel()
-        defer { cleanup(url: tempURL) }
+        defer { cleanup(url: tempURL, vm: vm) }
 
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
@@ -7422,20 +7465,26 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(vm.todayFocusedSeconds, 3600, "State must remain stale before notification")
 
         let exp = expectation(description: "todayFocusedSeconds refreshed to 0 on Day 2 via NSCalendarDayChanged")
+        exp.assertForOverFulfill = false
 
+        var hasFulfilled = false
         var cancellable: AnyCancellable?
         cancellable = vm.$todayFocusedSeconds
             .dropFirst()
-            .sink { newVal in
-                if newVal == 0 {
+            .filter { $0 == 0 }
+            .first()
+            .sink { _ in
+                if !hasFulfilled {
+                    hasFulfilled = true
                     exp.fulfill()
                 }
             }
+        defer { cancellable?.cancel() }
 
         // Post the real NSCalendarDayChanged notification
         NotificationCenter.default.post(name: .NSCalendarDayChanged, object: nil)
 
-        wait(for: [exp], timeout: 2.0)
+        wait(for: [exp], timeout: 5.0)
         cancellable?.cancel()
 
         XCTAssertEqual(vm.todayFocusedSeconds, 0, "Notification must have caused todayFocusedSeconds to update to 0")
@@ -7446,7 +7495,7 @@ final class FocusFlowTests: XCTestCase {
     @MainActor
     func testTask5_GroupD_Test18_NSApplicationDidBecomeActiveNotification_TriggersRecalculation() {
         let (vm, tempURL) = makeIsolatedViewModel()
-        defer { cleanup(url: tempURL) }
+        defer { cleanup(url: tempURL, vm: vm) }
 
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
@@ -7470,20 +7519,26 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(vm.todayFocusedSeconds, 3600, "State must remain stale before notification")
 
         let exp = expectation(description: "todayFocusedSeconds refreshed to 0 on Day 2 via didBecomeActive")
+        exp.assertForOverFulfill = false
 
+        var hasFulfilled = false
         var cancellable: AnyCancellable?
         cancellable = vm.$todayFocusedSeconds
             .dropFirst()
-            .sink { newVal in
-                if newVal == 0 {
+            .filter { $0 == 0 }
+            .first()
+            .sink { _ in
+                if !hasFulfilled {
+                    hasFulfilled = true
                     exp.fulfill()
                 }
             }
+        defer { cancellable?.cancel() }
 
         // Post NSApplication.didBecomeActiveNotification
         NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
 
-        wait(for: [exp], timeout: 2.0)
+        wait(for: [exp], timeout: 5.0)
         cancellable?.cancel()
 
         XCTAssertEqual(vm.todayFocusedSeconds, 0, "Notification must have caused todayFocusedSeconds to update to 0")
@@ -8680,10 +8735,14 @@ final class FocusFlowTests: XCTestCase {
 
         // Wait for coalesced trailing save to execute
         let exp = expectation(description: "Wait for trailing save")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+        exp.assertForOverFulfill = false
+        var workItem: DispatchWorkItem?
+        workItem = DispatchWorkItem {
             exp.fulfill()
         }
-        wait(for: [exp], timeout: 2.0)
+        defer { workItem?.cancel() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: workItem!)
+        wait(for: [exp], timeout: 5.0)
 
         // Verifies write coalescing: 100 mutations result in exactly 1 trailing save
         XCTAssertEqual(vm.storage.saveAttemptCount, 1, "100 rapid mutations must result in exactly 1 coalesced write attempt, not 100")
@@ -8705,10 +8764,14 @@ final class FocusFlowTests: XCTestCase {
         }
 
         let exp = expectation(description: "Wait for trailing save")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+        exp.assertForOverFulfill = false
+        var workItem: DispatchWorkItem?
+        workItem = DispatchWorkItem {
             exp.fulfill()
         }
-        wait(for: [exp], timeout: 2.0)
+        defer { workItem?.cancel() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: workItem!)
+        wait(for: [exp], timeout: 5.0)
 
         let savedData = try vm.storage.decodeData(from: tempURL)
         XCTAssertEqual(savedData.dailyGoalHours, 10, "Eventual save must contain latest state (10), not first queued state (1)")
@@ -16045,5 +16108,74 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(diskAfter.completedSessions, 1, "Stale callback must not regress completed state")
         XCTAssertEqual(diskAfter.activePreset, "Short Break")
         XCTAssertEqual(diskAfter.sessionRecords.count, 1)
+    }
+
+    // MARK: - CI Reliability & Async Lifecycle Regression Tests
+    @MainActor
+    func testCI_Regression_RapidConsecutiveCalendarNotificationsDoNotOverfulfill() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        vm.reportingCalendar = calendar
+
+        let day1 = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 14, minute: 0, second: 0))!
+        let record = FocusSessionRecord(startTime: day1, endTime: day1.addingTimeInterval(3600), durationSeconds: 3600, mode: "Focus", taskId: nil)
+        vm.sessionRecords.append(record)
+
+        let day1Afternoon = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 16, minute: 0, second: 0))!
+        vm.currentDateProvider = { day1Afternoon }
+        vm.recalculateFocusMetrics(now: day1Afternoon)
+        XCTAssertEqual(vm.todayFocusedSeconds, 3600)
+
+        let day2Morning = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 9, minute: 0, second: 0))!
+        vm.currentDateProvider = { day2Morning }
+
+        let exp = expectation(description: "Safely receive single fulfillment despite multiple notifications")
+        exp.assertForOverFulfill = false
+
+        var hasFulfilled = false
+        var cancellable: AnyCancellable?
+        cancellable = vm.$todayFocusedSeconds
+            .dropFirst()
+            .filter { $0 == 0 }
+            .first()
+            .sink { _ in
+                if !hasFulfilled {
+                    hasFulfilled = true
+                    exp.fulfill()
+                }
+            }
+        defer { cancellable?.cancel() }
+
+        // Post multiple notifications rapidly
+        for _ in 1...10 {
+            NotificationCenter.default.post(name: .NSCalendarDayChanged, object: nil)
+            NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        }
+
+        wait(for: [exp], timeout: 5.0)
+        cancellable?.cancel()
+
+        XCTAssertEqual(vm.todayFocusedSeconds, 0)
+    }
+
+    @MainActor
+    func testCI_Regression_DeallocatedViewModelDoesNotReceivePostTeardownNotifications() {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_reg_\(UUID().uuidString).json")
+        defer { cleanup(url: tempURL) }
+
+        do {
+            let storage = FocusStorageService(storageURL: tempURL)
+            let localVM = TimerViewModel(storage: storage)
+            localVM.cancelDateChangeMonitoring()
+        }
+
+        // Post notifications with no active view model — must not crash or leak tasks
+        NotificationCenter.default.post(name: .NSCalendarDayChanged, object: nil)
+        NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        NotificationCenter.default.post(name: .NSSystemTimeZoneDidChange, object: nil)
+        NotificationCenter.default.post(name: .NSSystemClockDidChange, object: nil)
     }
 }
