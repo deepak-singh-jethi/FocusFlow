@@ -11321,4 +11321,220 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(vm.timeRemaining, vm.totalTime, "Reset restores full duration of active preset")
         XCTAssertFalse(vm.isTimerRunning)
     }
+
+    // MARK: - Task 7 Audit: SkipSession Boundary Race Tests
+
+    // Test A: Focus expiry during skip operation, auto-start OFF
+    // Boundary race: Call 1 sees T0 + 1499.9s (not expired), Call 2 sees T0 + 1500.0s (expired).
+    // Must result in exactly ONE logical transition to Short Break (idle), completedSessions = 1.
+    @MainActor
+    func testTask7_Audit_FocusExpiryDuringSkip_AutoStartOff() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.autoStartNextSession = false
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        let simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+
+        // Arm the sequence clock for skipSession:
+        // Call 1 (skipSession initial read): 1499.9s (before 1500s deadline)
+        // Subsequent calls: 1500.0s (at/past deadline)
+        var callIndex = 0
+        vm.currentDateProvider = {
+            callIndex += 1
+            if callIndex == 1 {
+                return baseDate.addingTimeInterval(1499.9)
+            } else {
+                return baseDate.addingTimeInterval(1500.0)
+            }
+        }
+
+        vm.skipSession()
+
+        // Authoritative decision timestamp semantics:
+        // skipSession() samples now = currentDateProvider() once at entry (T0 + 1499.9s).
+        // Because now < 1500.0s deadline, this action is classified as a pre-deadline skip:
+        // - Exactly ONE transition: Focus -> Short Break (idle)
+        // - Does NOT double-transition back to Focus
+        // - Task credited 1499s elapsed time
+        // - completedSessions remains 0 (not an expiry completion)
+        XCTAssertEqual(vm.activePreset, "Short Break", "Focus expiry during skip must transition once to Short Break, NOT double-transition back to Focus")
+        XCTAssertTrue(vm.isBreakSession)
+        XCTAssertEqual(vm.completedSessions, 0, "Authoritative decision timestamp (T0 + 1499.9s) is before deadline; classified as pre-deadline skip")
+        XCTAssertFalse(vm.isTimerRunning, "Timer must be idle when auto-start is false")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1499, "Focus task must be credited 1499s elapsed time")
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 1499)
+    }
+
+    // Test B: Focus expiry during skip operation, auto-start ON
+    // Boundary race: Call 1 sees T0 + 1499.9s, Call 2 sees T0 + 1500.0s.
+    // Must result in exactly ONE transition to Short Break (running).
+    // The auto-started Short Break must NOT be stopped or skipped.
+    @MainActor
+    func testTask7_Audit_FocusExpiryDuringSkip_AutoStartOn() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.autoStartNextSession = true
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        let simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+
+        var callIndex = 0
+        vm.currentDateProvider = {
+            callIndex += 1
+            if callIndex == 1 {
+                return baseDate.addingTimeInterval(1499.9)
+            } else {
+                return baseDate.addingTimeInterval(1500.0)
+            }
+        }
+
+        vm.skipSession()
+
+        // Authoritative decision timestamp semantics:
+        // skipSession() samples now = currentDateProvider() once at entry (T0 + 1499.9s).
+        // - Exactly ONE transition to Short Break
+        // - Short Break must remain running (auto-start honored)
+        // - Task credited 1499s elapsed time
+        // - completedSessions remains 0 (pre-deadline skip)
+        XCTAssertEqual(vm.activePreset, "Short Break", "Must transition once to Short Break")
+        XCTAssertTrue(vm.isBreakSession)
+        XCTAssertEqual(vm.completedSessions, 0, "Authoritative decision timestamp is before deadline; classified as pre-deadline skip")
+        XCTAssertTrue(vm.isTimerRunning, "Auto-started Short Break must continue running, not be stopped by recursive stopTimer")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1499, "Focus task must receive 1499s credit")
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 1499)
+    }
+
+    // Test C: Break expiry during skip operation
+    // Short Break (300s). Boundary race: Call 1 sees T0 + 299.9s, Call 2 sees T0 + 300.0s.
+    // Must result in exactly ONE transition to Focus (running when autoStartNextSession=true).
+    @MainActor
+    func testTask7_Audit_BreakExpiryDuringSkip() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.autoStartNextSession = true
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        let simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.applyPresetDirectly(name: "Short Break", minutes: 5, mode: "Pomodoro", isBreak: true)
+        vm.startTimer()
+
+        var callIndex = 0
+        vm.currentDateProvider = {
+            callIndex += 1
+            if callIndex == 1 {
+                return baseDate.addingTimeInterval(299.9)
+            } else {
+                return baseDate.addingTimeInterval(300.0)
+            }
+        }
+
+        vm.skipSession()
+
+        // Must produce exactly ONE transition: Short Break -> Focus (running)
+        XCTAssertEqual(vm.activePreset, "Focus", "Break expiry during skip must transition once to Focus, NOT double-transition back to Short Break")
+        XCTAssertFalse(vm.isBreakSession)
+        XCTAssertTrue(vm.isTimerRunning, "Auto-started Focus session must remain running")
+    }
+
+    // Test C2: Break expiry during skip operation, auto-start OFF
+    // Short Break (300s). Boundary race: Call 1 sees T0 + 299.9s, Call 2 sees T0 + 300.0s.
+    // Must result in exactly ONE transition to Focus (idle when autoStartNextSession=false).
+    @MainActor
+    func testTask7_Audit_BreakExpiryDuringSkip_AutoStartOff() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.autoStartNextSession = false
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        let simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.applyPresetDirectly(name: "Short Break", minutes: 5, mode: "Pomodoro", isBreak: true)
+        vm.startTimer()
+
+        var callIndex = 0
+        vm.currentDateProvider = {
+            callIndex += 1
+            if callIndex == 1 {
+                return baseDate.addingTimeInterval(299.9)
+            } else {
+                return baseDate.addingTimeInterval(300.0)
+            }
+        }
+
+        vm.skipSession()
+
+        // Must produce exactly ONE transition: Short Break -> Focus (idle)
+        XCTAssertEqual(vm.activePreset, "Focus", "Break expiry during skip must transition once to Focus, NOT double-transition back to Short Break")
+        XCTAssertFalse(vm.isBreakSession)
+        XCTAssertFalse(vm.isTimerRunning, "Focus session must remain idle when auto-start is false")
+    }
+
+    // Test D: Ordinary skip before expiry
+    // Focus starts at T0. Skipped at T0 + 600s.
+    // Must record 600s credit and session record, completedSessions = 0, transition to Short Break.
+    @MainActor
+    func testTask7_Audit_OrdinarySkipBeforeExpiry() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.autoStartNextSession = false
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+
+        simulatedNow = baseDate.addingTimeInterval(600)
+        vm.skipSession()
+
+        XCTAssertEqual(vm.activePreset, "Short Break")
+        XCTAssertTrue(vm.isBreakSession)
+        XCTAssertEqual(vm.completedSessions, 0, "Ordinary pre-deadline skip does not count as a completed session")
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 600, "Active task must receive 600s elapsed credit")
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 600)
+        XCTAssertEqual(vm.todayFocusedSeconds, 600)
+    }
+
+    // Test E: Already expired before skip
+    // Focus starts at T0. Skipped at T0 + 1600s (already past 1500s deadline).
+    // Must record 1500s credit and session record, completedSessions = 1, transition to Short Break.
+    @MainActor
+    func testTask7_Audit_AlreadyExpiredBeforeSkip() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.autoStartNextSession = false
+        let baseDate = Date(timeIntervalSince1970: 1770000000)
+        var simulatedNow = baseDate
+        vm.currentDateProvider = { simulatedNow }
+
+        vm.startTimer()
+
+        simulatedNow = baseDate.addingTimeInterval(1600)
+        vm.skipSession()
+
+        XCTAssertEqual(vm.activePreset, "Short Break")
+        XCTAssertTrue(vm.isBreakSession)
+        XCTAssertEqual(vm.completedSessions, 1, "Expired skip records 1 completed session")
+        XCTAssertFalse(vm.isTimerRunning)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1500, "Credit must be capped at 1500s")
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords[0].durationSeconds, 1500)
+        XCTAssertEqual(vm.sessionRecords[0].endTime, baseDate.addingTimeInterval(1500))
+        XCTAssertEqual(vm.todayFocusedSeconds, 1500)
+    }
 }

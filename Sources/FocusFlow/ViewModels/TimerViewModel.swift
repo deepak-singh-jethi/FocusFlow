@@ -451,9 +451,9 @@ public class TimerViewModel: ObservableObject {
         reconcileIfExpired(at: now)
 
         if isTimerRunning {
-            stopTimer()
+            stopTimer(at: now)
         } else {
-            recordActiveSessionSegment()
+            recordActiveSessionSegment(at: now)
         }
 
         if isStopwatchRunning {
@@ -1236,7 +1236,7 @@ public class TimerViewModel: ObservableObject {
 
         let now = currentDateProvider()
         if isTimerRunning {
-            stopTimer()
+            stopTimer(at: now)
         } else {
             reconcileIfExpired(at: now)
             recordActiveSessionSegment(at: now)
@@ -1461,13 +1461,34 @@ public class TimerViewModel: ObservableObject {
         persistData()
     }
 
-    public func stopTimer() {
+    private func settleAndStopRunningCountdown(at now: Date) {
+        if isTimerRunning, let target = targetEndDate {
+            let remaining = max(0, target.timeIntervalSince(now))
+            fractionalRemaining = remaining
+            let newRemaining = max(Int(ceil(remaining)), 0)
+            if isFocusPreset, newRemaining < timeRemaining {
+                let delta = timeRemaining - newRemaining
+                creditTaskTime(taskId: activeSessionTaskId, seconds: delta)
+                segmentCreditedSeconds += delta
+            }
+            synchronizeCountdownRemaining(to: newRemaining)
+            if totalTime > 0 {
+                preciseProgress = min(max(remaining / Double(totalTime), 0.0), 1.0)
+            }
+        }
+        recordActiveSessionSegment(at: now)
+        isTimerRunning = false
+        targetEndDate = nil
+        updateMasterEngine()
+    }
+
+    public func stopTimer(at date: Date? = nil) {
         guard !isPersistenceBlocked else { return }
-        let now = currentDateProvider()
+        let now = date ?? currentDateProvider()
 
         if reconcileIfExpired(at: now) {
             if isTimerRunning {
-                stopTimer()
+                stopTimer(at: now)
             }
             return
         }
@@ -1522,7 +1543,7 @@ public class TimerViewModel: ObservableObject {
             return
         }
         if isTimerRunning {
-            stopTimer()
+            stopTimer(at: now)
         } else {
             if timeRemaining == 0 && hasPreservedSession {
                 restorePreservedSession()
@@ -1537,7 +1558,7 @@ public class TimerViewModel: ObservableObject {
         guard !isPersistenceBlocked else { return }
         let now = currentDateProvider()
         if isTimerRunning {
-            stopTimer()
+            stopTimer(at: now)
         } else {
             reconcileIfExpired(at: now)
         }
@@ -2053,7 +2074,7 @@ public class TimerViewModel: ObservableObject {
             return
         }
         if isTimerRunning {
-            stopTimer()
+            settleAndStopRunningCountdown(at: now)
         } else {
             recordActiveSessionSegment(at: now)
         }
