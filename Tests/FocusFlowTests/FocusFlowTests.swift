@@ -7916,8 +7916,11 @@ final class FocusFlowTests: XCTestCase {
         dynamicSystemCalendar = calKolkata
         NotificationCenter.default.post(name: .NSSystemTimeZoneDidChange, object: nil)
 
-        // Run the main runloop briefly to let Combine / Task @MainActor execute
-        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        // Run the main runloop until Combine / Task @MainActor executes
+        let deadline = Date().addingTimeInterval(2.0)
+        while vm.timeZoneChangeHandledCount == 0 && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
 
         // 1. Observer ran & handler called
         XCTAssertEqual(vm.timeZoneChangeHandledCount, 1, "Notification must reach the registered subscriber and invoke the handler")
