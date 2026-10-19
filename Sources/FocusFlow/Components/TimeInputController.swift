@@ -9,13 +9,32 @@ public enum TimeInputField: Hashable, Sendable {
 }
 
 // MARK: - Time Input Validation Error
-public enum TimeInputValidationError: Error, Equatable, Sendable {
+public enum TimeInputValidationError: Error, Equatable, Sendable, CustomStringConvertible {
     case empty
     case belowMinimum(seconds: Int, minimum: Int)
     case exceedsMaximum(seconds: Int, maximum: Int)
     case invalidSeconds(seconds: Int)
     case invalidMinutes(minutes: Int)
     case nonNumeric
+
+    public var description: String {
+        switch self {
+        case .empty:
+            return "Please enter a time (min 00:05)"
+        case .belowMinimum:
+            return "Minimum timer duration is 00:05"
+        case .exceedsMaximum, .invalidMinutes:
+            return "Maximum timer duration is 360:59"
+        case .invalidSeconds:
+            return "Seconds must be between 00 and 59"
+        case .nonNumeric:
+            return "Please enter valid numeric digits"
+        }
+    }
+
+    public var localizedDescription: String {
+        description
+    }
 }
 
 // MARK: - Time Input Controller & State Machine
@@ -88,7 +107,7 @@ public class TimeInputController: ObservableObject {
     /// Synchronizes committed duration snapshot from external totalTime.
     /// Never clobbers an active user draft while editing.
     public func sync(from totalSeconds: Int) {
-        guard activeEditingField == nil else { return }
+        guard activeEditingField == nil && !hasInvalidDraft else { return }
         let m = totalSeconds >= 60 ? totalSeconds / 60 : 0
         let s = totalSeconds % 60
         committedMinutes = m
@@ -103,7 +122,7 @@ public class TimeInputController: ObservableObject {
 
     // MARK: - Editing Lifecycle
     public func startEditing(_ field: TimeInputField) {
-        if activeEditingField == nil {
+        if activeEditingField == nil && !hasInvalidDraft {
             snapshotMinutes = committedMinutes
             snapshotSeconds = committedSeconds
             // Initialize draft with plain unpadded minutes if >= 10, or 2-digit
@@ -134,11 +153,8 @@ public class TimeInputController: ObservableObject {
         let cleanMStr = inputMinutes.filter { $0.isNumber }
         let cleanSStr = inputSeconds.filter { $0.isNumber }
 
-        let m = cleanMStr.isEmpty ? snapshotMinutes : min(Int(cleanMStr) ?? snapshotMinutes, Self.maxMinutes)
-        let s = cleanSStr.isEmpty ? snapshotSeconds : min(Int(cleanSStr) ?? snapshotSeconds, Self.maxSeconds)
-
-        inputMinutes = cleanMStr.isEmpty ? "\(m)" : cleanMStr
-        inputSeconds = cleanSStr.isEmpty ? String(format: "%02d", s) : cleanSStr
+        inputMinutes = cleanMStr.isEmpty ? "\(snapshotMinutes)" : cleanMStr
+        inputSeconds = cleanSStr.isEmpty ? String(format: "%02d", snapshotSeconds) : cleanSStr
 
         activeEditingField = nextField
         validationError = nil
@@ -176,7 +192,7 @@ public class TimeInputController: ObservableObject {
 
     @discardableResult
     public func commitEditing() -> Bool {
-        guard activeEditingField != nil else {
+        guard activeEditingField != nil || hasInvalidDraft else {
             return true
         }
         switch validateDraft() {
@@ -196,10 +212,8 @@ public class TimeInputController: ObservableObject {
         case .failure(let error):
             validationError = error
             hasInvalidDraft = true
-            // If draft was invalid, restore last valid snapshot so UI is never corrupted
-            inputMinutes = Self.formatMinutes(snapshotMinutes)
-            inputSeconds = Self.formatSeconds(snapshotSeconds)
-            activeEditingField = nil
+            // Keep draft visible with validation error feedback so user can see and fix the error.
+            // committedMinutes and committedSeconds remain safely preserved at the previous valid snapshot.
             return false
         }
     }
@@ -221,7 +235,7 @@ public class TimeInputController: ObservableObject {
 
     // MARK: - Stepper Adjustments (Seconds-Preserving)
     public func adjustMinutes(by delta: Int) {
-        if activeEditingField != nil {
+        if activeEditingField != nil || hasInvalidDraft {
             cancelEditing()
         }
         let currentM = committedMinutes
@@ -245,7 +259,7 @@ public class TimeInputController: ObservableObject {
 
     // MARK: - Preset Selection
     public func selectPreset(minutes: Int, seconds: Int = 0) {
-        if activeEditingField != nil {
+        if activeEditingField != nil || hasInvalidDraft {
             cancelEditing()
         }
         let safeM = min(max(minutes, 0), Self.maxMinutes)

@@ -332,11 +332,13 @@ public struct MenuBarCompanionView: View {
 
                         // Minutes Direct Input Field
                         ZStack {
+                            let isInvalid = companionController.hasInvalidDraft
+                            let strokeColor = isInvalid ? Color(red: 1.0, green: 0.35, blue: 0.35) : (companionController.activeEditingField == .minutes ? Color.orange : Color.orange.opacity(0.40))
                             RoundedRectangle(cornerRadius: 8)
                                 .fill(Color.white.opacity(companionController.activeEditingField == .minutes ? 0.12 : 0.08))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 8)
-                                        .stroke(companionController.activeEditingField == .minutes ? Color.orange : Color.orange.opacity(0.40), lineWidth: companionController.activeEditingField == .minutes ? 2 : 1)
+                                        .stroke(strokeColor, lineWidth: (companionController.activeEditingField == .minutes || isInvalid) ? 2 : 1)
                                 )
 
                             if companionController.activeEditingField == .minutes {
@@ -358,7 +360,11 @@ public struct MenuBarCompanionView: View {
                                         companionController.cancelEditing()
                                     },
                                     onFocusLost: {
-                                        companionController.commitEditing()
+                                        DispatchQueue.main.async {
+                                            if companionController.activeEditingField == .minutes {
+                                                companionController.commitEditing()
+                                            }
+                                        }
                                     }
                                 )
                                 .padding(.horizontal, 2)
@@ -377,7 +383,9 @@ public struct MenuBarCompanionView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .contentShape(RoundedRectangle(cornerRadius: 8))
                         .onTapGesture {
-                            if companionController.activeEditingField != .minutes {
+                            if companionController.activeEditingField == .seconds {
+                                companionController.commitAndSwitchField(to: .minutes)
+                            } else if companionController.activeEditingField != .minutes {
                                 companionController.startEditing(.minutes)
                             }
                         }
@@ -391,11 +399,13 @@ public struct MenuBarCompanionView: View {
 
                         // Seconds Direct Input Field
                         ZStack {
+                            let isInvalid = companionController.hasInvalidDraft
+                            let strokeColor = isInvalid ? Color(red: 1.0, green: 0.35, blue: 0.35) : (companionController.activeEditingField == .seconds ? Color.orange : Color.white.opacity(0.15))
                             RoundedRectangle(cornerRadius: 8)
                                 .fill(Color.white.opacity(companionController.activeEditingField == .seconds ? 0.12 : 0.08))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 8)
-                                        .stroke(companionController.activeEditingField == .seconds ? Color.orange : Color.white.opacity(0.15), lineWidth: companionController.activeEditingField == .seconds ? 2 : 1)
+                                        .stroke(strokeColor, lineWidth: (companionController.activeEditingField == .seconds || isInvalid) ? 2 : 1)
                                 )
 
                             if companionController.activeEditingField == .seconds {
@@ -417,7 +427,11 @@ public struct MenuBarCompanionView: View {
                                         companionController.cancelEditing()
                                     },
                                     onFocusLost: {
-                                        companionController.commitEditing()
+                                        DispatchQueue.main.async {
+                                            if companionController.activeEditingField == .seconds {
+                                                companionController.commitEditing()
+                                            }
+                                        }
                                     }
                                 )
                                 .padding(.horizontal, 2)
@@ -436,7 +450,9 @@ public struct MenuBarCompanionView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .contentShape(RoundedRectangle(cornerRadius: 8))
                         .onTapGesture {
-                            if companionController.activeEditingField != .seconds {
+                            if companionController.activeEditingField == .minutes {
+                                companionController.commitAndSwitchField(to: .seconds)
+                            } else if companionController.activeEditingField != .seconds {
                                 companionController.startEditing(.seconds)
                             }
                         }
@@ -455,6 +471,26 @@ public struct MenuBarCompanionView: View {
                         .buttonStyle(.plain)
                         .accessibilityLabel("Add 5 minutes")
                         .help("Add 5 minutes (preserves seconds)")
+                    }
+
+                    // Validation Error Banner (if invalid draft)
+                    if let error = companionController.validationError {
+                        HStack(spacing: 4) {
+                            Image(systemName: "exclamationmark.circle.fill")
+                                .font(.system(size: 10))
+                                .foregroundColor(Color(red: 1.0, green: 0.40, blue: 0.40))
+                            Text(error.localizedDescription)
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .foregroundColor(Color(red: 1.0, green: 0.45, blue: 0.45))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.80)
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Color(red: 0.25, green: 0.08, blue: 0.08).opacity(0.85), in: RoundedRectangle(cornerRadius: 4))
+                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.red.opacity(0.30), lineWidth: 1))
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("Validation Error: \(error.localizedDescription)")
                     }
 
                     // Quick Chips directly inside the time input area
@@ -497,7 +533,7 @@ public struct MenuBarCompanionView: View {
         HStack(spacing: 8) {
             // Start / Pause
             Button {
-                if companionController.isEditing {
+                if companionController.isEditing || companionController.hasInvalidDraft {
                     guard companionController.commitEditing() else { return }
                 }
                 viewModel.toggleTimer()

@@ -56,6 +56,37 @@ public struct InPlaceTimeInputView: View {
         viewModel.isBreakPreset ? .teal : accentColor
     }
 
+    private func cardStrokeColor(for field: TimeInputField, isHovered: Bool) -> Color {
+        if model.hasInvalidDraft {
+            switch model.validationError {
+            case .invalidSeconds:
+                if field == .seconds { return Color(red: 1.0, green: 0.35, blue: 0.35) }
+            case .invalidMinutes:
+                if field == .minutes { return Color(red: 1.0, green: 0.35, blue: 0.35) }
+            default:
+                return Color(red: 1.0, green: 0.35, blue: 0.35)
+            }
+        }
+        if model.activeEditingField == field {
+            return activeColor
+        }
+        return isHovered ? Color.white.opacity(0.25) : Color.white.opacity(0.09)
+    }
+
+    private func cardShadowColor(for field: TimeInputField) -> Color {
+        if model.hasInvalidDraft {
+            switch model.validationError {
+            case .invalidSeconds:
+                if field == .seconds { return Color.red.opacity(0.35) }
+            case .invalidMinutes:
+                if field == .minutes { return Color.red.opacity(0.35) }
+            default:
+                return Color.red.opacity(0.35)
+            }
+        }
+        return model.activeEditingField == field ? activeColor.opacity(0.35) : .clear
+    }
+
     public var body: some View {
         let isStageCompact = isCompact || size < 340
         let digitFontSize = max(32, min(size * 0.125, 48))
@@ -92,13 +123,11 @@ public struct InPlaceTimeInputView: View {
                             .overlay(
                                 RoundedRectangle(cornerRadius: 14)
                                     .stroke(
-                                        model.activeEditingField == .minutes
-                                            ? activeColor
-                                            : (isMinutesHovered ? Color.white.opacity(0.25) : Color.white.opacity(0.09)),
-                                        lineWidth: model.activeEditingField == .minutes ? 2 : 1
+                                        cardStrokeColor(for: .minutes, isHovered: isMinutesHovered),
+                                        lineWidth: (model.activeEditingField == .minutes || model.hasInvalidDraft) ? 2 : 1
                                     )
                             )
-                            .shadow(color: model.activeEditingField == .minutes ? activeColor.opacity(0.35) : .clear, radius: 10)
+                            .shadow(color: cardShadowColor(for: .minutes), radius: 10)
 
                         if model.activeEditingField == .minutes {
                             TimeDigitField(
@@ -119,7 +148,11 @@ public struct InPlaceTimeInputView: View {
                                     model.cancelEditing()
                                 },
                                 onFocusLost: {
-                                    model.commitEditing()
+                                    DispatchQueue.main.async {
+                                        if model.activeEditingField == .minutes {
+                                            model.commitEditing()
+                                        }
+                                    }
                                 }
                             )
                             .padding(.horizontal, 4)
@@ -139,7 +172,9 @@ public struct InPlaceTimeInputView: View {
                     .contentShape(RoundedRectangle(cornerRadius: 14))
                     .onHover { h in isMinutesHovered = h }
                     .onTapGesture {
-                        if model.activeEditingField != .minutes {
+                        if model.activeEditingField == .seconds {
+                            model.commitAndSwitchField(to: .minutes)
+                        } else if model.activeEditingField != .minutes {
                             model.startEditing(.minutes)
                         }
                     }
@@ -159,13 +194,11 @@ public struct InPlaceTimeInputView: View {
                             .overlay(
                                 RoundedRectangle(cornerRadius: 14)
                                     .stroke(
-                                        model.activeEditingField == .seconds
-                                            ? activeColor
-                                            : (isSecondsHovered ? Color.white.opacity(0.25) : Color.white.opacity(0.09)),
-                                        lineWidth: model.activeEditingField == .seconds ? 2 : 1
+                                        cardStrokeColor(for: .seconds, isHovered: isSecondsHovered),
+                                        lineWidth: (model.activeEditingField == .seconds || model.hasInvalidDraft) ? 2 : 1
                                     )
                             )
-                            .shadow(color: model.activeEditingField == .seconds ? activeColor.opacity(0.35) : .clear, radius: 10)
+                            .shadow(color: cardShadowColor(for: .seconds), radius: 10)
 
                         if model.activeEditingField == .seconds {
                             TimeDigitField(
@@ -186,7 +219,11 @@ public struct InPlaceTimeInputView: View {
                                     model.cancelEditing()
                                 },
                                 onFocusLost: {
-                                    model.commitEditing()
+                                    DispatchQueue.main.async {
+                                        if model.activeEditingField == .seconds {
+                                            model.commitEditing()
+                                        }
+                                    }
                                 }
                             )
                             .padding(.horizontal, 4)
@@ -206,7 +243,9 @@ public struct InPlaceTimeInputView: View {
                     .contentShape(RoundedRectangle(cornerRadius: 14))
                     .onHover { h in isSecondsHovered = h }
                     .onTapGesture {
-                        if model.activeEditingField != .seconds {
+                        if model.activeEditingField == .minutes {
+                            model.commitAndSwitchField(to: .seconds)
+                        } else if model.activeEditingField != .seconds {
                             model.startEditing(.seconds)
                         }
                     }
@@ -295,14 +334,31 @@ public struct InPlaceTimeInputView: View {
                     .help("Add 15 minutes to timer (preserves seconds)")
                 }
 
-                // Helper Microcopy
-                HStack(spacing: 5) {
-                    Image(systemName: "hand.tap.fill")
-                        .font(.system(size: 10))
-                        .foregroundColor(.gray.opacity(0.7))
-                    Text("Click numbers above to type custom time, or click a shortcut chip")
-                        .font(.system(size: max(10, min(size * 0.026, 12)), weight: .medium))
-                        .foregroundColor(.gray.opacity(0.8))
+                // Helper Microcopy or Validation Error Feedback
+                if let error = model.validationError {
+                    HStack(spacing: 5) {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(Color(red: 1.0, green: 0.40, blue: 0.40))
+                        Text(error.localizedDescription)
+                            .font(.system(size: max(10, min(size * 0.026, 12)), weight: .semibold))
+                            .foregroundColor(Color(red: 1.0, green: 0.45, blue: 0.45))
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color(red: 0.25, green: 0.08, blue: 0.08).opacity(0.85), in: RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.red.opacity(0.30), lineWidth: 1))
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Validation Error: \(error.localizedDescription)")
+                } else {
+                    HStack(spacing: 5) {
+                        Image(systemName: "hand.tap.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.gray.opacity(0.7))
+                        Text("Click numbers above to type custom time, or click a shortcut chip")
+                            .font(.system(size: max(10, min(size * 0.026, 12)), weight: .medium))
+                            .foregroundColor(.gray.opacity(0.8))
+                    }
                 }
             }
             .padding(.top, 2)

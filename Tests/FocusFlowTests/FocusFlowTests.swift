@@ -4036,8 +4036,17 @@ final class FocusFlowTests: XCTestCase {
         let committed = controller.commitEditing()
         XCTAssertFalse(committed, "Durations below minimum must be rejected")
         XCTAssertTrue(controller.hasInvalidDraft)
+        XCTAssertEqual(controller.validationError, .belowMinimum(seconds: 2, minimum: 5))
+        XCTAssertEqual(controller.validationError?.localizedDescription, "Minimum timer duration is 00:05")
         XCTAssertEqual(vm.totalTime, 1500, "Previous valid duration must be preserved upon invalid commit")
-        XCTAssertEqual(controller.inputMinutes, "25", "Draft must be restored to previous valid duration")
+        XCTAssertEqual(controller.committedMinutes, 25, "Committed minutes must remain preserved")
+        XCTAssertEqual(controller.inputMinutes, "0", "Draft is kept visible with error feedback rather than silently wiped")
+
+        // Cancel/Escape restores the snapshot
+        controller.cancelEditing()
+        XCTAssertEqual(controller.inputMinutes, "25", "Draft must be restored to previous valid duration upon cancel")
+        XCTAssertFalse(controller.hasInvalidDraft)
+        XCTAssertNil(controller.validationError)
     }
 
     @MainActor
@@ -4341,6 +4350,407 @@ final class FocusFlowTests: XCTestCase {
         vm.continueCurrentTimer()
         XCTAssertFalse(vm.showConflictModal)
         XCTAssertTrue(vm.isFocusPreset)
+    }
+
+    // MARK: - Custom Timer AppKit Interaction Hardening & Visible Validation Tests
+
+    @MainActor
+    func testCustomTimerHardening_01_TimeDigitNSTextField_viewDidMoveToWindow_acquiresFocusAndSelectsAll() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        let textField = TimeDigitNSTextField()
+        textField.stringValue = "25"
+        textField.isEditable = true
+        textField.isSelectable = true
+
+        var focusAcquiredCalled = false
+        textField.onFocusAcquired = {
+            focusAcquiredCalled = true
+        }
+
+        // Add to window hierarchy
+        window.contentView?.addSubview(textField)
+        textField.viewDidMoveToWindow()
+
+        XCTAssertTrue(focusAcquiredCalled, "onFocusAcquired callback must be invoked upon moving to window")
+        XCTAssertEqual(window.firstResponder, textField.currentEditor(), "Field editor must be first responder in window")
+        XCTAssertEqual(textField.currentEditor()?.selectedRange.length, 2, "Entire text length (2 digits) must be selected for immediate typing")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_02_TimeDigitNSTextField_typingReplacesSelectionWithoutPrematureMutation() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        let textField = TimeDigitNSTextField()
+        textField.stringValue = "25"
+        textField.isEditable = true
+        textField.isSelectable = true
+        window.contentView?.addSubview(textField)
+        textField.viewDidMoveToWindow()
+
+        // Verify initial selection covers whole string
+        XCTAssertEqual(textField.currentEditor()?.selectedRange.length, 2)
+
+        // Simulate typing "45" into field
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "45")
+
+        // In draft mode, viewModel totalTime must NOT mutate prematurely
+        XCTAssertEqual(controller.inputMinutes, "45")
+        XCTAssertEqual(vm.totalTime, 1500, "Typing into draft must not mutate authoritative viewModel duration")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_03_TimeDigitField_insertNewline_commitsOnceAndDoesNotTriggerFocusLost() {
+        var returnFired = 0
+        var focusLostFired = 0
+        var boundText = "45"
+
+        let field = TimeDigitField(
+            text: Binding(get: { boundText }, set: { boundText = $0 }),
+            onReturn: { returnFired += 1 },
+            onFocusLost: { focusLostFired += 1 }
+        )
+
+        let coordinator = field.makeCoordinator()
+        let control = NSControl()
+        let textView = NSTextView()
+
+        let handled = coordinator.control(control, textView: textView, doCommandBy: #selector(NSResponder.insertNewline(_:)))
+        XCTAssertTrue(handled, "insertNewline command must be handled")
+        XCTAssertEqual(returnFired, 1, "onReturn must fire exactly once")
+
+        // Simulate subsequent AppKit controlTextDidEndEditing notification for Return
+        let notif = Notification(
+            name: NSControl.textDidEndEditingNotification,
+            object: control,
+            userInfo: ["NSTextMovement": NSReturnTextMovement]
+        )
+        coordinator.controlTextDidEndEditing(notif)
+        XCTAssertEqual(focusLostFired, 0, "onFocusLost must NOT fire when ending editing via Return")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_04_TimeDigitField_cancelOperation_revertsAndDoesNotTriggerFocusLost() {
+        var escapeFired = 0
+        var focusLostFired = 0
+        var boundText = "45"
+
+        let field = TimeDigitField(
+            text: Binding(get: { boundText }, set: { boundText = $0 }),
+            onEscape: { escapeFired += 1 },
+            onFocusLost: { focusLostFired += 1 }
+        )
+
+        let coordinator = field.makeCoordinator()
+        let control = NSControl()
+        let textView = NSTextView()
+
+        let handled = coordinator.control(control, textView: textView, doCommandBy: #selector(NSResponder.cancelOperation(_:)))
+        XCTAssertTrue(handled, "cancelOperation command must be handled")
+        XCTAssertEqual(escapeFired, 1, "onEscape must fire exactly once")
+
+        // Simulate subsequent AppKit controlTextDidEndEditing notification for Cancel
+        let notif = Notification(
+            name: NSControl.textDidEndEditingNotification,
+            object: control,
+            userInfo: ["NSTextMovement": NSCancelTextMovement]
+        )
+        coordinator.controlTextDidEndEditing(notif)
+        XCTAssertEqual(focusLostFired, 0, "onFocusLost must NOT fire when ending editing via Escape")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_05_TimeDigitField_insertTab_navigatesMinutesToSecondsWithoutFocusLost() {
+        var tabFired = 0
+        var focusLostFired = 0
+        var boundText = "45"
+
+        let field = TimeDigitField(
+            text: Binding(get: { boundText }, set: { boundText = $0 }),
+            onTab: { tabFired += 1 },
+            onFocusLost: { focusLostFired += 1 }
+        )
+
+        let coordinator = field.makeCoordinator()
+        let control = NSControl()
+        let textView = NSTextView()
+
+        let handled = coordinator.control(control, textView: textView, doCommandBy: #selector(NSResponder.insertTab(_:)))
+        XCTAssertTrue(handled, "insertTab command must be handled")
+        XCTAssertEqual(tabFired, 1, "onTab must fire")
+
+        let notif = Notification(
+            name: NSControl.textDidEndEditingNotification,
+            object: control,
+            userInfo: ["NSTextMovement": NSTabTextMovement]
+        )
+        coordinator.controlTextDidEndEditing(notif)
+        XCTAssertEqual(focusLostFired, 0, "onFocusLost must NOT fire when navigating via Tab")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_06_TimeDigitField_insertBacktab_navigatesSecondsToMinutesWithoutFocusLost() {
+        var backtabFired = 0
+        var focusLostFired = 0
+        var boundText = "30"
+
+        let field = TimeDigitField(
+            text: Binding(get: { boundText }, set: { boundText = $0 }),
+            onBacktab: { backtabFired += 1 },
+            onFocusLost: { focusLostFired += 1 }
+        )
+
+        let coordinator = field.makeCoordinator()
+        let control = NSControl()
+        let textView = NSTextView()
+
+        let handled = coordinator.control(control, textView: textView, doCommandBy: #selector(NSResponder.insertBacktab(_:)))
+        XCTAssertTrue(handled, "insertBacktab command must be handled")
+        XCTAssertEqual(backtabFired, 1, "onBacktab must fire")
+
+        let notif = Notification(
+            name: NSControl.textDidEndEditingNotification,
+            object: control,
+            userInfo: ["NSTextMovement": NSBacktabTextMovement]
+        )
+        coordinator.controlTextDidEndEditing(notif)
+        XCTAssertEqual(focusLostFired, 0, "onFocusLost must NOT fire when navigating via Backtab")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_07_TimeDigitField_controlTextDidEndEditing_clickAwayWithoutMovement_callsFocusLost() {
+        var focusLostFired = 0
+        var boundText = "45"
+
+        let field = TimeDigitField(
+            text: Binding(get: { boundText }, set: { boundText = $0 }),
+            onFocusLost: { focusLostFired += 1 }
+        )
+
+        let coordinator = field.makeCoordinator()
+        let control = NSControl()
+
+        // Simulate click away where AppKit omits NSTextMovement metadata entirely
+        let notif = Notification(
+            name: NSControl.textDidEndEditingNotification,
+            object: control,
+            userInfo: nil
+        )
+        coordinator.controlTextDidEndEditing(notif)
+        XCTAssertEqual(focusLostFired, 1, "Missing NSTextMovement in userInfo must reliably trigger onFocusLost")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_08_TimeDigitField_controlTextDidEndEditing_movementZero_callsFocusLost() {
+        var focusLostFired = 0
+        var boundText = "45"
+
+        let field = TimeDigitField(
+            text: Binding(get: { boundText }, set: { boundText = $0 }),
+            onFocusLost: { focusLostFired += 1 }
+        )
+
+        let coordinator = field.makeCoordinator()
+        let control = NSControl()
+
+        // Simulate click away where NSTextMovement is NSIllegalTextMovement (0) or NSOtherTextMovement
+        let notif = Notification(
+            name: NSControl.textDidEndEditingNotification,
+            object: control,
+            userInfo: ["NSTextMovement": 0]
+        )
+        coordinator.controlTextDidEndEditing(notif)
+        XCTAssertEqual(focusLostFired, 1, "NSTextMovement 0 (click outside) must trigger onFocusLost")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_09_TimeDigitField_controlTextDidEndEditing_movementNSReturn_suppressesFocusLost() {
+        var focusLostFired = 0
+        var boundText = "45"
+
+        let field = TimeDigitField(
+            text: Binding(get: { boundText }, set: { boundText = $0 }),
+            onFocusLost: { focusLostFired += 1 }
+        )
+
+        let coordinator = field.makeCoordinator()
+        let control = NSControl()
+
+        let notif = Notification(
+            name: NSControl.textDidEndEditingNotification,
+            object: control,
+            userInfo: ["NSTextMovement": NSReturnTextMovement]
+        )
+        coordinator.controlTextDidEndEditing(notif)
+        XCTAssertEqual(focusLostFired, 0, "NSReturnTextMovement must NOT trigger onFocusLost")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_10_ValidationFeedback_InvalidSecondsRejection() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        controller.startEditing(.seconds)
+        controller.updateDraft(field: .seconds, text: "75")
+
+        let success = controller.commitEditing()
+        XCTAssertFalse(success, "Seconds > 59 must be rejected")
+        XCTAssertTrue(controller.hasInvalidDraft)
+        XCTAssertEqual(controller.validationError, .invalidSeconds(seconds: 75))
+        XCTAssertEqual(controller.validationError?.localizedDescription, "Seconds must be between 00 and 59")
+        XCTAssertEqual(controller.committedSeconds, 0, "Committed seconds must remain intact")
+        XCTAssertEqual(vm.totalTime, 1500, "Timer duration must not be mutated")
+
+        // Clearing draft resets validation error
+        controller.updateDraft(field: .seconds, text: "30")
+        XCTAssertNil(controller.validationError)
+        XCTAssertFalse(controller.hasInvalidDraft)
+
+        let validCommit = controller.commitEditing()
+        XCTAssertTrue(validCommit)
+        XCTAssertEqual(vm.totalTime, 25 * 60 + 30)
+    }
+
+    @MainActor
+    func testCustomTimerHardening_11_ValidationFeedback_BelowMinimumRejection() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "0")
+        controller.updateDraft(field: .seconds, text: "03")
+
+        let success = controller.commitEditing()
+        XCTAssertFalse(success, "Duration < 5 seconds must be rejected")
+        XCTAssertTrue(controller.hasInvalidDraft)
+        XCTAssertEqual(controller.validationError, .belowMinimum(seconds: 3, minimum: 5))
+        XCTAssertEqual(controller.validationError?.localizedDescription, "Minimum timer duration is 00:05")
+        XCTAssertEqual(controller.inputMinutes, "0")
+        XCTAssertEqual(controller.inputSeconds, "03", "Draft values are preserved so user can see and correct them")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_12_ValidationFeedback_AboveMaximumRejection() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "500")
+
+        let success = controller.commitEditing()
+        XCTAssertFalse(success, "Minutes > 360 must be rejected")
+        XCTAssertTrue(controller.hasInvalidDraft)
+        XCTAssertEqual(controller.validationError, .invalidMinutes(minutes: 500))
+        XCTAssertEqual(controller.validationError?.localizedDescription, "Maximum timer duration is 360:59")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_13_StartButtonBlockedWhileInvalidDraftUnresolved() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        controller.startEditing(.seconds)
+        controller.updateDraft(field: .seconds, text: "80")
+
+        let commitAttempt = vm.commitActiveTimeInputBeforeStart()
+        XCTAssertFalse(commitAttempt, "commitActiveTimeInputBeforeStart must fail when draft is invalid")
+
+        vm.toggleTimer()
+        XCTAssertFalse(vm.isTimerRunning, "Timer must NOT start while invalid draft exists")
+        XCTAssertEqual(vm.totalTime, 1500, "Duration must not be changed")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_14_FirstLaunchViewHierarchy_HasZeroEditableTextResponders() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        let hostingView = NSHostingView(rootView: view)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+
+        XCTAssertNil(view.activeEditingField, "Active editing field must be nil on initial launch")
+        XCTAssertFalse(containsEditableTextInput(in: hostingView), "First-launch view must display clean Text without editable text fields")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_15_SharedPendingDraftAcrossMinutesAndSeconds_UntilCommitted() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        // User edits minutes to "40"
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "40")
+
+        // User tabs or clicks into seconds
+        controller.commitAndSwitchField(to: .seconds)
+        XCTAssertEqual(controller.activeEditingField, .seconds)
+        XCTAssertEqual(controller.inputMinutes, "40")
+        XCTAssertEqual(vm.totalTime, 1500, "Switching between fields keeps pending shared draft without mutating viewModel")
+
+        // User edits seconds to "30"
+        controller.updateDraft(field: .seconds, text: "30")
+        XCTAssertEqual(controller.inputSeconds, "30")
+        XCTAssertEqual(vm.totalTime, 1500, "Draft remains uncommitted")
+
+        // Final commit (Enter or click outside)
+        let success = controller.commitEditing()
+        XCTAssertTrue(success)
+        XCTAssertEqual(vm.totalTime, 40 * 60 + 30, "Duration must update atomically to 40m 30s")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_16_MenuBarCompanion_SymmetricBehaviorWithMainWindow() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let companionController = TimeInputController(totalTime: vm.totalTime)
+
+        companionController.startEditing(.seconds)
+        companionController.updateDraft(field: .seconds, text: "99")
+
+        let committed = companionController.commitEditing()
+        XCTAssertFalse(committed, "Menu bar companion must reject seconds > 59 symmetrically")
+        XCTAssertTrue(companionController.hasInvalidDraft)
+        XCTAssertEqual(companionController.validationError?.localizedDescription, "Seconds must be between 00 and 59")
+
+        companionController.cancelEditing()
+        XCTAssertFalse(companionController.hasInvalidDraft)
+        XCTAssertEqual(companionController.inputSeconds, "00")
     }
 
     // MARK: - Stopwatch Lap Integrity Tests

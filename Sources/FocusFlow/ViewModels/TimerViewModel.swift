@@ -564,7 +564,7 @@ public class TimerViewModel: ObservableObject {
 
     @discardableResult
     public func commitActiveTimeInputBeforeStart() -> Bool {
-        if customTimeInputController.isEditing {
+        if customTimeInputController.isEditing || customTimeInputController.hasInvalidDraft {
             return customTimeInputController.commitEditing()
         }
         return true
@@ -2042,7 +2042,7 @@ public class TimerViewModel: ObservableObject {
 
     public func toggleTimer() {
         guard !isPersistenceBlocked else { return }
-        if !isTimerRunning && customTimeInputController.isEditing {
+        if !isTimerRunning && (customTimeInputController.isEditing || customTimeInputController.hasInvalidDraft) {
             guard commitActiveTimeInputBeforeStart() else { return }
         }
         let now = currentDateProvider()
