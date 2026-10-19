@@ -165,19 +165,20 @@ public struct InPlaceTimeInputView: View {
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.60)
                                 .padding(.horizontal, 4)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .contentShape(RoundedRectangle(cornerRadius: 14))
+                                .onTapGesture {
+                                    if model.activeEditingField == .seconds {
+                                        model.commitAndSwitchField(to: .minutes)
+                                    } else if model.activeEditingField != .minutes {
+                                        model.startEditing(.minutes)
+                                    }
+                                }
                         }
                     }
                     .frame(width: minutesBoxWidth, height: boxHeight)
                     .clipShape(RoundedRectangle(cornerRadius: 14))
-                    .contentShape(RoundedRectangle(cornerRadius: 14))
                     .onHover { h in isMinutesHovered = h }
-                    .onTapGesture {
-                        if model.activeEditingField == .seconds {
-                            model.commitAndSwitchField(to: .minutes)
-                        } else if model.activeEditingField != .minutes {
-                            model.startEditing(.minutes)
-                        }
-                    }
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel("Minutes, \(model.inputMinutes)")
                     .accessibilityHint("Click to edit minutes")
@@ -236,19 +237,20 @@ public struct InPlaceTimeInputView: View {
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.60)
                                 .padding(.horizontal, 4)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .contentShape(RoundedRectangle(cornerRadius: 14))
+                                .onTapGesture {
+                                    if model.activeEditingField == .minutes {
+                                        model.commitAndSwitchField(to: .seconds)
+                                    } else if model.activeEditingField != .seconds {
+                                        model.startEditing(.seconds)
+                                    }
+                                }
                         }
                     }
                     .frame(width: secondsBoxWidth, height: boxHeight)
                     .clipShape(RoundedRectangle(cornerRadius: 14))
-                    .contentShape(RoundedRectangle(cornerRadius: 14))
                     .onHover { h in isSecondsHovered = h }
-                    .onTapGesture {
-                        if model.activeEditingField == .minutes {
-                            model.commitAndSwitchField(to: .seconds)
-                        } else if model.activeEditingField != .seconds {
-                            model.startEditing(.seconds)
-                        }
-                    }
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel("Seconds, \(model.inputSeconds)")
                     .accessibilityHint("Click to edit seconds")

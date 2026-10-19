@@ -4753,6 +4753,122 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(companionController.inputSeconds, "00")
     }
 
+    @MainActor
+    func testCustomTimerHardening_17_TimeDigitNSTextField_activateAndSelectAll_DoesNotTriggerSpuriousEndEditing() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        var boundText = "25"
+        var focusLostCount = 0
+        let field = TimeDigitField(
+            text: Binding(get: { boundText }, set: { boundText = $0 }),
+            onFocusLost: { focusLostCount += 1 }
+        )
+        let coordinator = field.makeCoordinator()
+        let textField = TimeDigitNSTextField()
+        textField.stringValue = "25"
+        textField.isEditable = true
+        textField.isSelectable = true
+        textField.delegate = coordinator
+        coordinator.textField = textField
+
+        window.contentView?.addSubview(textField)
+        textField.activateAndSelectAll()
+
+        XCTAssertEqual(focusLostCount, 0, "activateAndSelectAll must never cause onFocusLost")
+        XCTAssertEqual(window.firstResponder, textField.currentEditor(), "Field editor must be active first responder")
+        XCTAssertEqual(textField.currentEditor()?.selectedRange.length, 2, "Text must remain fully selected for typing")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_18_TimeDigitNSTextField_DirectTypingInWindowReplacesSelection() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        var boundText = "25"
+        var focusLostCount = 0
+        let field = TimeDigitField(
+            text: Binding(get: { boundText }, set: { boundText = $0 }),
+            onFocusLost: { focusLostCount += 1 }
+        )
+        let coordinator = field.makeCoordinator()
+        let textField = TimeDigitNSTextField()
+        textField.stringValue = "25"
+        textField.isEditable = true
+        textField.isSelectable = true
+        textField.delegate = coordinator
+        coordinator.textField = textField
+
+        window.contentView?.addSubview(textField)
+        textField.activateAndSelectAll()
+
+        guard let editor = textField.currentEditor() as? NSTextView else {
+            XCTFail("Field editor must be available as NSTextView")
+            return
+        }
+
+        // Simulate user typing '4' then '5' over selected text
+        editor.insertText("4", replacementRange: editor.selectedRange)
+        coordinator.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: textField))
+        XCTAssertEqual(boundText, "4")
+
+        editor.insertText("5", replacementRange: editor.selectedRange)
+        coordinator.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: textField))
+        XCTAssertEqual(boundText, "45")
+        XCTAssertEqual(focusLostCount, 0, "Typing must not trigger onFocusLost")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_19_TimeDigitNSTextField_ClickAwayInWindowCallsFocusLost() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        var boundText = "25"
+        var focusLostCount = 0
+        let field = TimeDigitField(
+            text: Binding(get: { boundText }, set: { boundText = $0 }),
+            onFocusLost: { focusLostCount += 1 }
+        )
+        let coordinator = field.makeCoordinator()
+        let textField = TimeDigitNSTextField()
+        textField.stringValue = "25"
+        textField.isEditable = true
+        textField.isSelectable = true
+        textField.delegate = coordinator
+        coordinator.textField = textField
+        textField.onFocusAcquired = {
+            coordinator.hasReportedFocusLost = false
+        }
+
+        let otherButton = NSButton(title: "Other", target: nil, action: nil)
+
+        window.contentView?.addSubview(textField)
+        window.contentView?.addSubview(otherButton)
+        textField.activateAndSelectAll()
+
+        XCTAssertEqual(focusLostCount, 0)
+
+        // Switch first responder to another control (simulating click away)
+        window.makeFirstResponder(otherButton)
+
+        let exp = expectation(description: "Focus lost dispatched asynchronously")
+        DispatchQueue.main.async {
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 1.0)
+
+        XCTAssertEqual(focusLostCount, 1, "Clicking away to another control must trigger onFocusLost")
+    }
+
     // MARK: - Stopwatch Lap Integrity Tests
 
     // 1. Record first lap at 10.5s -> Lap 1 duration = 10.5s, total = 10.5s

@@ -377,18 +377,19 @@ public struct MenuBarCompanionView: View {
                                     .lineLimit(1)
                                     .minimumScaleFactor(0.65)
                                     .padding(.horizontal, 2)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                    .contentShape(RoundedRectangle(cornerRadius: 8))
+                                    .onTapGesture {
+                                        if companionController.activeEditingField == .seconds {
+                                            companionController.commitAndSwitchField(to: .minutes)
+                                        } else if companionController.activeEditingField != .minutes {
+                                            companionController.startEditing(.minutes)
+                                        }
+                                    }
                             }
                         }
                         .frame(width: 68, height: 38)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .contentShape(RoundedRectangle(cornerRadius: 8))
-                        .onTapGesture {
-                            if companionController.activeEditingField == .seconds {
-                                companionController.commitAndSwitchField(to: .minutes)
-                            } else if companionController.activeEditingField != .minutes {
-                                companionController.startEditing(.minutes)
-                            }
-                        }
                         .accessibilityElement(children: .combine)
                         .accessibilityLabel("Minutes, \(companionController.inputMinutes)")
                         .accessibilityHint("Click to edit minutes")
@@ -444,18 +445,19 @@ public struct MenuBarCompanionView: View {
                                     .lineLimit(1)
                                     .minimumScaleFactor(0.65)
                                     .padding(.horizontal, 2)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                    .contentShape(RoundedRectangle(cornerRadius: 8))
+                                    .onTapGesture {
+                                        if companionController.activeEditingField == .minutes {
+                                            companionController.commitAndSwitchField(to: .seconds)
+                                        } else if companionController.activeEditingField != .seconds {
+                                            companionController.startEditing(.seconds)
+                                        }
+                                    }
                             }
                         }
                         .frame(width: 68, height: 38)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .contentShape(RoundedRectangle(cornerRadius: 8))
-                        .onTapGesture {
-                            if companionController.activeEditingField == .minutes {
-                                companionController.commitAndSwitchField(to: .seconds)
-                            } else if companionController.activeEditingField != .seconds {
-                                companionController.startEditing(.seconds)
-                            }
-                        }
                         .accessibilityElement(children: .combine)
                         .accessibilityLabel("Seconds, \(companionController.inputSeconds)")
                         .accessibilityHint("Click to edit seconds")

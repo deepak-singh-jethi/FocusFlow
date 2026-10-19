@@ -47,8 +47,22 @@ public class TimeInputController: ObservableObject {
     @Published public var activeEditingField: TimeInputField? = nil
 
     // Draft or formatted display strings
-    @Published public var inputMinutes: String = "25"
-    @Published public var inputSeconds: String = "00"
+    @Published public var inputMinutes: String = "25" {
+        didSet {
+            if hasInvalidDraft {
+                validationError = nil
+                hasInvalidDraft = false
+            }
+        }
+    }
+    @Published public var inputSeconds: String = "00" {
+        didSet {
+            if hasInvalidDraft {
+                validationError = nil
+                hasInvalidDraft = false
+            }
+        }
+    }
 
     // Validation state
     @Published public var validationError: TimeInputValidationError? = nil

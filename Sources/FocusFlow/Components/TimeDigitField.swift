@@ -17,7 +17,6 @@ public final class TimeDigitNSTextField: NSTextField {
         guard let window = self.window else { return }
         shouldAutoFocusOnMount = false
         window.makeFirstResponder(self)
-        self.selectText(nil)
         if let editor = self.currentEditor() {
             editor.selectAll(nil)
         }
@@ -93,6 +92,9 @@ public struct TimeDigitField: NSViewRepresentable {
         textField.stringValue = text
         textField.delegate = context.coordinator
         context.coordinator.textField = textField
+        textField.onFocusAcquired = { [weak coordinator = context.coordinator] in
+            coordinator?.hasReportedFocusLost = false
+        }
 
         // If already attached to window during creation, activate immediately
         if textField.window != nil && textField.shouldAutoFocusOnMount {
@@ -119,6 +121,7 @@ public struct TimeDigitField: NSViewRepresentable {
         var parent: TimeDigitField
         weak var textField: TimeDigitNSTextField?
         private var isHandlingCommand: Bool = false
+        public var hasReportedFocusLost: Bool = false
 
         init(_ parent: TimeDigitField) {
             self.parent = parent
@@ -170,7 +173,21 @@ public struct TimeDigitField: NSViewRepresentable {
                                     movement == NSTabTextMovement ||
                                     movement == NSBacktabTextMovement ||
                                     movement == NSCancelTextMovement)
-            if !isKeyboardCommand {
+            guard !isKeyboardCommand else { return }
+
+            if let tf = textField, let window = tf.window {
+                DispatchQueue.main.async { [weak self, weak tf, weak window] in
+                    guard let self = self, let tf = tf, let window = window else { return }
+                    if window.firstResponder === tf || (tf.currentEditor() != nil && window.firstResponder === tf.currentEditor()) {
+                        return
+                    }
+                    guard !self.hasReportedFocusLost else { return }
+                    self.hasReportedFocusLost = true
+                    self.parent.onFocusLost?()
+                }
+            } else {
+                guard !hasReportedFocusLost else { return }
+                hasReportedFocusLost = true
                 parent.onFocusLost?()
             }
         }
