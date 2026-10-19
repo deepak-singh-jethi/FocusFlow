@@ -17131,4 +17131,501 @@ final class FocusFlowTests: XCTestCase {
         NotificationCenter.default.post(name: .NSSystemTimeZoneDidChange, object: nil)
         NotificationCenter.default.post(name: .NSSystemClockDidChange, object: nil)
     }
+
+    // MARK: - Custom Timer UI/UX Final Refinement Regression Tests
+
+    @MainActor
+    func testCustomTimerRefinement_01_MinutesActivationKeepsPaddedZeroString() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 0, seconds: 30)
+        let controller = vm.customTimeInputController
+
+        XCTAssertEqual(controller.inputMinutes, "00")
+        XCTAssertEqual(controller.inputSeconds, "30")
+
+        // Activating minutes editing must keep "00" instead of dropping to unpadded "0"
+        controller.startEditing(.minutes)
+        XCTAssertEqual(controller.activeEditingField, .minutes)
+        XCTAssertEqual(controller.inputMinutes, "00", "Starting editing at 00:30 must preserve '00' in inputMinutes")
+        XCTAssertEqual(controller.snapshotMinutes, 0)
+        XCTAssertEqual(controller.snapshotSeconds, 30)
+
+        // Typing a single digit '5' replaces '00' cleanly
+        controller.updateDraft(field: .minutes, text: "5")
+        XCTAssertEqual(controller.inputMinutes, "5")
+
+        controller.cancelEditing()
+        XCTAssertNil(controller.activeEditingField)
+        XCTAssertEqual(controller.inputMinutes, "00")
+    }
+
+    @MainActor
+    func testCustomTimerRefinement_02_CompletedFractionProgressSemantics() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 30, seconds: 0)
+
+        // At beginning: remaining = 30m, preciseProgress = 1.0 (remaining fraction)
+        XCTAssertEqual(vm.timeRemaining, 1800)
+        XCTAssertEqual(vm.preciseProgress, 1.0, accuracy: 0.001)
+
+        let initialCompletedFraction = min(max(1.0 - vm.preciseProgress, 0.0), 1.0)
+        let initialCompletedPercentage = Int(round(initialCompletedFraction * 100))
+        XCTAssertEqual(initialCompletedFraction, 0.0, accuracy: 0.001, "Initial completed fraction must be 0%")
+        XCTAssertEqual(initialCompletedPercentage, 0, "Initial completed percentage must be 0%")
+
+        // Mid-session: 15m remaining
+        vm.timeRemaining = 900
+        vm.preciseProgress = Double(vm.timeRemaining) / Double(vm.totalTime)
+        let midCompletedFraction = min(max(1.0 - vm.preciseProgress, 0.0), 1.0)
+        let midCompletedPercentage = Int(round(midCompletedFraction * 100))
+        XCTAssertEqual(midCompletedFraction, 0.5, accuracy: 0.001, "Mid-session completed fraction must be 50%")
+        XCTAssertEqual(midCompletedPercentage, 50, "Mid-session completed percentage must be 50%")
+
+        // Near end: 3m remaining
+        vm.timeRemaining = 180
+        vm.preciseProgress = Double(vm.timeRemaining) / Double(vm.totalTime)
+        let nearEndCompletedFraction = min(max(1.0 - vm.preciseProgress, 0.0), 1.0)
+        let nearEndCompletedPercentage = Int(round(nearEndCompletedFraction * 100))
+        XCTAssertEqual(nearEndCompletedFraction, 0.9, accuracy: 0.001, "90% through session must be 90% completed")
+        XCTAssertEqual(nearEndCompletedPercentage, 90)
+
+        // Session complete: 0s remaining
+        vm.timeRemaining = 0
+        vm.preciseProgress = 0.0
+        let finishedCompletedFraction = min(max(1.0 - vm.preciseProgress, 0.0), 1.0)
+        let finishedCompletedPercentage = Int(round(finishedCompletedFraction * 100))
+        XCTAssertEqual(finishedCompletedFraction, 1.0, accuracy: 0.001, "Finished session completed fraction must be 100%")
+        XCTAssertEqual(finishedCompletedPercentage, 100)
+    }
+
+    @MainActor
+    func testCustomTimerRefinement_03_StepperBoundaries() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+
+        // Minimum duration boundary: 00:05 (5 seconds)
+        vm.setCustomDuration(minutes: 0, seconds: 5)
+        controller.sync(from: vm.totalTime)
+        XCTAssertFalse(controller.canAdjustMinus5, "Cannot subtract 5 minutes when duration is 5 seconds")
+        XCTAssertTrue(controller.canAdjustPlus5, "Can add 5 minutes when duration is 5 seconds")
+
+        // Nominal duration: 10:00 (10 minutes)
+        vm.setCustomDuration(minutes: 10, seconds: 0)
+        controller.sync(from: vm.totalTime)
+        XCTAssertTrue(controller.canAdjustMinus5, "Can subtract 5 minutes from 10 minutes")
+        XCTAssertTrue(controller.canAdjustPlus5, "Can add 5 minutes to 10 minutes")
+
+        // Maximum duration boundary: 360:00 (6 hours)
+        vm.setCustomDuration(minutes: 360, seconds: 0)
+        controller.sync(from: vm.totalTime)
+        XCTAssertTrue(controller.canAdjustMinus5, "Can subtract 5 minutes from 360 minutes")
+        XCTAssertFalse(controller.canAdjustPlus5, "Cannot add 5 minutes when already at 360 minutes max")
+    }
+
+    @MainActor
+    func testCustomTimerRefinement_04_ValidationErrorFieldTargeting() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+
+        // Test invalid minutes exceeding maximum
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "400")
+        controller.commitEditing()
+        XCTAssertTrue(controller.hasInvalidDraft)
+        XCTAssertEqual(controller.validationErrorField, .minutes, "Exceeding maximum duration must highlight minutes field")
+
+        // Reset and test invalid seconds (> 59)
+        controller.cancelEditing()
+        controller.startEditing(.seconds)
+        controller.updateDraft(field: .seconds, text: "75")
+        controller.commitEditing()
+        XCTAssertTrue(controller.hasInvalidDraft)
+        XCTAssertEqual(controller.validationErrorField, .seconds, "Seconds >= 60 must highlight seconds field")
+    }
+
+    @MainActor
+    func testCustomTimerRefinement_05_RoundedMonospacedFontParity() {
+        let font = TimeDigitField.roundedMonospacedFont(size: 80, weight: .bold)
+        XCTAssertEqual(font.pointSize, 80)
+
+        // Check advance widths: '1' and '0' in monospaced font must have identical advance width
+        let str0 = NSAttributedString(string: "0", attributes: [.font: font])
+        let str1 = NSAttributedString(string: "1", attributes: [.font: font])
+        let size0 = str0.size()
+        let size1 = str1.size()
+
+        XCTAssertEqual(size0.width, size1.width, accuracy: 0.1, "Monospaced numerals must have identical advance width for '0' and '1'")
+    }
+
+    @MainActor
+    func testCustomTimerRefinement_06_ThreeDigitMinutesFormatting() {
+        XCTAssertEqual(TimeInputController.formatMinutes(360), "360")
+        XCTAssertEqual(TimeInputController.formatMinutes(25), "25")
+        XCTAssertEqual(TimeInputController.formatMinutes(5), "05")
+        XCTAssertEqual(TimeInputController.formatMinutes(0), "00")
+
+        XCTAssertEqual(TimeInputController.formatSeconds(59), "59")
+        XCTAssertEqual(TimeInputController.formatSeconds(5), "05")
+        XCTAssertEqual(TimeInputController.formatSeconds(0), "00")
+    }
+
+    // MARK: - Custom Timer Placeholder & Alignment Fix Tests
+
+    @MainActor
+    func testCustomTimerPlaceholder_01_EmptyMinutesDraftDisplaysMMNot25() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+
+        // Verify makePlaceholderAttributedString produces centered MM
+        let attr = TimeDigitField.makePlaceholderAttributedString(text: "MM", fontSize: 80)
+        XCTAssertEqual(attr.string, "MM", "Placeholder must be 'MM', not previous '25'")
+        let style = attr.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        XCTAssertEqual(style?.alignment, .center, "Placeholder paragraph style must be centered")
+
+        // Verify hosted TimeDigitField initializes with MM placeholder
+        var text = ""
+        let field = TimeDigitField(text: Binding(get: { text }, set: { text = $0 }), placeholder: "MM", fontSize: 80, maxLength: 3)
+        let hostingView = NSHostingView(rootView: field)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 200, height: 100)
+        hostingView.layoutSubtreeIfNeeded()
+
+        func findTextField(in view: NSView) -> TimeDigitNSTextField? {
+            if let tf = view as? TimeDigitNSTextField { return tf }
+            for sub in view.subviews {
+                if let found = findTextField(in: sub) { return found }
+            }
+            return nil
+        }
+
+        if let tf = findTextField(in: hostingView) {
+            XCTAssertEqual(tf.placeholderAttributedString?.string, "MM")
+            XCTAssertEqual(tf.alignment, .center)
+            XCTAssertEqual(tf.cell?.alignment, .center)
+        }
+    }
+
+    @MainActor
+    func testCustomTimerPlaceholder_02_EmptySecondsDraftDisplaysSSNot00() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 30)
+
+        // Verify makePlaceholderAttributedString produces centered SS
+        let attr = TimeDigitField.makePlaceholderAttributedString(text: "SS", fontSize: 80)
+        XCTAssertEqual(attr.string, "SS", "Placeholder must be 'SS', not previous '00'")
+        let style = attr.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        XCTAssertEqual(style?.alignment, .center, "Placeholder paragraph style must be centered")
+
+        // Verify hosted TimeDigitField initializes with SS placeholder
+        var text = ""
+        let field = TimeDigitField(text: Binding(get: { text }, set: { text = $0 }), placeholder: "SS", fontSize: 80, maxLength: 2)
+        let hostingView = NSHostingView(rootView: field)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 140, height: 100)
+        hostingView.layoutSubtreeIfNeeded()
+
+        func findTextField(in view: NSView) -> TimeDigitNSTextField? {
+            if let tf = view as? TimeDigitNSTextField { return tf }
+            for sub in view.subviews {
+                if let found = findTextField(in: sub) { return found }
+            }
+            return nil
+        }
+
+        if let tf = findTextField(in: hostingView) {
+            XCTAssertEqual(tf.placeholderAttributedString?.string, "SS")
+            XCTAssertEqual(tf.alignment, .center)
+            XCTAssertEqual(tf.cell?.alignment, .center)
+        }
+    }
+
+    @MainActor
+    func testCustomTimerPlaceholder_03_PlaceholderNeverStoredAsNumericDraftValue() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "")
+        controller.updateDraft(field: .seconds, text: "")
+
+        XCTAssertEqual(controller.inputMinutes, "", "Draft minutes must be empty, not 'MM'")
+        XCTAssertEqual(controller.inputSeconds, "", "Draft seconds must be empty, not 'SS'")
+        XCTAssertNotEqual(controller.inputMinutes, "MM")
+        XCTAssertNotEqual(controller.inputSeconds, "SS")
+
+        switch controller.validateDraft() {
+        case .success:
+            XCTFail("Empty draft must never validate successfully")
+        case .failure(let error):
+            XCTAssertEqual(error, .empty, "Validating empty draft must return .empty failure")
+        }
+    }
+
+    @MainActor
+    func testCustomTimerPlaceholder_04_PlaceholderRemovedImmediatelyWhenTyping() {
+        var text = ""
+        let field = TimeDigitField(text: Binding(get: { text }, set: { text = $0 }), placeholder: "MM", fontSize: 80, maxLength: 3)
+        let coordinator = field.makeCoordinator()
+        let tf = TimeDigitNSTextField()
+        tf.stringValue = ""
+        coordinator.textField = tf
+
+        // User types '4'
+        tf.stringValue = "4"
+        coordinator.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: tf))
+
+        XCTAssertEqual(text, "4", "Typing '4' must immediately update bound draft")
+        XCTAssertEqual(tf.stringValue, "4", "Text field must contain '4' and not show placeholder")
+
+        // User types '5' -> '45'
+        tf.stringValue = "45"
+        coordinator.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: tf))
+
+        XCTAssertEqual(text, "45")
+        XCTAssertEqual(tf.stringValue, "45")
+    }
+
+    @MainActor
+    func testCustomTimerPlaceholder_05_AppKitCenteringPixelMeasurement() {
+        // Test in actual 180x100 card
+        let tf = NSTextField(frame: NSRect(x: 0, y: 0, width: 180, height: 100))
+        tf.isBezeled = false
+        tf.drawsBackground = false
+        tf.alignment = .center
+        let font = TimeDigitField.roundedMonospacedFont(size: 80, weight: .bold)
+        tf.font = font
+
+        // 1. One digit "4"
+        tf.stringValue = "4"
+        var rep = tf.bitmapImageRepForCachingDisplay(in: tf.bounds)!
+        tf.cacheDisplay(in: tf.bounds, to: rep)
+        var minX = 9999, maxX = -1
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide {
+                if (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.05 {
+                    if x < minX { minX = x }
+                    if x > maxX { maxX = x }
+                }
+            }
+        }
+        let center4 = (Double(minX) + Double(maxX)) / 2.0
+        let expectedCenter = Double(rep.pixelsWide) / 2.0
+        XCTAssertEqual(center4, expectedCenter, accuracy: 4.0, "One digit '4' must be horizontally centered within 4px")
+
+        // 2. Two digits "45"
+        tf.stringValue = "45"
+        rep = tf.bitmapImageRepForCachingDisplay(in: tf.bounds)!
+        tf.cacheDisplay(in: tf.bounds, to: rep)
+        minX = 9999; maxX = -1
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide {
+                if (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.05 {
+                    if x < minX { minX = x }
+                    if x > maxX { maxX = x }
+                }
+            }
+        }
+        let center45 = (Double(minX) + Double(maxX)) / 2.0
+        XCTAssertEqual(center45, expectedCenter, accuracy: 4.0, "Two digits '45' must be horizontally centered within 4px")
+
+        // 3. Three digits "360"
+        tf.stringValue = "360"
+        rep = tf.bitmapImageRepForCachingDisplay(in: tf.bounds)!
+        tf.cacheDisplay(in: tf.bounds, to: rep)
+        minX = 9999; maxX = -1
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide {
+                if (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.05 {
+                    if x < minX { minX = x }
+                    if x > maxX { maxX = x }
+                }
+            }
+        }
+        let center360 = (Double(minX) + Double(maxX)) / 2.0
+        XCTAssertEqual(center360, expectedCenter, accuracy: 4.0, "Three digits '360' must be horizontally centered within 4px")
+        XCTAssertGreaterThan(minX, 0, "Three digits '360' must not clip or overflow left boundary")
+        XCTAssertLessThan(maxX, rep.pixelsWide, "Three digits '360' must not clip or overflow right boundary")
+
+        // 4. Placeholder "MM"
+        tf.stringValue = ""
+        tf.placeholderAttributedString = TimeDigitField.makePlaceholderAttributedString(text: "MM", fontSize: 80)
+        rep = tf.bitmapImageRepForCachingDisplay(in: tf.bounds)!
+        tf.cacheDisplay(in: tf.bounds, to: rep)
+        minX = 9999; maxX = -1
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide {
+                if (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.05 {
+                    if x < minX { minX = x }
+                    if x > maxX { maxX = x }
+                }
+            }
+        }
+        let centerMM = (Double(minX) + Double(maxX)) / 2.0
+        XCTAssertEqual(centerMM, expectedCenter, accuracy: 4.0, "Placeholder 'MM' must be horizontally centered within 4px")
+    }
+
+    @MainActor
+    func testCustomTimerPlaceholder_06_ZeroMinuteDurationKeeps00UntilDeleted() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 0, seconds: 30)
+        let controller = vm.customTimeInputController
+
+        // User clicks minutes
+        controller.startEditing(.minutes)
+        XCTAssertEqual(controller.inputMinutes, "00", "Zero-minute duration must start editing with '00', not 'MM' or '0'")
+        XCTAssertEqual(controller.activeEditingField, .minutes)
+
+        // Only when deleted does it become empty
+        controller.updateDraft(field: .minutes, text: "")
+        XCTAssertEqual(controller.inputMinutes, "")
+    }
+
+    @MainActor
+    func testCustomTimerPlaceholder_07_EscapeRestoresOriginalCommittedDuration() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "") // Empty, MM placeholder showing
+        XCTAssertEqual(controller.inputMinutes, "")
+
+        // User presses Escape
+        controller.cancelEditing()
+
+        XCTAssertNil(controller.activeEditingField)
+        XCTAssertEqual(controller.committedMinutes, 25)
+        XCTAssertEqual(controller.committedSeconds, 0)
+        XCTAssertEqual(controller.inputMinutes, "25")
+        XCTAssertEqual(controller.inputSeconds, "00")
+    }
+
+    @MainActor
+    func testCustomTimerPlaceholder_08_EmptyInputCannotCorruptTimer() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "")
+        controller.updateDraft(field: .seconds, text: "")
+
+        let committed = controller.commitEditing()
+        XCTAssertFalse(committed, "commitEditing must fail on empty input")
+        XCTAssertTrue(controller.hasInvalidDraft)
+        XCTAssertEqual(vm.totalTime, 1500, "Timer totalTime must remain untouched at 25 minutes")
+    }
+
+    @MainActor
+    func testCustomTimerPlaceholder_09_FieldEditorActiveAndCaretCentered() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let tf = TimeDigitNSTextField(frame: NSRect(x: 50, y: 100, width: 180, height: 100))
+        tf.isBezeled = false
+        tf.drawsBackground = false
+        tf.alignment = .center
+        tf.placeholderAttributedString = TimeDigitField.makePlaceholderAttributedString(text: "MM", fontSize: 80)
+        tf.stringValue = "25"
+
+        window.contentView?.addSubview(tf)
+        window.makeKeyAndOrderFront(nil)
+        tf.activateAndSelectAll()
+
+        guard let editor = tf.currentEditor() as? NSTextView else {
+            XCTFail("Field editor must be active")
+            return
+        }
+
+        XCTAssertEqual(editor.alignment, .center, "Field editor must be centered")
+
+        // User deletes text
+        editor.string = ""
+        tf.stringValue = ""
+
+        if let layoutManager = editor.layoutManager, let textContainer = editor.textContainer {
+            let caretRect = layoutManager.boundingRect(forGlyphRange: NSRange(location: 0, length: 0), in: textContainer)
+            XCTAssertEqual(caretRect.origin.x, 90.0, accuracy: 2.0, "Caret in empty field editor must sit at center (90.0)")
+        }
+    }
+
+    @MainActor
+    func testCustomTimerPlaceholder_10_VisualSnapshots() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+
+        let darkBg = Color(red: 0.08, green: 0.09, blue: 0.13)
+
+        // 1. Idle view
+        let idleView = ZStack {
+            darkBg
+            InPlaceTimeInputView(viewModel: vm, size: 400).padding(20)
+        }
+        let hosting1 = NSHostingView(rootView: idleView)
+        hosting1.frame = NSRect(x: 0, y: 0, width: 600, height: 260)
+        hosting1.layoutSubtreeIfNeeded()
+        if let rep = hosting1.bitmapImageRepForCachingDisplay(in: hosting1.bounds) {
+            hosting1.cacheDisplay(in: hosting1.bounds, to: rep)
+            if let data = rep.representation(using: .png, properties: [:]) {
+                try data.write(to: URL(fileURLWithPath: "/tmp/focusflow_custom_timer_idle.png"))
+            }
+        }
+
+        // 2. Empty minutes view (MM placeholder)
+        let controller = vm.customTimeInputController
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "")
+        let editView = ZStack {
+            darkBg
+            InPlaceTimeInputView(viewModel: vm, size: 400).padding(20)
+        }
+        let hosting2 = NSHostingView(rootView: editView)
+        hosting2.frame = NSRect(x: 0, y: 0, width: 600, height: 260)
+        hosting2.layoutSubtreeIfNeeded()
+        if let rep = hosting2.bitmapImageRepForCachingDisplay(in: hosting2.bounds) {
+            hosting2.cacheDisplay(in: hosting2.bounds, to: rep)
+            if let data = rep.representation(using: .png, properties: [:]) {
+                try data.write(to: URL(fileURLWithPath: "/tmp/focusflow_custom_timer_empty_minutes.png"))
+            }
+        }
+
+        // 3. Empty seconds view (SS placeholder)
+        controller.commitAndSwitchField(to: .seconds)
+        controller.updateDraft(field: .seconds, text: "")
+        let editSecView = ZStack {
+            darkBg
+            InPlaceTimeInputView(viewModel: vm, size: 400).padding(20)
+        }
+        let hosting3 = NSHostingView(rootView: editSecView)
+        hosting3.frame = NSRect(x: 0, y: 0, width: 600, height: 260)
+        hosting3.layoutSubtreeIfNeeded()
+        if let rep = hosting3.bitmapImageRepForCachingDisplay(in: hosting3.bounds) {
+            hosting3.cacheDisplay(in: hosting3.bounds, to: rep)
+            if let data = rep.representation(using: .png, properties: [:]) {
+                try data.write(to: URL(fileURLWithPath: "/tmp/focusflow_custom_timer_empty_seconds.png"))
+            }
+        }
+    }
 }

@@ -246,6 +246,7 @@ public struct MenuBarCompanionView: View {
 
                     // Running progress bar
                     GeometryReader { geo in
+                        let completedFraction = min(max(1.0 - viewModel.fillAmount, 0.0), 1.0)
                         ZStack(alignment: .leading) {
                             Capsule()
                                 .fill(Color.white.opacity(0.08))
@@ -261,8 +262,8 @@ public struct MenuBarCompanionView: View {
                                         endPoint: .trailing
                                     )
                                 )
-                                .frame(width: max(0, geo.size.width * CGFloat(viewModel.fillAmount)), height: 4)
-                                .animation(.linear(duration: 0.1), value: viewModel.fillAmount)
+                                .frame(width: max(0, geo.size.width * CGFloat(completedFraction)), height: 4)
+                                .animation(.linear(duration: 0.1), value: completedFraction)
                         }
                     }
                     .frame(height: 4)
@@ -286,6 +287,7 @@ public struct MenuBarCompanionView: View {
 
                     // Paused progress bar (retains exact fill amount)
                     GeometryReader { geo in
+                        let completedFraction = min(max(1.0 - viewModel.fillAmount, 0.0), 1.0)
                         ZStack(alignment: .leading) {
                             Capsule()
                                 .fill(Color.white.opacity(0.08))
@@ -301,7 +303,7 @@ public struct MenuBarCompanionView: View {
                                         endPoint: .trailing
                                     )
                                 )
-                                .frame(width: max(0, geo.size.width * CGFloat(viewModel.fillAmount)), height: 4)
+                                .frame(width: max(0, geo.size.width * CGFloat(completedFraction)), height: 4)
                         }
                     }
                     .frame(height: 4)
@@ -324,9 +326,10 @@ public struct MenuBarCompanionView: View {
                         } label: {
                             Image(systemName: "minus.circle.fill")
                                 .font(.system(size: 18))
-                                .foregroundColor(.gray.opacity(0.8))
+                                .foregroundColor(companionController.canAdjustMinus5 ? .gray.opacity(0.8) : .gray.opacity(0.3))
                         }
                         .buttonStyle(.plain)
+                        .disabled(!companionController.canAdjustMinus5)
                         .accessibilityLabel("Subtract 5 minutes")
                         .help("Subtract 5 minutes (preserves seconds)")
 
@@ -344,7 +347,7 @@ public struct MenuBarCompanionView: View {
                             if companionController.activeEditingField == .minutes {
                                 TimeDigitField(
                                     text: $companionController.inputMinutes,
-                                    placeholder: "25",
+                                    placeholder: "MM",
                                     fontSize: 24,
                                     maxLength: 3,
                                     onTab: {
@@ -369,29 +372,31 @@ public struct MenuBarCompanionView: View {
                                 )
                                 .padding(.horizontal, 2)
                             } else {
-                                Text(companionController.inputMinutes)
-                                    .font(.system(size: 24, weight: .bold, design: .rounded))
-                                    .monospacedDigit()
-                                    .multilineTextAlignment(.center)
-                                    .foregroundColor(.white)
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.65)
-                                    .padding(.horizontal, 2)
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                    .contentShape(RoundedRectangle(cornerRadius: 8))
-                                    .onTapGesture {
-                                        if companionController.activeEditingField == .seconds {
-                                            companionController.commitAndSwitchField(to: .minutes)
-                                        } else if companionController.activeEditingField != .minutes {
-                                            companionController.startEditing(.minutes)
-                                        }
+                                Button {
+                                    if companionController.activeEditingField == .seconds {
+                                        companionController.commitAndSwitchField(to: .minutes)
+                                    } else if companionController.activeEditingField != .minutes {
+                                        companionController.startEditing(.minutes)
                                     }
+                                } label: {
+                                    Text(companionController.inputMinutes.isEmpty ? "MM" : companionController.inputMinutes)
+                                        .font(.system(size: companionController.inputMinutes.isEmpty ? 19 : 24, weight: .bold, design: .rounded))
+                                        .monospacedDigit()
+                                        .multilineTextAlignment(.center)
+                                        .foregroundColor(companionController.inputMinutes.isEmpty ? Color.white.opacity(0.30) : .white)
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.65)
+                                        .padding(.horizontal, 2)
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                }
+                                .buttonStyle(.plain)
+                                .contentShape(RoundedRectangle(cornerRadius: 8))
                             }
                         }
                         .frame(width: 68, height: 38)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .accessibilityElement(children: .combine)
-                        .accessibilityLabel("Minutes, \(companionController.inputMinutes)")
+                        .accessibilityLabel("Minutes, \(companionController.inputMinutes.isEmpty ? "empty" : companionController.inputMinutes)")
                         .accessibilityHint("Click to edit minutes")
 
                         Text(":")
@@ -412,7 +417,7 @@ public struct MenuBarCompanionView: View {
                             if companionController.activeEditingField == .seconds {
                                 TimeDigitField(
                                     text: $companionController.inputSeconds,
-                                    placeholder: "00",
+                                    placeholder: "SS",
                                     fontSize: 24,
                                     maxLength: 2,
                                     onTab: {
@@ -437,23 +442,25 @@ public struct MenuBarCompanionView: View {
                                 )
                                 .padding(.horizontal, 2)
                             } else {
-                                Text(companionController.inputSeconds)
-                                    .font(.system(size: 24, weight: .bold, design: .rounded))
-                                    .monospacedDigit()
-                                    .multilineTextAlignment(.center)
-                                    .foregroundColor(.white)
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.65)
-                                    .padding(.horizontal, 2)
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                    .contentShape(RoundedRectangle(cornerRadius: 8))
-                                    .onTapGesture {
-                                        if companionController.activeEditingField == .minutes {
-                                            companionController.commitAndSwitchField(to: .seconds)
-                                        } else if companionController.activeEditingField != .seconds {
-                                            companionController.startEditing(.seconds)
-                                        }
+                                Button {
+                                    if companionController.activeEditingField == .minutes {
+                                        companionController.commitAndSwitchField(to: .seconds)
+                                    } else if companionController.activeEditingField != .seconds {
+                                        companionController.startEditing(.seconds)
                                     }
+                                } label: {
+                                    Text(companionController.inputSeconds.isEmpty ? "SS" : companionController.inputSeconds)
+                                        .font(.system(size: companionController.inputSeconds.isEmpty ? 19 : 24, weight: .bold, design: .rounded))
+                                        .monospacedDigit()
+                                        .multilineTextAlignment(.center)
+                                        .foregroundColor(companionController.inputSeconds.isEmpty ? Color.white.opacity(0.30) : .white)
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.65)
+                                        .padding(.horizontal, 2)
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                }
+                                .buttonStyle(.plain)
+                                .contentShape(RoundedRectangle(cornerRadius: 8))
                             }
                         }
                         .frame(width: 68, height: 38)
@@ -468,9 +475,10 @@ public struct MenuBarCompanionView: View {
                         } label: {
                             Image(systemName: "plus.circle.fill")
                                 .font(.system(size: 18))
-                                .foregroundColor(.orange)
+                                .foregroundColor(companionController.canAdjustPlus5 ? .orange : .gray.opacity(0.3))
                         }
                         .buttonStyle(.plain)
+                        .disabled(!companionController.canAdjustPlus5)
                         .accessibilityLabel("Add 5 minutes")
                         .help("Add 5 minutes (preserves seconds)")
                     }

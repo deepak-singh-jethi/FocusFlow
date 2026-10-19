@@ -80,8 +80,8 @@ public class TimeInputController: ObservableObject {
     }
 
     // Snapshot taken when editing starts; restored on cancel/Escape
-    private var snapshotMinutes: Int = 25
-    private var snapshotSeconds: Int = 0
+    public private(set) var snapshotMinutes: Int = 25
+    public private(set) var snapshotSeconds: Int = 0
 
     // Duration limits from TimerViewModel
     public static let minDurationSeconds: Int = TimerViewModel.minSupportedTimerDuration // 5s
@@ -134,14 +134,26 @@ public class TimeInputController: ObservableObject {
         hasInvalidDraft = false
     }
 
+    // Specific field causing validation error (for targeted UI highlight)
+    public var validationErrorField: TimeInputField? {
+        switch validationError {
+        case .invalidMinutes, .exceedsMaximum:
+            return .minutes
+        case .invalidSeconds:
+            return .seconds
+        default:
+            return nil
+        }
+    }
+
     // MARK: - Editing Lifecycle
     public func startEditing(_ field: TimeInputField) {
         if activeEditingField == nil && !hasInvalidDraft {
             snapshotMinutes = committedMinutes
             snapshotSeconds = committedSeconds
-            // Initialize draft with plain unpadded minutes if >= 10, or 2-digit
-            inputMinutes = "\(committedMinutes)"
-            inputSeconds = String(format: "%02d", committedSeconds)
+            // Keep full formatted representation so "00" never jumps to "0"
+            inputMinutes = Self.formatMinutes(committedMinutes)
+            inputSeconds = Self.formatSeconds(committedSeconds)
         }
         activeEditingField = field
         validationError = nil
@@ -167,12 +179,25 @@ public class TimeInputController: ObservableObject {
         let cleanMStr = inputMinutes.filter { $0.isNumber }
         let cleanSStr = inputSeconds.filter { $0.isNumber }
 
-        inputMinutes = cleanMStr.isEmpty ? "\(snapshotMinutes)" : cleanMStr
-        inputSeconds = cleanSStr.isEmpty ? String(format: "%02d", snapshotSeconds) : cleanSStr
+        inputMinutes = cleanMStr.isEmpty ? Self.formatMinutes(snapshotMinutes) : cleanMStr
+        inputSeconds = cleanSStr.isEmpty ? Self.formatSeconds(snapshotSeconds) : cleanSStr
 
         activeEditingField = nextField
         validationError = nil
         hasInvalidDraft = false
+    }
+
+    // Stepper boundary capabilities
+    public var canAdjustMinus5: Bool {
+        let currentM = committedMinutes
+        let currentS = committedSeconds
+        let newTotal = (currentM - 5) * 60 + currentS
+        return newTotal >= Self.minDurationSeconds
+    }
+
+    public var canAdjustPlus5: Bool {
+        let currentM = committedMinutes
+        return (currentM + 5) <= Self.maxMinutes
     }
 
     public func validateDraft() -> Result<(minutes: Int, seconds: Int), TimeInputValidationError> {

@@ -18,6 +18,7 @@ public final class TimeDigitNSTextField: NSTextField {
         shouldAutoFocusOnMount = false
         window.makeFirstResponder(self)
         if let editor = self.currentEditor() {
+            editor.alignment = .center
             editor.selectAll(nil)
         }
         onFocusAcquired?()
@@ -38,7 +39,7 @@ public struct TimeDigitField: NSViewRepresentable {
 
     public init(
         text: Binding<String>,
-        placeholder: String = "00",
+        placeholder: String = "MM",
         fontSize: CGFloat = 36,
         maxLength: Int = 2,
         onTab: (() -> Void)? = nil,
@@ -62,6 +63,50 @@ public struct TimeDigitField: NSViewRepresentable {
         Coordinator(self)
     }
 
+    public static func roundedFont(size: CGFloat, weight: NSFont.Weight = .bold) -> NSFont {
+        let baseFont = NSFont.systemFont(ofSize: size, weight: weight)
+        guard let descriptor = baseFont.fontDescriptor.withDesign(.rounded) else {
+            return baseFont
+        }
+        return NSFont(descriptor: descriptor, size: size) ?? baseFont
+    }
+
+    public static func roundedMonospacedFont(size: CGFloat, weight: NSFont.Weight = .bold) -> NSFont {
+        let baseFont = NSFont.systemFont(ofSize: size, weight: weight)
+        guard let descriptor = baseFont.fontDescriptor.withDesign(.rounded) else {
+            return baseFont
+        }
+        let monoDescriptor = descriptor.addingAttributes([
+            .featureSettings: [
+                [
+                    NSFontDescriptor.FeatureKey.typeIdentifier: kNumberSpacingType,
+                    NSFontDescriptor.FeatureKey.selectorIdentifier: kMonospacedNumbersSelector
+                ]
+            ]
+        ])
+        return NSFont(descriptor: monoDescriptor, size: size) ?? NSFont(descriptor: descriptor, size: size) ?? baseFont
+    }
+
+    public static func makePlaceholderAttributedString(
+        text: String,
+        fontSize: CGFloat,
+        color: NSColor = NSColor.white.withAlphaComponent(0.30)
+    ) -> NSAttributedString {
+        // Optically balanced placeholder font: matches visual mass of digits
+        let pSize = max(14, fontSize * 0.78)
+        let pFont = roundedFont(size: pSize, weight: .bold)
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        return NSAttributedString(
+            string: text,
+            attributes: [
+                .foregroundColor: color,
+                .font: pFont,
+                .paragraphStyle: style
+            ]
+        )
+    }
+
     public func makeNSView(context: Context) -> TimeDigitNSTextField {
         let textField = TimeDigitNSTextField()
         textField.isBezeled = false
@@ -69,24 +114,17 @@ public struct TimeDigitField: NSViewRepresentable {
         textField.isEditable = true
         textField.isSelectable = true
         textField.alignment = .center
+        textField.cell?.alignment = .center
         textField.textColor = .white
         textField.focusRingType = .none
         textField.maximumNumberOfLines = 1
         textField.lineBreakMode = .byClipping
 
-        let baseFont = NSFont.systemFont(ofSize: fontSize, weight: .bold)
-        if let descriptor = baseFont.fontDescriptor.withDesign(.rounded) {
-            textField.font = NSFont(descriptor: descriptor, size: fontSize) ?? baseFont
-        } else {
-            textField.font = baseFont
-        }
-
-        textField.placeholderAttributedString = NSAttributedString(
-            string: placeholder,
-            attributes: [
-                .foregroundColor: NSColor.white.withAlphaComponent(0.35),
-                .font: textField.font ?? baseFont
-            ]
+        let fieldFont = Self.roundedMonospacedFont(size: fontSize, weight: .bold)
+        textField.font = fieldFont
+        textField.placeholderAttributedString = Self.makePlaceholderAttributedString(
+            text: placeholder,
+            fontSize: fontSize
         )
 
         textField.stringValue = text
@@ -106,15 +144,17 @@ public struct TimeDigitField: NSViewRepresentable {
 
     public func updateNSView(_ nsView: TimeDigitNSTextField, context: Context) {
         context.coordinator.parent = self
+        nsView.alignment = .center
+        nsView.cell?.alignment = .center
         if nsView.stringValue != text {
             nsView.stringValue = text
         }
-        let baseFont = NSFont.systemFont(ofSize: fontSize, weight: .bold)
-        if let descriptor = baseFont.fontDescriptor.withDesign(.rounded) {
-            nsView.font = NSFont(descriptor: descriptor, size: fontSize) ?? baseFont
-        } else {
-            nsView.font = baseFont
-        }
+        let fieldFont = Self.roundedMonospacedFont(size: fontSize, weight: .bold)
+        nsView.font = fieldFont
+        nsView.placeholderAttributedString = Self.makePlaceholderAttributedString(
+            text: placeholder,
+            fontSize: fontSize
+        )
     }
 
     public class Coordinator: NSObject, NSTextFieldDelegate {
