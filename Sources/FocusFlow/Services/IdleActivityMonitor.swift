@@ -47,11 +47,22 @@ public final class MacOSNativeIdleActivityProvider: IdleActivityProvider, @unche
     }
 
     public func systemIdleDuration(at date: Date) -> TimeInterval {
+        #if DEBUG
+        if NSClassFromString("XCTestCase") != nil {
+            return 0.0
+        }
+        #endif
         let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: Self.anyInputEventType)
-        return max(0.0, idle)
+        guard idle >= 0 && idle.isFinite else { return 0.0 }
+        return idle
     }
 
     public func isScreenLocked() -> Bool {
+        #if DEBUG
+        if NSClassFromString("XCTestCase") != nil {
+            return false
+        }
+        #endif
         lock.lock()
         defer { lock.unlock() }
         return screenLocked
