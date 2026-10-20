@@ -23,20 +23,22 @@ VOL_NAME="FocusFlow"
 echo "=== FocusFlow Release Packaging Pipeline (Single DMG & Standalone App) ==="
 echo "Project Root: $PROJECT_ROOT"
 mkdir -p "$RELEASES_DIR"
-mkdir -p "$BACKUP_DIR"
 
-# 0. Backup existing release artifacts to durable sibling directory outside repo
-echo "--- Backing up existing releases to: $BACKUP_DIR ---"
-if [ -d "$ARTIFACT_APP" ]; then
-    echo "Backing up FocusFlow.app..."
-    cp -R "$ARTIFACT_APP" "$BACKUP_DIR/FocusFlow.app"
-fi
-for dmg in "$RELEASES_DIR"/*.dmg; do
-    if [ -f "$dmg" ]; then
-        echo "Backing up $(basename "$dmg")..."
-        cp -p "$dmg" "$BACKUP_DIR/$(basename "$dmg")"
+# 0. Backup existing release artifacts only if explicitly requested via FOCUSFLOW_ENABLE_BACKUP=true
+if [ "${FOCUSFLOW_ENABLE_BACKUP:-false}" = "true" ]; then
+    mkdir -p "$BACKUP_DIR"
+    echo "--- Backing up existing releases to: $BACKUP_DIR ---"
+    if [ -d "$ARTIFACT_APP" ]; then
+        echo "Backing up FocusFlow.app..."
+        cp -R "$ARTIFACT_APP" "$BACKUP_DIR/FocusFlow.app"
     fi
-done
+    for dmg in "$RELEASES_DIR"/*.dmg; do
+        if [ -f "$dmg" ]; then
+            echo "Backing up $(basename "$dmg")..."
+            cp -p "$dmg" "$BACKUP_DIR/$(basename "$dmg")"
+        fi
+    done
+fi
 
 # 1. Compile fresh release binary from current working tree
 BUILD_COMMIT=$(git rev-parse HEAD)
