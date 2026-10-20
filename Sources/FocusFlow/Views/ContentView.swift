@@ -151,8 +151,8 @@ public struct ContentView: View {
 
     private var sidebar: some View {
         SidebarView(gradient: accentGradient, selection: $sidebarSelection, viewModel: viewModel)
-            .frame(width: 252)
-            .background(bgSidebar)
+            .frame(width: SidebarTokens.sidebarWidth)
+            .background(SidebarTokens.sidebarBackground)
     }
 
     @ViewBuilder

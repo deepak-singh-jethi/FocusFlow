@@ -22,6 +22,14 @@ public enum NavigationTab: String, CaseIterable, Identifiable, Codable {
         case .settings: return "gearshape"
         }
     }
+
+    public var isWorkspaceTab: Bool {
+        self != .settings
+    }
+
+    public static var workspaceTabs: [NavigationTab] {
+        [.focusTimer, .stopwatch, .tasks, .soundscapes, .insights]
+    }
 }
 
 // MARK: - Clock Style Enum

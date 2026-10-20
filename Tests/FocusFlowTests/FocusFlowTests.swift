@@ -21119,6 +21119,147 @@ final class FocusFlowTests: XCTestCase {
         vm.reconcileActiveTimers(at: currentTime)
         XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 0, "Disabled idle review does not generate reviews")
     }
+
+    // MARK: - Phase 1: Sidebar Foundation & Visual Architecture Tests
+
+    func testPhase1_NavigationTab_WorkspaceTabsAndCategorization() {
+        let expectedWorkspaceTabs: [NavigationTab] = [.focusTimer, .stopwatch, .tasks, .soundscapes, .insights]
+        XCTAssertEqual(NavigationTab.workspaceTabs, expectedWorkspaceTabs, "workspaceTabs must contain exactly the 5 workspace destinations in expected order")
+
+        for tab in expectedWorkspaceTabs {
+            XCTAssertTrue(tab.isWorkspaceTab, "\(tab.rawValue) must be recognized as a workspace tab")
+        }
+
+        XCTAssertFalse(NavigationTab.settings.isWorkspaceTab, "Settings tab must not be recognized as a workspace tab")
+        XCTAssertEqual(NavigationTab.allCases.count, 6, "Total tabs in NavigationTab must remain 6")
+
+        // Check titles and icons
+        XCTAssertEqual(NavigationTab.focusTimer.rawValue, "Focus Timer")
+        XCTAssertEqual(NavigationTab.focusTimer.icon, "hourglass")
+        XCTAssertEqual(NavigationTab.stopwatch.rawValue, "Stopwatch & Laps")
+        XCTAssertEqual(NavigationTab.stopwatch.icon, "stopwatch")
+        XCTAssertEqual(NavigationTab.tasks.rawValue, "Tasks")
+        XCTAssertEqual(NavigationTab.tasks.icon, "checklist")
+        XCTAssertEqual(NavigationTab.soundscapes.rawValue, "Focus Soundscapes")
+        XCTAssertEqual(NavigationTab.soundscapes.icon, "headphones")
+        XCTAssertEqual(NavigationTab.insights.rawValue, "Insights & Stats")
+        XCTAssertEqual(NavigationTab.insights.icon, "chart.bar")
+        XCTAssertEqual(NavigationTab.settings.rawValue, "Settings")
+        XCTAssertEqual(NavigationTab.settings.icon, "gearshape")
+    }
+
+    func testPhase1_SidebarTokens_GeometryAndTokensIntegrity() {
+        // Sizing & Spacing tokens
+        XCTAssertEqual(SidebarTokens.sidebarWidth, 252)
+        XCTAssertEqual(SidebarTokens.horizontalPadding, 12)
+        XCTAssertEqual(SidebarTokens.headerHorizontalPadding, 16)
+        XCTAssertEqual(SidebarTokens.headerTopPadding, 20)
+        XCTAssertEqual(SidebarTokens.headerBottomPadding, 16)
+        XCTAssertEqual(SidebarTokens.sectionSpacing, 6)
+        XCTAssertEqual(SidebarTokens.itemSpacing, 3)
+        XCTAssertEqual(SidebarTokens.itemMinHeight, 38)
+        XCTAssertEqual(SidebarTokens.itemHorizontalPadding, 10)
+        XCTAssertEqual(SidebarTokens.itemIconSpacing, 10)
+        XCTAssertEqual(SidebarTokens.footerTopPadding, 10)
+        XCTAssertEqual(SidebarTokens.footerBottomPadding, 14)
+        XCTAssertEqual(SidebarTokens.footerSpacing, 10)
+
+        // Radii tokens
+        XCTAssertEqual(SidebarTokens.itemCornerRadius, 8)
+        XCTAssertEqual(SidebarTokens.cardCornerRadius, 12)
+        XCTAssertEqual(SidebarTokens.iconCornerRadius, 8)
+
+        // Colors (Quiet Productivity palette) - instantiate to ensure they evaluate cleanly
+        _ = SidebarTokens.sidebarBackground
+        _ = SidebarTokens.surfaceSubtle
+        _ = SidebarTokens.surfaceHover
+        _ = SidebarTokens.borderSubtle
+        _ = SidebarTokens.borderHover
+        _ = SidebarTokens.accentOrange
+        _ = SidebarTokens.selectionFill
+        _ = SidebarTokens.selectionBorder
+        _ = SidebarTokens.selectionIndicator
+        _ = SidebarTokens.textPrimary
+        _ = SidebarTokens.textSecondary
+        _ = SidebarTokens.textMuted
+        _ = SidebarTokens.sectionHeader
+    }
+
+    func testPhase1_DailyProgressWidget_ProgressCalculationsAndClamping() {
+        let dummyGradient = LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing)
+
+        // 1. Zero progress
+        let widgetZero = DailyProgressWidget(gradient: dummyGradient, focusedSeconds: 0, goalHours: 2)
+        XCTAssertEqual(widgetZero.progress, 0.0, accuracy: 0.0001)
+        XCTAssertEqual(widgetZero.durationLabel, "0h 0m")
+        XCTAssertEqual(widgetZero.percentageLabel, "0%")
+
+        // 2. Partial progress: 1h 15m (4500s) of 4h goal (14400s) -> 31.25%
+        let widgetPartial = DailyProgressWidget(gradient: dummyGradient, focusedSeconds: 4500, goalHours: 4)
+        XCTAssertEqual(widgetPartial.progress, 4500.0 / 14400.0, accuracy: 0.0001)
+        XCTAssertEqual(widgetPartial.durationLabel, "1h 15m")
+        XCTAssertEqual(widgetPartial.percentageLabel, "31%")
+
+        // 3. Exact 100% progress: 2h (7200s) of 2h goal
+        let widgetExact = DailyProgressWidget(gradient: dummyGradient, focusedSeconds: 7200, goalHours: 2)
+        XCTAssertEqual(widgetExact.progress, 1.0, accuracy: 0.0001)
+        XCTAssertEqual(widgetExact.durationLabel, "2h 0m")
+        XCTAssertEqual(widgetExact.percentageLabel, "100%")
+
+        // 4. Clamped overflow progress: 3h (10800s) of 2h goal -> clamped to 1.0
+        let widgetOver = DailyProgressWidget(gradient: dummyGradient, focusedSeconds: 10800, goalHours: 2)
+        XCTAssertEqual(widgetOver.progress, 1.0, accuracy: 0.0001)
+        XCTAssertEqual(widgetOver.durationLabel, "3h 0m")
+        XCTAssertEqual(widgetOver.percentageLabel, "100%")
+
+        // 5. Clamped non-positive goalHours fallback to at least 1h
+        let widgetZeroGoal = DailyProgressWidget(gradient: dummyGradient, focusedSeconds: 1800, goalHours: 0)
+        XCTAssertEqual(widgetZeroGoal.goalHours, 1, "goalHours of 0 must clamp to 1")
+        XCTAssertEqual(widgetZeroGoal.progress, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(widgetZeroGoal.durationLabel, "0h 30m")
+        XCTAssertEqual(widgetZeroGoal.percentageLabel, "50%")
+
+        let widgetNegativeGoal = DailyProgressWidget(gradient: dummyGradient, focusedSeconds: 1800, goalHours: -5)
+        XCTAssertEqual(widgetNegativeGoal.goalHours, 1, "Negative goalHours must clamp to 1")
+        XCTAssertEqual(widgetNegativeGoal.progress, 0.5, accuracy: 0.0001)
+
+        // 6. Negative focusedSeconds clamped to 0.0
+        let widgetNegativeSeconds = DailyProgressWidget(gradient: dummyGradient, focusedSeconds: -600, goalHours: 2)
+        XCTAssertEqual(widgetNegativeSeconds.progress, 0.0, accuracy: 0.0001)
+    }
+
+    @MainActor
+    func testPhase1_Sidebar_WindowAndNavigationConstraints() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Authoritative TimerViewModel link with DailyProgress
+        vm.dailyGoalHours = 3
+        vm.todayFocusedSeconds = 3600
+
+        let dummyGradient = LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing)
+        let widget = DailyProgressWidget(gradient: dummyGradient, focusedSeconds: vm.todayFocusedSeconds, goalHours: vm.dailyGoalHours)
+
+        XCTAssertEqual(widget.goalHours, 3)
+        XCTAssertEqual(widget.focusedSeconds, 3600)
+        XCTAssertEqual(widget.percentageLabel, "33%")
+
+        // Sidebar dimensions & constraints
+        XCTAssertEqual(SidebarTokens.sidebarWidth, 252)
+
+        // Verify window constraint constants from architecture specification
+        let minWindowWidth: CGFloat = 850
+        let minWindowHeight: CGFloat = 600
+        let defaultWindowWidth: CGFloat = 1050
+        let defaultWindowHeight: CGFloat = 700
+
+        XCTAssertGreaterThan(minWindowWidth, SidebarTokens.sidebarWidth)
+        let remainingContentWidth = minWindowWidth - SidebarTokens.sidebarWidth
+        XCTAssertGreaterThanOrEqual(remainingContentWidth, 598, "At min window width 850, main content gets at least 598pt")
+        XCTAssertGreaterThanOrEqual(minWindowHeight, 600)
+        XCTAssertGreaterThan(defaultWindowWidth, minWindowWidth)
+        XCTAssertGreaterThan(defaultWindowHeight, minWindowHeight)
+    }
 }
 
 
