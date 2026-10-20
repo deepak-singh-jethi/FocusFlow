@@ -571,9 +571,10 @@ public struct FocusAppData: Codable, Equatable {
 
         // Backward compatibility migration:
         // If sessionRecords is empty and legacyLifetimeFocusedSeconds was nil,
+        // and no active/deferred session is in flight (activeSessionRecovery is nil),
         // but focusedSeconds > 0, preserve that focusedSeconds as legacy lifetime focus,
         // so it does NOT falsely get assigned to today's focus!
-        if self.sessionRecords.isEmpty && self.legacyLifetimeFocusedSeconds == nil && self.focusedSeconds > 0 {
+        if self.sessionRecords.isEmpty && self.legacyLifetimeFocusedSeconds == nil && self.activeSessionRecovery == nil && self.focusedSeconds > 0 {
             self.legacyLifetimeFocusedSeconds = self.focusedSeconds
         }
     }
@@ -636,6 +637,7 @@ public final class FocusStorageService {
     public var simulateWriteFailure: Bool = false
     public var simulateDiagnosticFailure: Bool = false
     public var simulateRestoreFailure: Bool = false
+    public var onSavePayload: ((FocusAppData) -> Void)?
     public private(set) var saveAttemptCount: Int = 0
 
     public init(storageURL: URL? = nil, fileManager: FileManager = .default) {
@@ -863,6 +865,7 @@ public final class FocusStorageService {
 
     public func save(_ data: FocusAppData) throws {
         saveAttemptCount += 1
+        onSavePayload?(data)
         guard !isPersistenceBlocked else {
             let error = StorageError.persistenceBlocked(reason: "Persistence is blocked due to unrecoverable storage state")
             self.lastError = error

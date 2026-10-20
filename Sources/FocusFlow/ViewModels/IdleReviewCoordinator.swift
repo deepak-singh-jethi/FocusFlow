@@ -40,6 +40,15 @@ public class IdleReviewCoordinator: ObservableObject {
     @Published public var pendingIntervals: [IdleReviewInterval] = [] {
         didSet {
             onPendingCountChange?(pendingIntervals.count)
+            if activeReviewInterval == nil, let first = pendingIntervals.first {
+                activeReviewInterval = first
+                state = .reviewing(intervalId: first.id)
+            } else if pendingIntervals.isEmpty {
+                activeReviewInterval = nil
+                if case .reviewing = state {
+                    state = .monitoring
+                }
+            }
         }
     }
     @Published public var activeReviewInterval: IdleReviewInterval? = nil
@@ -224,7 +233,61 @@ public class IdleReviewCoordinator: ObservableObject {
         }
     }
 
-    // MARK: - Interval Creation & Deduplication
+    // MARK: - Interval Creation & Authoritative Registration
+    @discardableResult
+    private func registerIdleInterval(
+        boundedStart: Date,
+        boundedEnd: Date,
+        durationSecs: Int,
+        sessionId: UUID,
+        sessionType: String,
+        taskId: UUID?,
+        isEstimated: Bool = false
+    ) -> IdleReviewInterval? {
+        guard durationSecs >= thresholdSeconds else { return nil }
+
+        // Deduplicate against existing intervals
+        let isDuplicate = pendingIntervals.contains { existing in
+            existing.sessionId == sessionId &&
+            abs(existing.startTime.timeIntervalSince(boundedStart)) < 2.0 &&
+            abs(existing.endTime.timeIntervalSince(boundedEnd)) < 2.0
+        }
+        guard !isDuplicate else { return nil }
+
+        let interval = IdleReviewInterval(
+            sessionId: sessionId,
+            sessionType: sessionType,
+            taskId: taskId,
+            startTime: boundedStart,
+            endTime: boundedEnd,
+            eligibleDurationSeconds: durationSecs,
+            status: .pending,
+            isEstimated: isEstimated,
+            isProvisionalCreditDeducted: false
+        )
+
+        // 1. Authoritative pending queue insertion FIRST
+        pendingIntervals.append(interval)
+
+        // 2. Auto-surface oldest pending review if none active
+        if activeReviewInterval == nil {
+            activeReviewInterval = pendingIntervals.first
+            if let active = activeReviewInterval {
+                state = .reviewing(intervalId: active.id)
+            } else {
+                state = .pendingReview
+            }
+        } else {
+            state = .reviewing(intervalId: activeReviewInterval!.id)
+        }
+
+        // 3. Atomically perform provisional accounting adjustment and forced snapshot persistence
+        let registeredIndex = pendingIntervals.count - 1
+        onIntervalCreated?(&pendingIntervals[registeredIndex])
+
+        return pendingIntervals[registeredIndex]
+    }
+
     private func recordCompletedIdleInterval(
         candidateStart: Date,
         now: Date,
@@ -253,40 +316,15 @@ public class IdleReviewCoordinator: ObservableObject {
         guard boundedEnd > boundedStart else { return }
         let durationSecs = Int(boundedEnd.timeIntervalSince(boundedStart))
 
-        guard durationSecs >= thresholdSeconds else { return }
-
-        // Deduplicate against existing intervals
-        let isDuplicate = pendingIntervals.contains { existing in
-            existing.sessionId == sessionId &&
-            abs(existing.startTime.timeIntervalSince(boundedStart)) < 2.0 &&
-            abs(existing.endTime.timeIntervalSince(boundedEnd)) < 2.0
-        }
-        guard !isDuplicate else { return }
-
-        var interval = IdleReviewInterval(
+        registerIdleInterval(
+            boundedStart: boundedStart,
+            boundedEnd: boundedEnd,
+            durationSecs: durationSecs,
             sessionId: sessionId,
             sessionType: sessionType,
             taskId: taskId,
-            startTime: boundedStart,
-            endTime: boundedEnd,
-            eligibleDurationSeconds: durationSecs,
-            status: .pending
+            isEstimated: false
         )
-
-        onIntervalCreated?(&interval)
-        pendingIntervals.append(interval)
-
-        // If no active review is currently presented, auto-surface the oldest pending review
-        if activeReviewInterval == nil {
-            activeReviewInterval = pendingIntervals.first
-            if let active = activeReviewInterval {
-                state = .reviewing(intervalId: active.id)
-            } else {
-                state = .pendingReview
-            }
-        } else {
-            state = .reviewing(intervalId: activeReviewInterval!.id)
-        }
     }
 
     // MARK: - Sleep, Wake & Screen Lock Handling
@@ -322,6 +360,8 @@ public class IdleReviewCoordinator: ObservableObject {
         sleepStartDate = nil
 
         guard isEnabled && isSessionActive && sessionType != "Break" else {
+            isCurrentlyIdle = false
+            currentCandidateStart = nil
             return
         }
 
@@ -339,33 +379,22 @@ public class IdleReviewCoordinator: ObservableObject {
             boundedEnd = now
         }
 
-        guard boundedEnd > boundedStart else { return }
+        guard boundedEnd > boundedStart else {
+            isCurrentlyIdle = false
+            currentCandidateStart = nil
+            return
+        }
         let durationSecs = Int(boundedEnd.timeIntervalSince(boundedStart))
 
-        if durationSecs >= thresholdSeconds {
-            let isDuplicate = pendingIntervals.contains { existing in
-                existing.sessionId == sessionId &&
-                abs(existing.startTime.timeIntervalSince(boundedStart)) < 2.0 &&
-                abs(existing.endTime.timeIntervalSince(boundedEnd)) < 2.0
-            }
-            if !isDuplicate {
-                let interval = IdleReviewInterval(
-                    sessionId: sessionId,
-                    sessionType: sessionType,
-                    taskId: taskId,
-                    startTime: boundedStart,
-                    endTime: boundedEnd,
-                    eligibleDurationSeconds: durationSecs,
-                    status: .pending,
-                    isEstimated: true
-                )
-                pendingIntervals.append(interval)
-                if activeReviewInterval == nil {
-                    activeReviewInterval = pendingIntervals.first
-                    state = .reviewing(intervalId: interval.id)
-                }
-            }
-        }
+        registerIdleInterval(
+            boundedStart: boundedStart,
+            boundedEnd: boundedEnd,
+            durationSecs: durationSecs,
+            sessionId: sessionId,
+            sessionType: sessionType,
+            taskId: taskId,
+            isEstimated: true
+        )
 
         isCurrentlyIdle = false
         currentCandidateStart = nil

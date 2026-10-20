@@ -20429,6 +20429,696 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(vmCrashRecovered.idleReviewCoordinator.pendingIntervals.count, 1, "Only Interval B remains pending")
         XCTAssertEqual(vmCrashRecovered.idleReviewCoordinator.pendingIntervals.first?.id, intervalB.id)
     }
+
+    // MARK: - Task 9: Atomic Idle Review Creation & Recovery Safety (Defects A, B, C)
+
+    @MainActor
+    func testTask9_Atomic_01_NormalIdleReturn_CoherentSnapshotAndQueue() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_01_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1200
+        vm.timeRemaining = 1200
+        vm.startTimer(at: currentTime)
+        let sessionId = vm.activeTimerSessionId
+
+        currentTime = currentTime.addingTimeInterval(780)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.segmentCreditedSeconds, 780)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 780)
+
+        currentTime = currentTime.addingTimeInterval(420)
+        mockActivity.setSimulatedIdle(420.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1, "Exactly one pending review created")
+        guard let pending = vm.idleReviewCoordinator.pendingIntervals.first else {
+            XCTFail("Missing pending interval")
+            return
+        }
+        XCTAssertEqual(pending.sessionId, sessionId)
+        XCTAssertEqual(pending.eligibleDurationSeconds, 420)
+        XCTAssertTrue(pending.isProvisionalCreditDeducted, "Provisional credit must be deducted")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 780, "Task time must be 1200 - 420 = 780s")
+        XCTAssertEqual(vm.segmentCreditedSeconds, 780, "Segment credit must be 1200 - 420 = 780s")
+        XCTAssertEqual(vm.todayFocusedSeconds, 780, "Today focus must be 780s confirmed")
+
+        let vmRestored = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vmRestored.loadPersistedData()
+        XCTAssertEqual(vmRestored.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vmRestored.idleReviewCoordinator.pendingIntervals.first?.id, pending.id)
+        XCTAssertEqual(vmRestored.idleReviewCoordinator.pendingIntervals.first?.eligibleDurationSeconds, 420)
+        XCTAssertTrue(vmRestored.idleReviewCoordinator.pendingIntervals.first?.isProvisionalCreditDeducted == true)
+        XCTAssertEqual(vmRestored.tasks[0].timeSpentSeconds, 780)
+        XCTAssertEqual(vmRestored.todayFocusedSeconds, 780)
+    }
+
+    @MainActor
+    func testTask9_Atomic_02_NegativeTest_NoDeductionWithoutPendingIntervalInSavedSnapshot() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_02_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var savedSnapshots: [FocusAppData] = []
+        storage.onSavePayload = { payload in
+            savedSnapshots.append(payload)
+        }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1200
+        vm.timeRemaining = 1200
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(780)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(420)
+        mockActivity.setSimulatedIdle(420.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        savedSnapshots.removeAll()
+
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        XCTAssertFalse(savedSnapshots.isEmpty, "Return tick must trigger persistence")
+        for (idx, snapshot) in savedSnapshots.enumerated() {
+            let rootPendingCount = snapshot.pendingIdleIntervals?.count ?? 0
+            let recoveryPendingCount = snapshot.activeSessionRecovery?.pendingIdleIntervals?.count ?? 0
+            XCTAssertTrue(
+                rootPendingCount > 0 || recoveryPendingCount > 0,
+                "Snapshot #\(idx) had deducted task time but missing pending interval in saved payload!"
+            )
+        }
+    }
+
+    @MainActor
+    func testTask9_Atomic_03_RestoredViewModel_SamePendingIntervalUUID() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_03_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1200
+        vm.timeRemaining = 1200
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(780)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(420)
+        mockActivity.setSimulatedIdle(420.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        guard let originalId = vm.idleReviewCoordinator.pendingIntervals.first?.id else {
+            XCTFail("Missing pending interval")
+            return
+        }
+
+        let vmRestored = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vmRestored.loadPersistedData()
+        XCTAssertEqual(vmRestored.idleReviewCoordinator.pendingIntervals.first?.id, originalId)
+    }
+
+    @MainActor
+    func testTask9_Atomic_04_RestoredTaskCredit_MatchesConfirmedSeconds() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_04_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1200
+        vm.timeRemaining = 1200
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(780)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(420)
+        mockActivity.setSimulatedIdle(420.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        let vmRestored = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vmRestored.loadPersistedData()
+        XCTAssertEqual(vmRestored.tasks[0].timeSpentSeconds, 780)
+
+        guard let intId = vmRestored.idleReviewCoordinator.pendingIntervals.first?.id else {
+            XCTFail("Missing pending interval")
+            return
+        }
+        vmRestored.idleReviewCoordinator.resolve(intervalId: intId, decision: .countAsFocus, at: currentTime)
+        XCTAssertEqual(vmRestored.tasks[0].timeSpentSeconds, 1200)
+    }
+
+    @MainActor
+    func testTask9_Atomic_05_RestoredFocusMetrics_TodayWeeklyLifetime() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_05_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1200
+        vm.timeRemaining = 1200
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(780)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(420)
+        mockActivity.setSimulatedIdle(420.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        let vmRestored = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vmRestored.loadPersistedData()
+        XCTAssertEqual(vmRestored.todayFocusedSeconds, 780)
+        XCTAssertEqual(vmRestored.weeklyFocusedSeconds, 780)
+        XCTAssertEqual(vmRestored.lifetimeFocusedSeconds, 780)
+    }
+
+    @MainActor
+    func testTask9_Atomic_06_PendingIntervalCreation_TriggersExactlyOneDeduction() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_06_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1200
+        vm.timeRemaining = 1200
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(780)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(420)
+        mockActivity.setSimulatedIdle(420.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 780)
+
+        // Repeat reconciliation at same point in time
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 780, "Second tick must not double-deduct")
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1)
+    }
+
+    @MainActor
+    func testTask9_Atomic_07_SleepWake_UsesSameAccountingMechanismAndProvisionalDeduction() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_07_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1500
+        vm.timeRemaining = 1500
+        vm.startTimer(at: currentTime)
+        let sessionId = vm.activeTimerSessionId
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 600)
+
+        vm.idleReviewCoordinator.handleSleep(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.idleReviewCoordinator.handleWake(
+            at: currentTime,
+            isSessionActive: vm.isTimerRunning,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: vm.tasks[0].id,
+            sessionDeadline: vm.targetEndDate,
+            sessionStartDate: vm.sessionSegmentStartDate
+        )
+
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1, "Wake created pending review")
+        guard let wakeInterval = vm.idleReviewCoordinator.pendingIntervals.first else {
+            XCTFail("Missing wake interval")
+            return
+        }
+        XCTAssertTrue(wakeInterval.isEstimated, "Wake interval must be estimated")
+        XCTAssertTrue(wakeInterval.isProvisionalCreditDeducted, "Wake interval must have provisional credit deducted")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 600, "Task time must be 600s after provisional deduction")
+    }
+
+    @MainActor
+    func testTask9_Atomic_08_SleepWake_EstimatedIntervalRemainsEstimatedAfterRestart() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_08_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1500
+        vm.timeRemaining = 1500
+        vm.startTimer(at: currentTime)
+        let sessionId = vm.activeTimerSessionId
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        vm.idleReviewCoordinator.handleSleep(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.idleReviewCoordinator.handleWake(
+            at: currentTime,
+            isSessionActive: vm.isTimerRunning,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: vm.tasks[0].id,
+            sessionDeadline: vm.targetEndDate,
+            sessionStartDate: vm.sessionSegmentStartDate
+        )
+
+        let vmRestored = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vmRestored.loadPersistedData()
+        XCTAssertEqual(vmRestored.idleReviewCoordinator.pendingIntervals.first?.isEstimated, true)
+    }
+
+    @MainActor
+    func testTask9_Atomic_09_DuplicateWakeAndReturnEvents_DoNotDoubleDeduct() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_09_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1500
+        vm.timeRemaining = 1500
+        vm.startTimer(at: currentTime)
+        let sessionId = vm.activeTimerSessionId
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        vm.idleReviewCoordinator.handleSleep(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.idleReviewCoordinator.handleWake(
+            at: currentTime,
+            isSessionActive: vm.isTimerRunning,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: vm.tasks[0].id,
+            sessionDeadline: vm.targetEndDate,
+            sessionStartDate: vm.sessionSegmentStartDate
+        )
+
+        let taskTimeAfterFirstWake = vm.tasks[0].timeSpentSeconds
+
+        // Re-call handleWake with duplicate interval parameters
+        vm.idleReviewCoordinator.handleSleep(at: currentTime.addingTimeInterval(-600))
+        vm.idleReviewCoordinator.handleWake(
+            at: currentTime,
+            isSessionActive: vm.isTimerRunning,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: vm.tasks[0].id,
+            sessionDeadline: vm.targetEndDate,
+            sessionStartDate: vm.sessionSegmentStartDate
+        )
+
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1, "Duplicate wake must not add another interval")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, taskTimeAfterFirstWake, "Duplicate wake must not double-deduct")
+    }
+
+    @MainActor
+    func testTask9_Atomic_10_DelayedTick_YieldsSameCreditedTotalAsRegularTicks() {
+        let mockActivity1 = MockIdleActivityProvider()
+        let tempURL1 = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_10_1_\(UUID().uuidString).json")
+        let storage1 = FocusStorageService(storageURL: tempURL1)
+        defer { cleanup(url: tempURL1) }
+
+        let mockActivity2 = MockIdleActivityProvider()
+        let tempURL2 = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_10_2_\(UUID().uuidString).json")
+        let storage2 = FocusStorageService(storageURL: tempURL2)
+        defer { cleanup(url: tempURL2) }
+
+        let t0 = Date(timeIntervalSince1970: 1700000000)
+
+        // VM1: Delayed tick
+        var time1 = t0
+        let vmDelayed = TimerViewModel(storage: storage1, currentDateProvider: { time1 }, idleActivityProvider: mockActivity1)
+        vmDelayed.idleThresholdSeconds = 300
+        vmDelayed.tasks[0].timeSpentSeconds = 0
+        vmDelayed.totalTime = 1500
+        vmDelayed.timeRemaining = 1500
+        vmDelayed.startTimer(at: time1)
+
+        time1 = time1.addingTimeInterval(300)
+        vmDelayed.reconcileActiveTimers(at: time1)
+        XCTAssertEqual(vmDelayed.segmentCreditedSeconds, 300)
+
+        time1 = time1.addingTimeInterval(500)
+        mockActivity1.setSimulatedIdle(500.0)
+        vmDelayed.reconcileActiveTimers(at: time1)
+        mockActivity1.setSimulatedIdle(0.0)
+        vmDelayed.reconcileActiveTimers(at: time1)
+
+        // VM2: Frequent regular ticks (every 50s)
+        var time2 = t0
+        let vmFrequent = TimerViewModel(storage: storage2, currentDateProvider: { time2 }, idleActivityProvider: mockActivity2)
+        vmFrequent.idleThresholdSeconds = 300
+        vmFrequent.tasks[0].timeSpentSeconds = 0
+        vmFrequent.totalTime = 1500
+        vmFrequent.timeRemaining = 1500
+        vmFrequent.startTimer(at: time2)
+
+        for _ in 1...6 {
+            time2 = time2.addingTimeInterval(50)
+            vmFrequent.reconcileActiveTimers(at: time2)
+        }
+        XCTAssertEqual(vmFrequent.segmentCreditedSeconds, 300)
+
+        for step in 1...10 {
+            time2 = time2.addingTimeInterval(50)
+            mockActivity2.setSimulatedIdle(Double(step * 50))
+            vmFrequent.reconcileActiveTimers(at: time2)
+        }
+        mockActivity2.setSimulatedIdle(0.0)
+        vmFrequent.reconcileActiveTimers(at: time2)
+
+        XCTAssertEqual(
+            vmDelayed.segmentCreditedSeconds,
+            vmFrequent.segmentCreditedSeconds,
+            "Delayed tick must produce identical confirmed focus credit as regular ticks"
+        )
+        XCTAssertEqual(vmDelayed.segmentCreditedSeconds, 300, "Confirmed focus credit must be exactly 300s")
+        XCTAssertEqual(vmDelayed.tasks[0].timeSpentSeconds, 300, "Task time must be exactly 300s")
+    }
+
+    @MainActor
+    func testTask9_Atomic_11_IdleIntervalCrossingOriginalDeadline_ClampedCorrectly() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_11_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1500
+        vm.timeRemaining = 1500
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(1200)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.segmentCreditedSeconds, 1200)
+
+        // User idle from 1200 to 1700 (500s elapsed, crossing deadline at 1500)
+        currentTime = currentTime.addingTimeInterval(500)
+        mockActivity.setSimulatedIdle(500.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        guard let interval = vm.idleReviewCoordinator.pendingIntervals.first else {
+            XCTFail("Missing pending interval")
+            return
+        }
+        XCTAssertEqual(interval.eligibleDurationSeconds, 300, "Inactivity after deadline must be discarded")
+        XCTAssertTrue(vm.isDeferredCompletionPending, "Session must enter deferred completion")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1200, "Task credited seconds must be 1200s")
+    }
+
+    @MainActor
+    func testTask9_Atomic_12_ImmediateForceQuitAfterCommittedInterval_PreservesReview() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_12_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1200
+        vm.timeRemaining = 1200
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(780)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(420)
+        mockActivity.setSimulatedIdle(420.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        let originalId = vm.idleReviewCoordinator.pendingIntervals.first?.id
+
+        // Drop VM immediately without handleAppTermination
+        let vmRestored = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vmRestored.loadPersistedData()
+
+        XCTAssertEqual(vmRestored.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vmRestored.idleReviewCoordinator.pendingIntervals.first?.id, originalId)
+        XCTAssertTrue(vmRestored.idleReviewCoordinator.pendingIntervals.first?.isProvisionalCreditDeducted == true)
+    }
+
+    @MainActor
+    func testTask9_Atomic_13_StorageWriteFailureFollowedByRetry_PreservesConsistentAccounting() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_13_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1200
+        vm.timeRemaining = 1200
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(780)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        // Simulate write failure during return creation
+        storage.simulateWriteFailure = true
+
+        currentTime = currentTime.addingTimeInterval(420)
+        mockActivity.setSimulatedIdle(420.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        XCTAssertTrue(vm.isSaveFailed, "Save failure must be recorded")
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1, "Interval must not be discarded on save failure")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 780, "In-memory state remains coherent")
+
+        // Clear failure and retry
+        storage.simulateWriteFailure = false
+        vm.retrySave()
+
+        XCTAssertFalse(vm.isSaveFailed, "Save failure cleared on successful retry")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 780, "Retry must not double-deduct")
+
+        let vmRestored = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vmRestored.loadPersistedData()
+        XCTAssertEqual(vmRestored.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vmRestored.tasks[0].timeSpentSeconds, 780)
+    }
+
+    @MainActor
+    func testTask9_Atomic_14_DeferredCompletion_MultiplePendingIntervalsBehavior() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_14_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        let taskId = vm.tasks[0].id
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1500
+        vm.timeRemaining = 1500
+        vm.startTimer(at: currentTime)
+        let sessionId = vm.activeTimerSessionId
+
+        currentTime = currentTime.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(300.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        let intervalA = IdleReviewInterval(
+            id: UUID(),
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-600),
+            endTime: currentTime.addingTimeInterval(-300),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+        let intervalB = IdleReviewInterval(
+            id: UUID(),
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-300),
+            endTime: currentTime,
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+        vm.idleReviewCoordinator.pendingIntervals = [intervalA, intervalB]
+        vm.isDeferredCompletionPending = true
+        vm.deferredCompletionSessionId = sessionId
+        vm.deferredCompletionTargetEndDate = currentTime
+        vm.deferredCompletionTaskId = taskId
+        vm.deferredCompletionSegmentStartDate = currentTime.addingTimeInterval(-1500)
+        vm.deferredCompletionSegmentCreditedSeconds = 900
+        vm.tasks[0].timeSpentSeconds = 900
+
+        // Resolve Interval A Count
+        vm.idleReviewCoordinator.resolve(intervalId: intervalA.id, decision: .countAsFocus, at: currentTime)
+        XCTAssertTrue(vm.isDeferredCompletionPending, "Still deferred because Interval B is pending")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1200)
+
+        // Resolve Interval B Exclude
+        vm.idleReviewCoordinator.resolve(intervalId: intervalB.id, decision: .excludeFromFocus, at: currentTime)
+        XCTAssertFalse(vm.isDeferredCompletionPending, "Finalized after all resolved")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1200)
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords.first?.durationSeconds, 1200)
+    }
+
+    @MainActor
+    func testTask9_Atomic_15_StopwatchIdleReview_DoesNotChangeElapsedOrLapData() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_15_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startStopwatch()
+        let swSessionId = vm.activeTimerSessionId
+
+        currentTime = currentTime.addingTimeInterval(400)
+        vm.reconcileActiveTimers(at: currentTime)
+        vm.recordLap()
+        XCTAssertEqual(vm.laps.count, 1)
+        let lapTime = vm.laps.first?.totalTime
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.stopwatchTime, 1000)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1000)
+
+        let swInterval = IdleReviewInterval(
+            id: UUID(),
+            sessionId: swSessionId,
+            sessionType: "Stopwatch",
+            taskId: vm.tasks[0].id,
+            startTime: currentTime.addingTimeInterval(-300),
+            endTime: currentTime,
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: false
+        )
+        vm.idleReviewCoordinator.pendingIntervals = [swInterval]
+
+        vm.idleReviewCoordinator.resolve(intervalId: swInterval.id, decision: .excludeFromFocus, at: currentTime)
+
+        XCTAssertEqual(vm.stopwatchTime, 1000, "Stopwatch elapsed display must not change")
+        XCTAssertEqual(vm.laps.first?.totalTime, lapTime, "Lap data must remain untouched")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 700, "Task time must have excluded idle seconds deducted")
+    }
+
+    @MainActor
+    func testTask9_Atomic_16_NormalTimerBreakAndDisabledModes_RemainUnchanged() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_16_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+
+        // Break mode ignores idle
+        vm.applyPresetDirectly(name: "Short Break", minutes: 5, isBreak: true)
+        vm.startTimer(at: currentTime)
+        currentTime = currentTime.addingTimeInterval(300)
+        mockActivity.setSimulatedIdle(300.0)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 0, "Break sessions do not generate idle reviews")
+
+        // Idle review disabled mode
+        vm.applyPresetDirectly(name: "25m", minutes: 25, isBreak: false)
+        vm.idleReviewEnabled = false
+        vm.startTimer(at: currentTime)
+        currentTime = currentTime.addingTimeInterval(600)
+        mockActivity.setSimulatedIdle(600.0)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 0, "Disabled idle review does not generate reviews")
+    }
 }
 
 

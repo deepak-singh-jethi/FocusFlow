@@ -932,6 +932,7 @@ public class TimerViewModel: ObservableObject {
             self.deferredCompletionTaskId = recovery.activeSessionTaskId
             self.deferredCompletionSegmentStartDate = recovery.sessionSegmentStartDate
             self.deferredCompletionSegmentCreditedSeconds = recovery.segmentCreditedSeconds
+            self.segmentCreditedSeconds = recovery.segmentCreditedSeconds
             self.activePreset = recovery.activePreset
             self.activeMode = recovery.activeMode
             self.isBreakSession = recovery.isBreakSession
@@ -947,6 +948,7 @@ public class TimerViewModel: ObservableObject {
                 }
             }
             updateMasterEngine()
+            recalculateFocusMetrics(now: currentDateProvider())
             return
         }
 
@@ -1256,10 +1258,10 @@ public class TimerViewModel: ObservableObject {
         schedulePendingSave(delay: delay)
     }
 
-    private func settleActiveTimeForSnapshot(at now: Date) {
+    public func settleActiveTime(at now: Date) {
         var didMutate = false
 
-        // 1. Settle running Focus countdown timer (pre-deadline only)
+        // 1. Settle running Focus/Break countdown timer
         if isTimerRunning, let target = targetEndDate {
             let remaining = target.timeIntervalSince(now)
             if remaining > 0 {
@@ -1275,6 +1277,17 @@ public class TimerViewModel: ObservableObject {
                 }
                 if totalTime > 0 {
                     preciseProgress = min(max(remaining / Double(totalTime), 0.0), 1.0)
+                }
+            } else {
+                let uncounted = timeRemaining
+                if uncounted > 0 {
+                    synchronizeCountdownRemaining(to: 0)
+                    preciseProgress = 0.0
+                    if isFocusPreset {
+                        creditTaskTime(taskId: activeSessionTaskId, seconds: uncounted)
+                        segmentCreditedSeconds += uncounted
+                    }
+                    didMutate = true
                 }
             }
         }
@@ -1296,6 +1309,10 @@ public class TimerViewModel: ObservableObject {
         if didMutate {
             recalculateFocusMetrics(now: now)
         }
+    }
+
+    private func settleActiveTimeForSnapshot(at now: Date) {
+        settleActiveTime(at: now)
     }
 
     private func performSave(now: Date) {
@@ -1516,16 +1533,21 @@ public class TimerViewModel: ObservableObject {
         let exclusionsForActive: [SessionExclusionRecord]
         let hasActiveIdleAccounting: Bool
 
-        if isTimerRunning, isFocusPreset, let start = sessionSegmentStartDate {
+        let isSessionActive = (isTimerRunning && isFocusPreset) || (isDeferredCompletionPending && isFocusPreset)
+        let sessionStart = isTimerRunning ? sessionSegmentStartDate : (deferredCompletionSegmentStartDate ?? sessionSegmentStartDate)
+
+        if isSessionActive, let start = sessionStart {
+            let sessionTarget = isTimerRunning ? targetEndDate : (deferredCompletionTargetEndDate ?? targetEndDate)
+            let currentSessId = isTimerRunning ? activeTimerSessionId : (deferredCompletionSessionId ?? activeTimerSessionId)
             let effectiveEnd: Date
-            if let target = targetEndDate, target >= start, effectiveNow > target {
+            if let target = sessionTarget, target >= start, effectiveNow > target {
                 effectiveEnd = target
             } else {
                 effectiveEnd = effectiveNow
             }
 
-            pendingForActive = idleReviewCoordinator.pendingIntervals.filter { $0.sessionId == activeTimerSessionId }
-            exclusionsForActive = sessionExclusionLedger.filter { $0.sessionId == activeTimerSessionId }
+            pendingForActive = idleReviewCoordinator.pendingIntervals.filter { $0.sessionId == currentSessId }
+            exclusionsForActive = sessionExclusionLedger.filter { $0.sessionId == currentSessId }
             hasActiveIdleAccounting = !pendingForActive.isEmpty || !exclusionsForActive.isEmpty
 
             if hasActiveIdleAccounting {
@@ -1538,7 +1560,7 @@ public class TimerViewModel: ObservableObject {
                     excludedIntervals: exclusionsForActive
                 )
             } else {
-                let credited = segmentCreditedSeconds
+                let credited = isTimerRunning ? segmentCreditedSeconds : deferredCompletionSegmentCreditedSeconds
                 let elapsed = max(0, Int(effectiveEnd.timeIntervalSince(start)))
                 activeElapsed = credited > 0 ? credited : elapsed
             }
@@ -1650,6 +1672,42 @@ public class TimerViewModel: ObservableObject {
         scheduleNextMidnightRefresh(now: effectiveNow)
     }
 
+    public func handleSystemWake(at now: Date? = nil) {
+        let effectiveNow = now ?? currentDateProvider()
+        // 1. Settle running countdown/stopwatch elapsed time up to effectiveNow (or deadline)
+        settleActiveTime(at: effectiveNow)
+
+        // 2. Process wake idle review in coordinator
+        let isSessionActive = isTimerRunning || isStopwatchRunning || isDeferredCompletionPending
+        let sessionType: String
+        if isTimerRunning || isDeferredCompletionPending {
+            sessionType = isBreakPreset ? "Break" : (activeMode == "Custom Timer" ? "Custom" : "Focus")
+        } else if isStopwatchRunning {
+            sessionType = "Stopwatch"
+        } else {
+            sessionType = "Idle"
+        }
+        let sessId = isDeferredCompletionPending ? (deferredCompletionSessionId ?? activeTimerSessionId) : activeTimerSessionId
+        let sDeadline = isDeferredCompletionPending ? deferredCompletionTargetEndDate : targetEndDate
+        let sStartDate = isDeferredCompletionPending ? deferredCompletionSegmentStartDate : sessionSegmentStartDate
+        let currentTaskId = isDeferredCompletionPending ? deferredCompletionTaskId : ((tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted) ? tasks[activeTaskIndex].id : nil)
+
+        idleReviewCoordinator.handleWake(
+            at: effectiveNow,
+            isSessionActive: isSessionActive,
+            sessionType: sessionType,
+            sessionId: sessId,
+            taskId: currentTaskId,
+            sessionDeadline: sDeadline,
+            sessionStartDate: sStartDate
+        )
+
+        // 3. Reconcile timer lifecycle (deferral or completion)
+        reconcileActiveTimers(at: effectiveNow)
+        recalculateFocusMetrics(now: effectiveNow)
+        scheduleNextMidnightRefresh(now: effectiveNow)
+    }
+
     public func setupDateChangeMonitoring() {
         dateChangeCancellables.removeAll()
 
@@ -1694,16 +1752,7 @@ public class TimerViewModel: ObservableObject {
                 Task { @MainActor [weak self] in
                     guard let self = self, !self.hasTerminated else { return }
                     let now = self.currentDateProvider()
-                    self.handleDateOrLifecycleChange(now: now)
-                    self.idleReviewCoordinator.handleWake(
-                        at: now,
-                        isSessionActive: self.isTimerRunning || self.isStopwatchRunning || self.isDeferredCompletionPending,
-                        sessionType: self.isBreakPreset ? "Break" : (self.isStopwatchRunning ? "Stopwatch" : (self.activeMode == "Custom Timer" ? "Custom" : "Focus")),
-                        sessionId: self.isDeferredCompletionPending ? (self.deferredCompletionSessionId ?? self.activeTimerSessionId) : self.activeTimerSessionId,
-                        taskId: self.isDeferredCompletionPending ? self.deferredCompletionTaskId : self.activeSessionTaskId,
-                        sessionDeadline: self.isDeferredCompletionPending ? self.deferredCompletionTargetEndDate : self.targetEndDate,
-                        sessionStartDate: self.isDeferredCompletionPending ? self.deferredCompletionSegmentStartDate : self.sessionSegmentStartDate
-                    )
+                    self.handleSystemWake(at: now)
                 }
             }
             .store(in: &dateChangeCancellables)
@@ -2092,7 +2141,10 @@ public class TimerViewModel: ObservableObject {
 
         let now = date ?? currentDateProvider()
 
-        // 0. Periodic Idle Review Evaluation
+        // 1. Settle running Focus/Break countdown timer elapsed delta and Stopwatch elapsed delta FIRST
+        settleActiveTime(at: now)
+
+        // 2. Periodic Idle Review Evaluation (evaluates return against fully accrued session credit)
         if idleReviewCoordinator.isEnabled {
             let isSessionActive = isTimerRunning || isStopwatchRunning || isDeferredCompletionPending
             let sessionType: String
@@ -2119,110 +2171,58 @@ public class TimerViewModel: ObservableObject {
             )
         }
 
-        // 1. Reconcile running Focus / Break countdown timer
-        if isTimerRunning, let target = targetEndDate {
-            let remaining = target.timeIntervalSince(now)
-            if remaining <= 0 {
-                // Check if user is inactive at deadline (Scenario B: Expiration During Inactivity)
-                let isUserAway = idleReviewCoordinator.isEnabled && isFocusPreset && (
-                    idleReviewCoordinator.state.isIdleDetected ||
-                    idleReviewCoordinator.activityProvider.isScreenLocked() ||
-                    idleReviewCoordinator.activityProvider.systemIdleDuration(at: now) >= Double(idleReviewCoordinator.thresholdSeconds)
-                )
+        // 3. Reconcile timer completion or deferral if deadline was reached
+        if isTimerRunning, let target = targetEndDate, target.timeIntervalSince(now) <= 0 {
+            let hasPendingReviewsForSession = idleReviewCoordinator.pendingIntervals.contains { $0.sessionId == activeTimerSessionId }
+            let isUserAway = idleReviewCoordinator.isEnabled && isFocusPreset && (
+                hasPendingReviewsForSession ||
+                idleReviewCoordinator.state.isIdleDetected ||
+                idleReviewCoordinator.activityProvider.isScreenLocked() ||
+                idleReviewCoordinator.activityProvider.systemIdleDuration(at: now) >= Double(idleReviewCoordinator.thresholdSeconds)
+            )
 
-                if isUserAway {
-                    let uncounted = timeRemaining
-                    synchronizeCountdownRemaining(to: 0)
-                    preciseProgress = 0.0
-
-                    if isFocusPreset && uncounted > 0 {
-                        creditTaskTime(taskId: activeSessionTaskId, seconds: uncounted)
-                        segmentCreditedSeconds += uncounted
-                    }
-
-                    isDeferredCompletionPending = true
-                    deferredCompletionSessionId = activeTimerSessionId
-                    deferredCompletionTargetEndDate = target
-                    deferredCompletionTaskId = activeSessionTaskId
-                    deferredCompletionSegmentStartDate = sessionSegmentStartDate
-                    deferredCompletionSegmentCreditedSeconds = segmentCreditedSeconds
-
-                    isTimerRunning = false
-                    targetEndDate = nil
-                    fractionalRemaining = nil
-                    updateMasterEngine()
-                    checkpointActiveTimers(now: now)
-                    return
-                }
-
-                isCompletingSessionTransaction = true
-                defer {
-                    isCompletingSessionTransaction = false
-                    if !isPerformingSave && !isPersistenceBlocked {
-                        cancelPendingSave()
-                        performSave(now: now)
-                    }
-                }
-
-                let uncounted = timeRemaining
-                synchronizeCountdownRemaining(to: 0)
-                preciseProgress = 0.0
-
-                if isFocusPreset && uncounted > 0 {
-                    creditTaskTime(taskId: activeSessionTaskId, seconds: uncounted)
-                    segmentCreditedSeconds += uncounted
-                }
-
-                let effectiveCompletionDate: Date
-                if let target = targetEndDate {
-                    if let start = sessionSegmentStartDate, target < start {
-                        effectiveCompletionDate = start
-                    } else {
-                        effectiveCompletionDate = target
-                    }
-                } else if let start = sessionSegmentStartDate {
-                    effectiveCompletionDate = start.addingTimeInterval(TimeInterval(segmentCreditedSeconds))
-                } else {
-                    effectiveCompletionDate = now
-                }
+            if isUserAway {
+                isDeferredCompletionPending = true
+                deferredCompletionSessionId = activeTimerSessionId
+                deferredCompletionTargetEndDate = target
+                deferredCompletionTaskId = activeSessionTaskId
+                deferredCompletionSegmentStartDate = sessionSegmentStartDate
+                deferredCompletionSegmentCreditedSeconds = segmentCreditedSeconds
 
                 isTimerRunning = false
                 targetEndDate = nil
                 fractionalRemaining = nil
                 updateMasterEngine()
-                recordActiveSessionSegment(at: effectiveCompletionDate)
-                handleSessionComplete(at: now)
-            } else {
-                if totalTime > 0 {
-                    preciseProgress = min(max(remaining / Double(totalTime), 0.0), 1.0)
-                }
-                let newTime = max(Int(ceil(remaining)), 0)
-                if timeRemaining != newTime {
-                    let delta = timeRemaining - newTime
-                    synchronizeCountdownRemaining(to: newTime)
-                    if isFocusPreset && delta > 0 {
-                        creditTaskTime(taskId: activeSessionTaskId, seconds: delta)
-                        segmentCreditedSeconds += delta
-                    }
-                    recalculateFocusMetrics(now: now)
+                recalculateFocusMetrics(now: now)
+                checkpointActiveTimers(now: now)
+                return
+            }
+
+            isCompletingSessionTransaction = true
+            defer {
+                isCompletingSessionTransaction = false
+                if !isPerformingSave && !isPersistenceBlocked {
+                    cancelPendingSave()
+                    performSave(now: now)
                 }
             }
+
+            let effectiveCompletionDate: Date
+            if let start = sessionSegmentStartDate, target < start {
+                effectiveCompletionDate = start
+            } else {
+                effectiveCompletionDate = target
+            }
+
+            isTimerRunning = false
+            targetEndDate = nil
+            fractionalRemaining = nil
+            updateMasterEngine()
+            recordActiveSessionSegment(at: effectiveCompletionDate)
+            handleSessionComplete(at: now)
         }
 
-        // 2. Reconcile running Stopwatch
-        if isStopwatchRunning, let start = stopwatchStartDate {
-            let elapsed = now.timeIntervalSince(start)
-            let newTime = max(Int(elapsed), 0)
-            if stopwatchTime != newTime {
-                let delta = newTime - stopwatchTime
-                stopwatchTime = newTime
-                if delta > 0 {
-                    let targetTaskId = tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted ? tasks[activeTaskIndex].id : nil
-                    creditTaskTime(taskId: targetTaskId, seconds: delta)
-                }
-            }
-            preciseStopwatchProgress = (elapsed.truncatingRemainder(dividingBy: 60.0)) / 60.0
-        }
+        recalculateFocusMetrics(now: now)
 
         // 3. Periodic checkpoint for crash recovery
         if (isTimerRunning || isStopwatchRunning || isDeferredCompletionPending) && !hasTerminated {
@@ -3085,6 +3085,9 @@ public class TimerViewModel: ObservableObject {
     public func handleIdleIntervalCreated(_ interval: inout IdleReviewInterval) {
         guard !interval.isProvisionalCreditDeducted else { return }
         interval.isProvisionalCreditDeducted = true
+        if let idx = idleReviewCoordinator.pendingIntervals.firstIndex(where: { $0.id == interval.id }) {
+            idleReviewCoordinator.pendingIntervals[idx].isProvisionalCreditDeducted = true
+        }
         let seconds = interval.eligibleDurationSeconds
         guard seconds > 0 else { return }
 
@@ -3096,9 +3099,10 @@ public class TimerViewModel: ObservableObject {
         }
         if isDeferredCompletionPending && (deferredCompletionSessionId == interval.sessionId || activeTimerSessionId == interval.sessionId) {
             deferredCompletionSegmentCreditedSeconds = max(0, deferredCompletionSegmentCreditedSeconds - seconds)
+            segmentCreditedSeconds = deferredCompletionSegmentCreditedSeconds
         }
         recalculateFocusMetrics(now: currentDateProvider())
-        persistData()
+        persistData(force: true)
     }
 
     public func handleIdleReviewResolution(interval: IdleReviewInterval, decision: IdleReviewDecision) {
@@ -3120,6 +3124,7 @@ public class TimerViewModel: ObservableObject {
                 }
                 if isDeferredCompletionPending && (deferredCompletionSessionId == interval.sessionId || activeTimerSessionId == interval.sessionId) {
                     deferredCompletionSegmentCreditedSeconds += interval.eligibleDurationSeconds
+                    segmentCreditedSeconds = deferredCompletionSegmentCreditedSeconds
                 }
             }
 
