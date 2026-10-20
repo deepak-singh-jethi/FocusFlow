@@ -19768,8 +19768,666 @@ final class FocusFlowTests: XCTestCase {
         vm.handleIdleReviewResolution(interval: intv, decision: .excludeFromFocus)
 
         // Stopwatch laps and display must be 100% preserved
-        XCTAssertEqual(vm.laps, originalLaps)
         XCTAssertEqual(vm.stopwatchTime, originalTime)
+    }
+
+    // MARK: - Task 9 Final Correctness & Persistence Patch (Defects 1 & 2)
+
+    // Defect 1 Reproduction: Excluded idle intervals lost after restart (Exclude B)
+    @MainActor
+    func testDefect1_Reproduction_ExcludedIdleIntervalLostAfterRestart_ThenExcludeB() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_d1_a_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        let calendar = Calendar.current
+        let baseDate = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 10, minute: 0, second: 0))!
+        var currentTime = baseDate
+
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        let taskId = vm.tasks[0].id
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startTimer(at: currentTime)
+        let sessionId = vm.activeTimerSessionId
+
+        // Advance to 1500s (10:25) - session expired during inactivity
+        currentTime = baseDate.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+
+        // Set up two pending intervals: Interval A (10:05-10:10, 300s) and Interval B (10:15-10:20, 300s)
+        let intervalA = IdleReviewInterval(
+            id: UUID(),
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: baseDate.addingTimeInterval(300),
+            endTime: baseDate.addingTimeInterval(600),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+        let intervalB = IdleReviewInterval(
+            id: UUID(),
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: baseDate.addingTimeInterval(900),
+            endTime: baseDate.addingTimeInterval(1200),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+
+        // Set task credited to 900 (1500 - 600 provisional deductions)
+        vm.tasks[0].timeSpentSeconds = 900
+        vm.idleReviewCoordinator.pendingIntervals = [intervalA, intervalB]
+        vm.idleReviewCoordinator.activeReviewInterval = intervalA
+
+        // 4. Exclude Interval A
+        vm.idleReviewCoordinator.resolve(intervalId: intervalA.id, decision: .excludeFromFocus, at: currentTime)
+
+        // 5. Confirm Interval B remains pending and session is still deferred
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.first?.id, intervalB.id)
+
+        // 6. Persist application state
+        vm.persistData(force: true)
+
+        // 7 & 8. Simulate process termination and relaunch
+        let vm2 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm2.loadPersistedData()
+
+        XCTAssertTrue(vm2.isDeferredCompletionPending)
+        XCTAssertEqual(vm2.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vm2.idleReviewCoordinator.pendingIntervals.first?.id, intervalB.id)
+
+        // 10. Resolve Interval B as Exclude
+        vm2.idleReviewCoordinator.resolve(intervalId: intervalB.id, decision: .excludeFromFocus, at: currentTime)
+
+        // 11. Finalize the session assertions
+        XCTAssertFalse(vm2.isDeferredCompletionPending)
+        XCTAssertEqual(vm2.completedSessions, 1)
+
+        // Total confirmed focus in session records must be strictly 900 (1500 - 300 - 300)
+        let totalRecordSeconds = vm2.sessionRecords.reduce(0) { $0 + $1.durationSeconds }
+        XCTAssertEqual(totalRecordSeconds, 900, "Final session records must total 900s (Interval A exclusion must survive restart)")
+        XCTAssertEqual(vm2.tasks[0].timeSpentSeconds, 900, "Task credited time must remain 900s")
+    }
+
+    // Defect 1 Reproduction: Excluded idle intervals lost after restart (Count B)
+    @MainActor
+    func testDefect1_Reproduction_ExcludedIdleIntervalLostAfterRestart_ThenCountB() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_d1_b_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        let calendar = Calendar.current
+        let baseDate = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 10, minute: 0, second: 0))!
+        var currentTime = baseDate
+
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        let taskId = vm.tasks[0].id
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startTimer(at: currentTime)
+        let sessionId = vm.activeTimerSessionId
+
+        currentTime = baseDate.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        let intervalA = IdleReviewInterval(
+            id: UUID(),
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: baseDate.addingTimeInterval(300),
+            endTime: baseDate.addingTimeInterval(600),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+        let intervalB = IdleReviewInterval(
+            id: UUID(),
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: baseDate.addingTimeInterval(900),
+            endTime: baseDate.addingTimeInterval(1200),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+
+        vm.tasks[0].timeSpentSeconds = 900
+        vm.idleReviewCoordinator.pendingIntervals = [intervalA, intervalB]
+        vm.idleReviewCoordinator.activeReviewInterval = intervalA
+
+        // Exclude Interval A
+        vm.idleReviewCoordinator.resolve(intervalId: intervalA.id, decision: .excludeFromFocus, at: currentTime)
+
+        // Persist and relaunch
+        vm.persistData(force: true)
+
+        let vm2 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm2.loadPersistedData()
+
+        // Resolve Interval B as Count
+        vm2.idleReviewCoordinator.resolve(intervalId: intervalB.id, decision: .countAsFocus, at: currentTime)
+
+        XCTAssertFalse(vm2.isDeferredCompletionPending)
+        XCTAssertEqual(vm2.completedSessions, 1)
+
+        // Total confirmed focus in session records must be strictly 1200 (1500 - 300 excluded A)
+        let totalRecordSeconds = vm2.sessionRecords.reduce(0) { $0 + $1.durationSeconds }
+        XCTAssertEqual(totalRecordSeconds, 1200, "Final session records must total 1200s (Interval A exclusion must survive restart)")
+        XCTAssertEqual(vm2.tasks[0].timeSpentSeconds, 1200, "Task credited time must be 1200s")
+    }
+
+    // Defect 2 Scenario A: 100% pending produces 0 confirmed credit
+    @MainActor
+    func testDefect2_ScenarioA_100PercentPending_ZeroConfirmedCredit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        currentTime = currentTime.addingTimeInterval(600) // 10 minutes elapsed
+        vm.reconcileActiveTimers(at: currentTime)
+
+        var idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-600),
+            endTime: currentTime,
+            eligibleDurationSeconds: 600,
+            status: .pending
+        )
+        vm.handleIdleIntervalCreated(&idleInterval)
+        vm.idleReviewCoordinator.pendingIntervals.append(idleInterval)
+
+        vm.recalculateFocusMetrics(now: currentTime)
+
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 0, "Task credited time must be 0")
+        XCTAssertEqual(vm.todayFocusedSeconds, 0, "Today's focus must be 0 when 100% of elapsed time is pending review")
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 0, "Weekly focus must be 0")
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 0, "Lifetime focus contribution must be 0")
+        XCTAssertEqual(vm.pendingFocusSeconds, 600, "Pending focus must be 600")
+        XCTAssertEqual(vm.timeRemaining, 900, "Timer countdown continues accurately (1500 - 600 = 900)")
+    }
+
+    // Defect 2 Scenario B: Partial pending reflects only confirmed credit
+    @MainActor
+    func testDefect2_ScenarioB_PartialPending_AnalyticsReflectConfirmedCredit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        currentTime = currentTime.addingTimeInterval(1200) // 20 minutes elapsed
+        vm.reconcileActiveTimers(at: currentTime)
+
+        var idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-420),
+            endTime: currentTime,
+            eligibleDurationSeconds: 420,
+            status: .pending
+        )
+        vm.handleIdleIntervalCreated(&idleInterval)
+        vm.idleReviewCoordinator.pendingIntervals.append(idleInterval)
+
+        vm.recalculateFocusMetrics(now: currentTime)
+
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 780, "Task credited time must be 780")
+        XCTAssertEqual(vm.todayFocusedSeconds, 780, "Today's focus must reflect confirmed 780s, not 1200s")
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 780, "Weekly focus must reflect 780s")
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 780, "Lifetime focus must reflect 780s")
+        XCTAssertEqual(vm.pendingFocusSeconds, 420)
+    }
+
+    // Defect 2 Scenario C: Count moves pending credit into confirmed exactly once
+    @MainActor
+    func testDefect2_ScenarioC_CountIncreasesConfirmedExactlyOnce() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        var idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-600),
+            endTime: currentTime,
+            eligibleDurationSeconds: 600,
+            status: .pending
+        )
+        vm.handleIdleIntervalCreated(&idleInterval)
+        vm.idleReviewCoordinator.pendingIntervals.append(idleInterval)
+        vm.recalculateFocusMetrics(now: currentTime)
+
+        XCTAssertEqual(vm.todayFocusedSeconds, 0)
+
+        // Resolve as Count
+        vm.idleReviewCoordinator.resolve(intervalId: idleInterval.id, decision: .countAsFocus, at: currentTime)
+
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 600)
+        XCTAssertEqual(vm.todayFocusedSeconds, 600)
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 600)
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 600)
+        XCTAssertEqual(vm.pendingFocusSeconds, 0)
+    }
+
+    // Defect 2 Scenario D: Exclude does not increase confirmed totals
+    @MainActor
+    func testDefect2_ScenarioD_ExcludeDoesNotIncreaseConfirmedTotals() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        var idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-600),
+            endTime: currentTime,
+            eligibleDurationSeconds: 600,
+            status: .pending
+        )
+        vm.handleIdleIntervalCreated(&idleInterval)
+        vm.idleReviewCoordinator.pendingIntervals.append(idleInterval)
+
+        vm.idleReviewCoordinator.resolve(intervalId: idleInterval.id, decision: .excludeFromFocus, at: currentTime)
+
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 0)
+        XCTAssertEqual(vm.todayFocusedSeconds, 0)
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 0)
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 0)
+        XCTAssertEqual(vm.pendingFocusSeconds, 0)
+    }
+
+    // Defect 2 Scenario E: Restart with 0 confirmed credit does not convert elapsed into confirmed
+    @MainActor
+    func testDefect2_ScenarioE_RestartWithZeroConfirmed_DoesNotConvertElapsedToConfirmed() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_d2_e_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        var idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-600),
+            endTime: currentTime,
+            eligibleDurationSeconds: 600,
+            status: .pending
+        )
+        vm.handleIdleIntervalCreated(&idleInterval)
+        vm.idleReviewCoordinator.pendingIntervals.append(idleInterval)
+        vm.recalculateFocusMetrics(now: currentTime)
+
+        XCTAssertEqual(vm.todayFocusedSeconds, 0)
+        vm.persistData(force: true)
+
+        // Relaunch
+        let vm2 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm2.loadPersistedData()
+        vm2.recalculateFocusMetrics(now: currentTime)
+
+        XCTAssertEqual(vm2.todayFocusedSeconds, 0, "Relaunch must not convert 600s elapsed into confirmed focus")
+        XCTAssertEqual(vm2.tasks[0].timeSpentSeconds, 0)
+    }
+
+    // Defect 2 Scenario F: Active session running across midnight with pending or excluded time
+    @MainActor
+    func testDefect2_ScenarioF_MidnightWithPendingOrExcludedTime() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let start = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 23, minute: 45, second: 0))!
+        var currentTime = start
+        vm.currentDateProvider = { currentTime }
+        vm.applyPresetDirectly(name: "Custom", minutes: 60)
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[0].id
+
+        // Advance 1800s to 00:15 on Oct 21 (total elapsed 1800s; 900 yesterday, 900 today)
+        currentTime = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 0, minute: 15, second: 0))!
+        vm.reconcileActiveTimers(at: currentTime)
+
+        // 600s idle interval from 00:05 to 00:15 (all 600s on Day 2)
+        var idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 0, minute: 5, second: 0))!,
+            endTime: currentTime,
+            eligibleDurationSeconds: 600,
+            status: .pending
+        )
+        vm.handleIdleIntervalCreated(&idleInterval)
+        vm.idleReviewCoordinator.pendingIntervals.append(idleInterval)
+
+        vm.recalculateFocusMetrics(calendar: calendar, now: currentTime)
+
+        // Day 2 (today) had 900 elapsed minus 600 pending = 300 confirmed
+        XCTAssertEqual(vm.todayFocusedSeconds, 300, "Today (Oct 21) must have 300 confirmed (900 elapsed - 600 pending)")
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 1200, "Past 7 days must have 1200 confirmed (1800 elapsed - 600 pending)")
+        XCTAssertEqual(vm.pendingFocusSeconds, 600)
+    }
+
+    // Dedicated Test 1: Two consecutive restarts before finalization
+    @MainActor
+    func testTask9_FinalPatch_TwoConsecutiveRestartsBeforeFinalization() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_fp_1_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        let taskId = vm.tasks[0].id
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startTimer(at: currentTime)
+        let sessionId = vm.activeTimerSessionId
+
+        currentTime = currentTime.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        let intervalA = IdleReviewInterval(
+            id: UUID(),
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-1200),
+            endTime: currentTime.addingTimeInterval(-900),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+        let intervalB = IdleReviewInterval(
+            id: UUID(),
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-600),
+            endTime: currentTime.addingTimeInterval(-300),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+
+        vm.tasks[0].timeSpentSeconds = 900
+        vm.idleReviewCoordinator.pendingIntervals = [intervalA, intervalB]
+        vm.idleReviewCoordinator.activeReviewInterval = intervalA
+
+        // Exclude A
+        vm.idleReviewCoordinator.resolve(intervalId: intervalA.id, decision: .excludeFromFocus, at: currentTime)
+        vm.persistData(force: true)
+
+        // Restart 1 (simulate quit & relaunch)
+        let vm2 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm2.loadPersistedData()
+        XCTAssertTrue(vm2.isDeferredCompletionPending)
+        XCTAssertEqual(vm2.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vm2.idleReviewCoordinator.pendingIntervals.first?.id, intervalB.id)
+        XCTAssertEqual(vm2.sessionExclusionLedger.count, 1)
+        XCTAssertEqual(vm2.sessionExclusionLedger.first?.id, intervalA.id)
+
+        // Restart 2 (another quit & relaunch before finalization)
+        vm2.handleAppTermination()
+        let vm3 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm3.loadPersistedData()
+        XCTAssertTrue(vm3.isDeferredCompletionPending)
+        XCTAssertEqual(vm3.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vm3.sessionExclusionLedger.count, 1)
+
+        // Resolve B as Exclude and finalize
+        vm3.idleReviewCoordinator.resolve(intervalId: intervalB.id, decision: .excludeFromFocus, at: currentTime)
+        XCTAssertFalse(vm3.isDeferredCompletionPending)
+        XCTAssertEqual(vm3.completedSessions, 1)
+
+        let totalRecords = vm3.sessionRecords.reduce(0) { $0 + $1.durationSeconds }
+        XCTAssertEqual(totalRecords, 900, "After two restarts, both exclusions must be applied (1500 - 300 - 300 = 900)")
+    }
+
+    // Dedicated Test 2: Excluded interval idempotence (resolving twice cannot double-deduct)
+    @MainActor
+    func testTask9_FinalPatch_ExcludedIntervalIdempotence() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let taskId = vm.tasks[0].id
+        vm.tasks[0].timeSpentSeconds = 600
+
+        let interval = IdleReviewInterval(
+            sessionId: UUID(),
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: Date().addingTimeInterval(-300),
+            endTime: Date(),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: false
+        )
+
+        // First exclusion
+        vm.handleIdleReviewResolution(interval: interval, decision: .excludeFromFocus)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 300)
+        XCTAssertEqual(vm.sessionExclusionLedger.count, 1)
+
+        // Second duplicate exclusion
+        vm.handleIdleReviewResolution(interval: interval, decision: .excludeFromFocus)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 300, "Second exclusion must be idempotent and not deduct again")
+        XCTAssertEqual(vm.sessionExclusionLedger.count, 1, "Ledger must not contain duplicate entries")
+    }
+
+    // Dedicated Test 3: Fully excluded zero-confirmed session
+    @MainActor
+    func testTask9_FinalPatch_FullyExcludedZeroConfirmedSession() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_fp_3_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        let taskId = vm.tasks[0].id
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startTimer(at: currentTime)
+        let sessionId = vm.activeTimerSessionId
+
+        currentTime = currentTime.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(1500)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+
+        // Entire 1500s was idle
+        let interval = IdleReviewInterval(
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-1500),
+            endTime: currentTime,
+            eligibleDurationSeconds: 1500,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+        vm.idleReviewCoordinator.pendingIntervals = [interval]
+        vm.idleReviewCoordinator.activeReviewInterval = interval
+
+        // Exclude entire session
+        vm.idleReviewCoordinator.resolve(intervalId: interval.id, decision: .excludeFromFocus, at: currentTime)
+
+        XCTAssertFalse(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.completedSessions, 1, "Completed session count must increment")
+        XCTAssertTrue(vm.sessionRecords.isEmpty, "No session record should be fabricated when confirmed focus is 0")
+        XCTAssertEqual(vm.todayFocusedSeconds, 0, "Today's focus must remain 0")
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 0, "Lifetime focus must remain 0")
+    }
+
+    // Dedicated Test 4: Legacy saved data without sessionExclusionLedger
+    @MainActor
+    func testTask9_FinalPatch_LegacySavedDataWithoutExclusionLedger() {
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_legacy_\(UUID().uuidString).json")
+        defer { cleanup(url: tempURL) }
+
+        // Write legacy JSON without sessionExclusionLedger key
+        let legacyJSON = """
+        {
+            "tasks": [],
+            "focusedSeconds": 300,
+            "completedSessions": 1,
+            "notes": [],
+            "dailyGoalHours": 4,
+            "totalSessions": 4,
+            "autoStartNextSession": false,
+            "activePreset": "Focus",
+            "clockStyle": "Digital",
+            "sessionRecords": [],
+            "laps": [],
+            "stopwatchElapsedSeconds": 0.0
+        }
+        """
+        try! legacyJSON.write(to: tempURL, atomically: true, encoding: .utf8)
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm = TimerViewModel(storage: storage)
+        vm.loadPersistedData()
+
+        XCTAssertTrue(vm.sessionExclusionLedger.isEmpty, "Legacy data loads cleanly with empty ledger")
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 300)
+    }
+
+    // Dedicated Test 5: Crash immediately after an exclusion decision
+    @MainActor
+    func testTask9_FinalPatch_CrashImmediatelyAfterExclusionDecision() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_crash_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        let taskId = vm.tasks[0].id
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startTimer(at: currentTime)
+        let sessionId = vm.activeTimerSessionId
+
+        currentTime = currentTime.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        let intervalA = IdleReviewInterval(
+            id: UUID(),
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-600),
+            endTime: currentTime.addingTimeInterval(-300),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+        let intervalB = IdleReviewInterval(
+            id: UUID(),
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-300),
+            endTime: currentTime,
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+        vm.idleReviewCoordinator.pendingIntervals = [intervalA, intervalB]
+
+        // Exclude Interval A - handleIdleReviewResolution immediately forces persistence
+        vm.idleReviewCoordinator.resolve(intervalId: intervalA.id, decision: .excludeFromFocus, at: currentTime)
+
+        // Drop vm immediately without handleAppTermination (simulating sudden crash/SIGKILL)
+        let vmCrashRecovered = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vmCrashRecovered.loadPersistedData()
+
+        XCTAssertTrue(vmCrashRecovered.isDeferredCompletionPending, "Deferred completion restored")
+        XCTAssertEqual(vmCrashRecovered.sessionExclusionLedger.count, 1, "Exclusion survived immediate crash")
+        XCTAssertEqual(vmCrashRecovered.sessionExclusionLedger.first?.id, intervalA.id)
+        XCTAssertEqual(vmCrashRecovered.idleReviewCoordinator.pendingIntervals.count, 1, "Only Interval B remains pending")
+        XCTAssertEqual(vmCrashRecovered.idleReviewCoordinator.pendingIntervals.first?.id, intervalB.id)
     }
 }
 

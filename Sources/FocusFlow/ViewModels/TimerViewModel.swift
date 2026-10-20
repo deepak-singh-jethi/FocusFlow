@@ -136,6 +136,7 @@ public class TimerViewModel: ObservableObject {
     // Excluded intervals for active or deferred sessions awaiting finalization
     internal var sessionExcludedIntervals: [UUID: [IdleReviewInterval]] = [:]
     internal var resolvedIntervalIds: Set<UUID> = []
+    internal var sessionExclusionLedger: [SessionExclusionRecord] = []
 
     // Wall-clock segment tracking (prevents duplicate counting on pause/resume/tick)
     internal var sessionSegmentStartDate: Date?
@@ -779,6 +780,9 @@ public class TimerViewModel: ObservableObject {
         self.conflictOrigin = nil
         self.activeSessionTaskId = nil
         self.segmentCreditedSeconds = 0
+        self.sessionExclusionLedger = []
+        self.sessionExcludedIntervals = [:]
+        self.resolvedIntervalIds = []
     }
 
     private func applyLoadedData(_ saved: FocusAppData) {
@@ -871,6 +875,24 @@ public class TimerViewModel: ObservableObject {
             self.idleReviewCoordinator.pendingIntervals = pending
             if self.idleReviewCoordinator.activeReviewInterval == nil {
                 self.idleReviewCoordinator.activeReviewInterval = pending.first
+            }
+        }
+
+        // Task 9: Restore Idle Review Exclusion Provenance Ledger
+        self.sessionExclusionLedger = saved.sessionExclusionLedger ?? []
+        for record in self.sessionExclusionLedger {
+            self.resolvedIntervalIds.insert(record.id)
+            if !record.isAppliedToHistory {
+                self.sessionExcludedIntervals[record.sessionId, default: []].append(record.toInterval())
+            }
+        }
+        if let recoveryLedger = saved.activeSessionRecovery?.sessionExclusionLedger {
+            for record in recoveryLedger where !self.sessionExclusionLedger.contains(where: { $0.id == record.id }) {
+                self.sessionExclusionLedger.append(record)
+                self.resolvedIntervalIds.insert(record.id)
+                if !record.isAppliedToHistory {
+                    self.sessionExcludedIntervals[record.sessionId, default: []].append(record.toInterval())
+                }
             }
         }
 
@@ -1348,6 +1370,7 @@ public class TimerViewModel: ObservableObject {
                 stopwatchTaskId: activeSwTaskId,
                 isDeferredCompletionPending: isDeferredCompletionPending ? true : nil,
                 pendingIdleIntervals: idleReviewCoordinator.pendingIntervals.isEmpty ? nil : idleReviewCoordinator.pendingIntervals,
+                sessionExclusionLedger: sessionExclusionLedger.isEmpty ? nil : sessionExclusionLedger,
                 checkpointTimestamp: max(now, sessionSegmentStartDate?.addingTimeInterval(Double(segmentCreditedSeconds)) ?? now)
             )
         } else {
@@ -1382,7 +1405,8 @@ public class TimerViewModel: ObservableObject {
             activeSessionRecovery: recoveryState,
             idleReviewEnabled: idleReviewEnabled,
             idleThresholdSeconds: idleThresholdSeconds,
-            pendingIdleIntervals: idleReviewCoordinator.pendingIntervals.isEmpty ? nil : idleReviewCoordinator.pendingIntervals
+            pendingIdleIntervals: idleReviewCoordinator.pendingIntervals.isEmpty ? nil : idleReviewCoordinator.pendingIntervals,
+            sessionExclusionLedger: sessionExclusionLedger.isEmpty ? nil : sessionExclusionLedger
         )
         do {
             try storage.save(payload)
@@ -1444,6 +1468,42 @@ public class TimerViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Active Session Credited Duration Calculation
+    private func activeSessionCreditedDuration(
+        from intervalStart: Date,
+        to intervalEnd: Date,
+        sessionStart: Date,
+        sessionEnd: Date,
+        pendingIntervals: [IdleReviewInterval],
+        excludedIntervals: [SessionExclusionRecord]
+    ) -> Int {
+        guard intervalEnd > intervalStart, sessionEnd > sessionStart else { return 0 }
+        let overlapStart = max(sessionStart, intervalStart)
+        let overlapEnd = min(sessionEnd, intervalEnd)
+        guard overlapEnd > overlapStart else { return 0 }
+
+        let rawElapsedInInterval = max(0, Int(overlapEnd.timeIntervalSince(overlapStart)))
+        guard rawElapsedInInterval > 0 else { return 0 }
+
+        var deductedSeconds = 0
+        for pending in pendingIntervals {
+            let pStart = max(overlapStart, pending.startTime)
+            let pEnd = min(overlapEnd, pending.endTime)
+            if pEnd > pStart {
+                deductedSeconds += max(0, Int(pEnd.timeIntervalSince(pStart)))
+            }
+        }
+        for exc in excludedIntervals {
+            let eStart = max(overlapStart, exc.startTime)
+            let eEnd = min(overlapEnd, exc.endTime)
+            if eEnd > eStart {
+                deductedSeconds += max(0, Int(eEnd.timeIntervalSince(eStart)))
+            }
+        }
+
+        return max(0, rawElapsedInInterval - deductedSeconds)
+    }
+
     // MARK: - Date-Aware Analytics Recalculation (Priority 2)
     public func recalculateFocusMetrics(calendar: Calendar? = nil, now: Date? = nil) {
         let cal = calendar ?? reportingCalendar
@@ -1452,6 +1512,10 @@ public class TimerViewModel: ObservableObject {
         let activeElapsed: Int
         let activeStart: Date?
         let activeEnd: Date
+        let pendingForActive: [IdleReviewInterval]
+        let exclusionsForActive: [SessionExclusionRecord]
+        let hasActiveIdleAccounting: Bool
+
         if isTimerRunning, isFocusPreset, let start = sessionSegmentStartDate {
             let effectiveEnd: Date
             if let target = targetEndDate, target >= start, effectiveNow > target {
@@ -1459,15 +1523,34 @@ public class TimerViewModel: ObservableObject {
             } else {
                 effectiveEnd = effectiveNow
             }
-            let credited = segmentCreditedSeconds
-            let elapsed = max(0, Int(effectiveEnd.timeIntervalSince(start)))
-            activeElapsed = credited > 0 ? credited : elapsed
+
+            pendingForActive = idleReviewCoordinator.pendingIntervals.filter { $0.sessionId == activeTimerSessionId }
+            exclusionsForActive = sessionExclusionLedger.filter { $0.sessionId == activeTimerSessionId }
+            hasActiveIdleAccounting = !pendingForActive.isEmpty || !exclusionsForActive.isEmpty
+
+            if hasActiveIdleAccounting {
+                activeElapsed = activeSessionCreditedDuration(
+                    from: start,
+                    to: effectiveEnd,
+                    sessionStart: start,
+                    sessionEnd: effectiveEnd,
+                    pendingIntervals: pendingForActive,
+                    excludedIntervals: exclusionsForActive
+                )
+            } else {
+                let credited = segmentCreditedSeconds
+                let elapsed = max(0, Int(effectiveEnd.timeIntervalSince(start)))
+                activeElapsed = credited > 0 ? credited : elapsed
+            }
             activeStart = start
             activeEnd = effectiveEnd
         } else {
             activeElapsed = 0
             activeStart = nil
             activeEnd = effectiveNow
+            pendingForActive = []
+            exclusionsForActive = []
+            hasActiveIdleAccounting = false
         }
 
         let startOfToday = cal.startOfDay(for: effectiveNow)
@@ -1479,13 +1562,24 @@ public class TimerViewModel: ObservableObject {
         }
         let activeToday: Int
         if activeElapsed > 0, let start = activeStart {
-            activeToday = FocusIntervalAllocator.allocatedDuration(
-                recordStart: start,
-                recordEnd: activeEnd,
-                durationSeconds: activeElapsed,
-                intervalStart: startOfToday,
-                intervalEnd: effectiveTodayEnd
-            )
+            if hasActiveIdleAccounting {
+                activeToday = activeSessionCreditedDuration(
+                    from: startOfToday,
+                    to: effectiveTodayEnd,
+                    sessionStart: start,
+                    sessionEnd: activeEnd,
+                    pendingIntervals: pendingForActive,
+                    excludedIntervals: exclusionsForActive
+                )
+            } else {
+                activeToday = FocusIntervalAllocator.allocatedDuration(
+                    recordStart: start,
+                    recordEnd: activeEnd,
+                    durationSeconds: activeElapsed,
+                    intervalStart: startOfToday,
+                    intervalEnd: effectiveTodayEnd
+                )
+            }
         } else {
             activeToday = 0
         }
@@ -1499,13 +1593,24 @@ public class TimerViewModel: ObservableObject {
         }
         let activeWeekly: Int
         if activeElapsed > 0, let start = activeStart {
-            activeWeekly = FocusIntervalAllocator.allocatedDuration(
-                recordStart: start,
-                recordEnd: activeEnd,
-                durationSeconds: activeElapsed,
-                intervalStart: sevenDaysAgo,
-                intervalEnd: effectiveWeeklyEnd
-            )
+            if hasActiveIdleAccounting {
+                activeWeekly = activeSessionCreditedDuration(
+                    from: sevenDaysAgo,
+                    to: effectiveWeeklyEnd,
+                    sessionStart: start,
+                    sessionEnd: activeEnd,
+                    pendingIntervals: pendingForActive,
+                    excludedIntervals: exclusionsForActive
+                )
+            } else {
+                activeWeekly = FocusIntervalAllocator.allocatedDuration(
+                    recordStart: start,
+                    recordEnd: activeEnd,
+                    durationSeconds: activeElapsed,
+                    intervalStart: sevenDaysAgo,
+                    intervalEnd: effectiveWeeklyEnd
+                )
+            }
         } else {
             activeWeekly = 0
         }
@@ -1715,8 +1820,18 @@ public class TimerViewModel: ObservableObject {
         let credited = duration ?? segmentCreditedSeconds
         segmentCreditedSeconds = 0
 
+        let pendingForSession = idleReviewCoordinator.pendingIntervals.filter { $0.sessionId == activeTimerSessionId }
+        let exclusionsForSession = sessionExclusionLedger.filter { $0.sessionId == activeTimerSessionId }
+        let hasIdleAccounting = !pendingForSession.isEmpty || !exclusionsForSession.isEmpty
+
         let boundedEnd = max(start, effectiveEnd)
-        let elapsed = credited > 0 ? credited : max(0, Int(boundedEnd.timeIntervalSince(start)))
+        let elapsed: Int
+        if hasIdleAccounting {
+            // Authoritative confirmed credit; 0 is genuine zero
+            elapsed = credited
+        } else {
+            elapsed = credited > 0 ? credited : max(0, Int(boundedEnd.timeIntervalSince(start)))
+        }
         guard elapsed > 0 else { return }
 
         if isFocusPreset {
@@ -3041,7 +3156,19 @@ public class TimerViewModel: ObservableObject {
                 }
             }
 
-            // Track exclusion for this session
+            // Track exclusion for this session in durable ledger and in-memory cache
+            let exclusionRecord = SessionExclusionRecord(
+                id: interval.id,
+                sessionId: targetSessionId,
+                taskId: interval.taskId ?? (isDeferredCompletionPending ? deferredCompletionTaskId : activeSessionTaskId),
+                startTime: interval.startTime,
+                endTime: interval.endTime,
+                decision: .excludeFromFocus,
+                isAppliedToHistory: false
+            )
+            if !sessionExclusionLedger.contains(where: { $0.id == interval.id }) {
+                sessionExclusionLedger.append(exclusionRecord)
+            }
             sessionExcludedIntervals[targetSessionId, default: []].append(interval)
 
             if isTimerRunning && isFocusPreset && activeTimerSessionId == interval.sessionId {
@@ -3065,6 +3192,11 @@ public class TimerViewModel: ObservableObject {
 
             // Reconcile existing session records (session-scoped)
             reconcileSessionRecordsExcluding(interval: interval)
+            if !isDeferredCompletionPending {
+                if let idx = sessionExclusionLedger.firstIndex(where: { $0.id == interval.id }) {
+                    sessionExclusionLedger[idx].isAppliedToHistory = true
+                }
+            }
             recalculateFocusMetrics(now: now)
 
             // Check if there are other pending reviews for this session
@@ -3126,13 +3258,20 @@ public class TimerViewModel: ObservableObject {
                 )
                 sessionRecords.append(baseRecord)
 
-                // Apply any excluded intervals for this session to accurately split the record into true wall-clock intervals
-                if let exclusions = sessionExcludedIntervals[sessId] {
-                    for exc in exclusions {
+                // Apply all excluded intervals for this session from the durable ledger to accurately split the record into true wall-clock intervals
+                let unappliedExclusions = sessionExclusionLedger.filter { $0.sessionId == sessId && !$0.isAppliedToHistory }
+                for exc in unappliedExclusions {
+                    reconcileSessionRecordsExcluding(interval: exc.toInterval())
+                }
+                if let memoryExclusions = sessionExcludedIntervals[sessId] {
+                    for exc in memoryExclusions where !unappliedExclusions.contains(where: { $0.id == exc.id }) {
                         reconcileSessionRecordsExcluding(interval: exc)
                     }
-                    sessionExcludedIntervals.removeValue(forKey: sessId)
                 }
+                for i in sessionExclusionLedger.indices where sessionExclusionLedger[i].sessionId == sessId {
+                    sessionExclusionLedger[i].isAppliedToHistory = true
+                }
+                sessionExcludedIntervals.removeValue(forKey: sessId)
 
                 recalculateFocusMetrics(now: now)
             }

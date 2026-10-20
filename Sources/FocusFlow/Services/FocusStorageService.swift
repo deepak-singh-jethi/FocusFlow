@@ -107,6 +107,50 @@ public enum FocusIntervalAllocator {
     }
 }
 
+// MARK: - Session Exclusion Record (Durable Task 9 Idle Review Ledger)
+public struct SessionExclusionRecord: Codable, Identifiable, Equatable, Sendable {
+    public let id: UUID                      // Stable interval UUID
+    public let sessionId: UUID               // Originating timer session UUID
+    public let taskId: UUID?                 // Original task UUID
+    public let startTime: Date               // Exact idle start timestamp
+    public let endTime: Date                 // Exact idle end timestamp
+    public let decision: IdleReviewDecision  // Exclusion decision (.excludeFromFocus)
+    public var isAppliedToHistory: Bool      // Whether applied to final sessionRecords
+
+    public init(
+        id: UUID = UUID(),
+        sessionId: UUID,
+        taskId: UUID? = nil,
+        startTime: Date,
+        endTime: Date,
+        decision: IdleReviewDecision = .excludeFromFocus,
+        isAppliedToHistory: Bool = false
+    ) {
+        self.id = id
+        self.sessionId = sessionId
+        self.taskId = taskId
+        self.startTime = startTime
+        self.endTime = endTime
+        self.decision = decision
+        self.isAppliedToHistory = isAppliedToHistory
+    }
+
+    public func toInterval() -> IdleReviewInterval {
+        IdleReviewInterval(
+            id: id,
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: startTime,
+            endTime: endTime,
+            eligibleDurationSeconds: max(0, Int(endTime.timeIntervalSince(startTime))),
+            status: .excluded,
+            isEstimated: false,
+            isProvisionalCreditDeducted: true
+        )
+    }
+}
+
 // MARK: - Stopwatch Lap Data Model
 public struct StopwatchLap: Identifiable, Codable, Equatable {
     public let id: UUID
@@ -268,6 +312,7 @@ public struct ActiveSessionRecoveryState: Codable, Equatable {
     // Task 9: Idle Time Review Recovery
     public var isDeferredCompletionPending: Bool?
     public var pendingIdleIntervals: [IdleReviewInterval]?
+    public var sessionExclusionLedger: [SessionExclusionRecord]?
 
     public var checkpointTimestamp: Date
 
@@ -294,6 +339,7 @@ public struct ActiveSessionRecoveryState: Codable, Equatable {
         stopwatchTaskId: UUID? = nil,
         isDeferredCompletionPending: Bool? = nil,
         pendingIdleIntervals: [IdleReviewInterval]? = nil,
+        sessionExclusionLedger: [SessionExclusionRecord]? = nil,
         checkpointTimestamp: Date = Date()
     ) {
         self.version = version
@@ -318,6 +364,7 @@ public struct ActiveSessionRecoveryState: Codable, Equatable {
         self.stopwatchTaskId = stopwatchTaskId
         self.isDeferredCompletionPending = isDeferredCompletionPending
         self.pendingIdleIntervals = pendingIdleIntervals
+        self.sessionExclusionLedger = sessionExclusionLedger
         self.checkpointTimestamp = checkpointTimestamp
     }
 }
@@ -355,6 +402,7 @@ public struct FocusAppData: Codable, Equatable {
     public var idleReviewEnabled: Bool?
     public var idleThresholdSeconds: Int?
     public var pendingIdleIntervals: [IdleReviewInterval]?
+    public var sessionExclusionLedger: [SessionExclusionRecord]?
 
     enum CodingKeys: String, CodingKey {
         case tasks
@@ -387,6 +435,7 @@ public struct FocusAppData: Codable, Equatable {
         case idleReviewEnabled
         case idleThresholdSeconds
         case pendingIdleIntervals
+        case sessionExclusionLedger
     }
 
     public init(
@@ -417,7 +466,8 @@ public struct FocusAppData: Codable, Equatable {
         activeSessionRecovery: ActiveSessionRecoveryState? = nil,
         idleReviewEnabled: Bool? = nil,
         idleThresholdSeconds: Int? = nil,
-        pendingIdleIntervals: [IdleReviewInterval]? = nil
+        pendingIdleIntervals: [IdleReviewInterval]? = nil,
+        sessionExclusionLedger: [SessionExclusionRecord]? = nil
     ) {
         self.tasks = tasks
         self.focusedSeconds = focusedSeconds
@@ -459,6 +509,7 @@ public struct FocusAppData: Codable, Equatable {
         self.idleReviewEnabled = idleReviewEnabled
         self.idleThresholdSeconds = idleThresholdSeconds
         self.pendingIdleIntervals = pendingIdleIntervals
+        self.sessionExclusionLedger = sessionExclusionLedger
     }
 
     public init(from decoder: Decoder) throws {
@@ -516,6 +567,7 @@ public struct FocusAppData: Codable, Equatable {
         self.idleReviewEnabled = try container.decodeIfPresent(Bool.self, forKey: .idleReviewEnabled)
         self.idleThresholdSeconds = try container.decodeIfPresent(Int.self, forKey: .idleThresholdSeconds)
         self.pendingIdleIntervals = try container.decodeIfPresent([IdleReviewInterval].self, forKey: .pendingIdleIntervals)
+        self.sessionExclusionLedger = try container.decodeIfPresent([SessionExclusionRecord].self, forKey: .sessionExclusionLedger)
 
         // Backward compatibility migration:
         // If sessionRecords is empty and legacyLifetimeFocusedSeconds was nil,
