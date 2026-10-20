@@ -10,6 +10,7 @@ public struct ContentView: View {
     @State private var showingWorkspace = false
     @AppStorage("clockStyle") private var clockStyle = "Digital"
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isFullScreen: Bool = false
 
     let bgMain = Color(red: 0.08, green: 0.09, blue: 0.13)
     let bgSidebar = Color(red: 0.11, green: 0.12, blue: 0.16)
@@ -18,6 +19,18 @@ public struct ContentView: View {
     public init(viewModel: TimerViewModel? = nil, audioPlayer: AmbientAudioPlayer? = nil) {
         self.viewModel = viewModel ?? TimerViewModel()
         self.audioPlayer = audioPlayer ?? AmbientAudioPlayer()
+    }
+
+    private var hasBanner: Bool {
+        viewModel.isPersistenceBlocked || viewModel.isSaveFailed || (viewModel.didRecoverFromBackup && viewModel.showRecoveryNotice)
+    }
+
+    private var topClearance: CGFloat {
+        WindowLayoutMetrics.topClearance(isFullScreen: isFullScreen)
+    }
+
+    private var contentTopPadding: CGFloat {
+        hasBanner ? WindowLayoutMetrics.postBannerSpacing : topClearance
     }
 
     public var body: some View {
@@ -43,6 +56,7 @@ public struct ContentView: View {
                                 isFocusState: $isFocusState,
                                 showingWorkspace: $showingWorkspace,
                                 isStopwatchMode: false,
+                                topPadding: contentTopPadding,
                                 onSwitchToStopwatch: {
                                     withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
                                         sidebarSelection = .stopwatch
@@ -61,6 +75,7 @@ public struct ContentView: View {
                                 isFocusState: $isFocusState,
                                 showingWorkspace: $showingWorkspace,
                                 isStopwatchMode: true,
+                                topPadding: contentTopPadding,
                                 onSwitchToTimer: {
                                     withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
                                         sidebarSelection = .focusTimer
@@ -72,9 +87,13 @@ public struct ContentView: View {
                                 removal: .opacity
                             ))
                         } else {
+                            let hasFocusMiniBar = viewModel.isTimerRunning || viewModel.timeRemaining < viewModel.totalTime || viewModel.hasPreservedSession
+                            let hasStopwatchMiniBar = viewModel.isStopwatchRunning || viewModel.stopwatchTime > 0
+                            let hasAnyMiniBar = hasFocusMiniBar || hasStopwatchMiniBar
+
                             VStack(spacing: 0) {
                                 // Persistent Mini Bar if Focus Timer is running or active
-                                if viewModel.isTimerRunning || viewModel.timeRemaining < viewModel.totalTime || viewModel.hasPreservedSession {
+                                if hasFocusMiniBar {
                                     PersistentCrossModeMiniBar(viewModel: viewModel, type: .focusTimer) {
                                         withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
                                             viewModel.restorePreservedSessionIfNeeded()
@@ -82,25 +101,25 @@ public struct ContentView: View {
                                         }
                                     }
                                     .padding(.horizontal, 24)
-                                    .padding(.top, 40)
+                                    .padding(.top, contentTopPadding)
                                     .padding(.bottom, 6)
                                     .transition(.move(edge: .top).combined(with: .opacity))
                                 }
 
                                 // Persistent Mini Bar if Stopwatch is running or has elapsed time
-                                if viewModel.isStopwatchRunning || viewModel.stopwatchTime > 0 {
+                                if hasStopwatchMiniBar {
                                     PersistentCrossModeMiniBar(viewModel: viewModel, type: .stopwatch) {
                                         withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
                                             sidebarSelection = .stopwatch
                                         }
                                     }
                                     .padding(.horizontal, 24)
-                                    .padding(.top, (viewModel.isTimerRunning || viewModel.timeRemaining < viewModel.totalTime || viewModel.hasPreservedSession) ? 4 : 40)
+                                    .padding(.top, hasFocusMiniBar ? 4 : contentTopPadding)
                                     .padding(.bottom, 6)
                                     .transition(.move(edge: .top).combined(with: .opacity))
                                 }
 
-                                selectedPage
+                                selectedPageView(topPadding: hasAnyMiniBar ? WindowLayoutMetrics.postMiniBarSpacing : contentTopPadding)
                                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                             }
                             .transition(.asymmetric(
@@ -152,6 +171,21 @@ public struct ContentView: View {
                 .frame(minWidth: 390, idealWidth: 430, minHeight: 520)
                 .background(bgMain)
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                isFullScreen = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                isFullScreen = false
+            }
+        }
+        .onAppear {
+            if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+                isFullScreen = window.styleMask.contains(.fullScreen)
+            }
+        }
     }
 
     private var sidebar: some View {
@@ -159,19 +193,20 @@ public struct ContentView: View {
             gradient: accentGradient,
             selection: $sidebarSelection,
             isCollapsed: $isSidebarCollapsed,
-            viewModel: viewModel
+            viewModel: viewModel,
+            topPadding: topClearance
         )
         .frame(width: isSidebarCollapsed ? SidebarTokens.collapsedWidth : SidebarTokens.sidebarWidth)
         .background(SidebarTokens.sidebarBackground)
     }
 
     @ViewBuilder
-    private var selectedPage: some View {
+    private func selectedPageView(topPadding: CGFloat) -> some View {
         switch sidebarSelection {
-        case .tasks: TasksView(viewModel: viewModel)
-        case .soundscapes: SoundscapesView(audioPlayer: audioPlayer)
-        case .insights: InsightsView(viewModel: viewModel)
-        default: SettingsView(viewModel: viewModel)
+        case .tasks: TasksView(viewModel: viewModel, topPadding: topPadding)
+        case .soundscapes: SoundscapesView(audioPlayer: audioPlayer, topPadding: topPadding)
+        case .insights: InsightsView(viewModel: viewModel, topPadding: topPadding)
+        default: SettingsView(viewModel: viewModel, topPadding: topPadding)
         }
     }
 
@@ -192,7 +227,8 @@ public struct ContentView: View {
             Spacer()
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.top, isFullScreen ? 8 : (WindowLayoutMetrics.titlebarChromeHeight + 4))
+        .padding(.bottom, 10)
         .background(Color.red.opacity(0.28))
         .overlay(
             Rectangle()
@@ -230,7 +266,8 @@ public struct ContentView: View {
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.top, isFullScreen ? 8 : (WindowLayoutMetrics.titlebarChromeHeight + 4))
+        .padding(.bottom, 10)
         .background(Color.green.opacity(0.22))
         .overlay(
             Rectangle()
@@ -269,7 +306,8 @@ public struct ContentView: View {
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.top, isFullScreen ? 8 : (WindowLayoutMetrics.titlebarChromeHeight + 4))
+        .padding(.bottom, 10)
         .background(Color.orange.opacity(0.25))
         .overlay(
             Rectangle()

@@ -3,9 +3,11 @@ import SwiftUI
 // MARK: - Settings View
 public struct SettingsView: View {
     @ObservedObject public var viewModel: TimerViewModel
+    public var topPadding: CGFloat
 
-    public init(viewModel: TimerViewModel) {
+    public init(viewModel: TimerViewModel, topPadding: CGFloat = WindowLayoutMetrics.standardTopClearance) {
         self.viewModel = viewModel
+        self.topPadding = topPadding
     }
 
     public var body: some View {
@@ -19,7 +21,7 @@ public struct SettingsView: View {
                         .font(.system(size: 13))
                         .foregroundColor(.gray)
                 }
-                .padding(.top, 52)
+                .padding(.top, topPadding)
 
                 VStack(spacing: 0) {
                     HStack {

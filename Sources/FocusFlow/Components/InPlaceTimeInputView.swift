@@ -82,6 +82,76 @@ public struct InPlaceTimeInputView: View {
         return model.activeEditingField == field ? activeColor.opacity(0.35) : .clear
     }
 
+    public struct ShortcutEntry: Identifiable, Equatable {
+        public let id: String
+        public let title: String
+        public let minutes: Int
+        public let isCurrent: Bool
+        public let isCustom: Bool
+
+        public init(id: String, title: String, minutes: Int, isCurrent: Bool, isCustom: Bool) {
+            self.id = id
+            self.title = title
+            self.minutes = minutes
+            self.isCurrent = isCurrent
+            self.isCustom = isCustom
+        }
+    }
+
+    public var shortcutEntries: [ShortcutEntry] {
+        let currentTotal = viewModel.totalTime
+        let currentM = currentTotal / 60
+        let currentS = currentTotal % 60
+        let isWholeMinutes = (currentS == 0)
+
+        let baseMinutes: [Int] = viewModel.isBreakPreset
+            ? [3, 5, 10, 15, 20, 30]
+            : [5, 10, 15, 20, 25, 30, 45, 60, 90]
+
+        var entries: [ShortcutEntry] = []
+
+        if isWholeMinutes {
+            let effectiveMinutes: [Int]
+            if currentM > 0 && !baseMinutes.contains(currentM) {
+                effectiveMinutes = (baseMinutes + [currentM]).sorted()
+            } else {
+                effectiveMinutes = baseMinutes
+            }
+
+            for m in effectiveMinutes {
+                let isCurr = (m == currentM)
+                let isCust = (m == currentM && !baseMinutes.contains(m))
+                entries.append(ShortcutEntry(
+                    id: "\(m)m",
+                    title: "\(m)m",
+                    minutes: m,
+                    isCurrent: isCurr,
+                    isCustom: isCust
+                ))
+            }
+        } else {
+            for m in baseMinutes {
+                entries.append(ShortcutEntry(
+                    id: "\(m)m",
+                    title: "\(m)m",
+                    minutes: m,
+                    isCurrent: false,
+                    isCustom: false
+                ))
+            }
+            let title = String(format: "%d:%02d", currentM, currentS)
+            entries.append(ShortcutEntry(
+                id: "custom-\(currentTotal)",
+                title: title,
+                minutes: currentM,
+                isCurrent: true,
+                isCustom: true
+            ))
+        }
+
+        return entries
+    }
+
     public var body: some View {
         let isStageCompact = isCompact || size < 340
         // Desktop idle digits: prominent ~72-92pt with responsive scaling
@@ -303,51 +373,56 @@ public struct InPlaceTimeInputView: View {
             }
 
             // MARK: - 2. Shortcut Inputs Bar ("Click Put Time")
-            let shortcutDurations: [Int] = viewModel.isBreakPreset
-                ? (isStageCompact ? [3, 5, 10, 15, 20] : [3, 5, 10, 15, 20, 30])
-                : (isStageCompact ? [5, 10, 15, 25, 30, 45, 60] : [5, 10, 15, 20, 25, 30, 45, 60, 90])
+            let isWholeMinutes = (viewModel.totalTime % 60) == 0
 
             VStack(spacing: 8) {
-                HStack(spacing: isStageCompact ? 5 : 8) {
-                    ForEach(shortcutDurations, id: \.self) { chipM in
-                        let isCurrent = (viewModel.totalTime / 60) == chipM && (viewModel.totalTime % 60) == 0
-
-                        ShortcutChipButton(
-                            minutes: chipM,
-                            isCurrent: isCurrent,
-                            accentColor: activeColor,
-                            isStageCompact: isStageCompact,
-                            size: size
-                        ) {
-                            withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
-                                model.selectPreset(minutes: chipM)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: isStageCompact ? 5 : 8) {
+                        ForEach(shortcutEntries) { entry in
+                            ShortcutChipButton(
+                                title: entry.title,
+                                isCurrent: entry.isCurrent,
+                                accentColor: activeColor,
+                                isStageCompact: isStageCompact,
+                                size: size,
+                                isCustom: entry.isCustom
+                            ) {
+                                withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                                    if entry.isCustom && !isWholeMinutes {
+                                        model.startEditing(.minutes)
+                                    } else {
+                                        model.selectPreset(minutes: entry.minutes)
+                                    }
+                                }
                             }
                         }
-                    }
 
-                    // +15m Quick Boost (Seconds-Preserving, with dedicated '+' icon)
-                    let canPlus15 = model.canAdjustPlus15
-                    Button {
-                        model.adjustMinutes(by: 15)
-                    } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: "plus")
-                                .font(.system(size: max(9, min(size * 0.024, 11)), weight: .bold))
-                            Text("15m")
-                                .font(.system(size: max(10, min(size * 0.026, 12)), weight: .semibold))
+                        // +15m Quick Boost (Seconds-Preserving, with dedicated '+' icon)
+                        let canPlus15 = model.canAdjustPlus15
+                        Button {
+                            model.adjustMinutes(by: 15)
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "plus")
+                                    .font(.system(size: max(9, min(size * 0.024, 11)), weight: .bold))
+                                Text("15m")
+                                    .font(.system(size: max(10, min(size * 0.026, 12)), weight: .semibold))
+                            }
+                            .foregroundColor(canPlus15 ? activeColor.opacity(0.95) : Color.white.opacity(0.20))
+                            .padding(.horizontal, isStageCompact ? 6 : (size < 400 ? 8 : 10))
+                            .frame(height: max(28, min(size * 0.070, 34)))
+                            .background(Color.white.opacity(isPlus15Hovered && canPlus15 ? 0.10 : 0.04), in: RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(canPlus15 ? activeColor.opacity(0.35) : Color.white.opacity(0.08), lineWidth: 1))
                         }
-                        .foregroundColor(canPlus15 ? activeColor.opacity(0.95) : Color.white.opacity(0.20))
-                        .padding(.horizontal, isStageCompact ? 6 : (size < 400 ? 8 : 10))
-                        .frame(height: max(28, min(size * 0.070, 34)))
-                        .background(Color.white.opacity(isPlus15Hovered && canPlus15 ? 0.10 : 0.04), in: RoundedRectangle(cornerRadius: 8))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(canPlus15 ? activeColor.opacity(0.35) : Color.white.opacity(0.08), lineWidth: 1))
+                        .buttonStyle(.plain)
+                        .disabled(!canPlus15)
+                        .onHover { h in isPlus15Hovered = h }
+                        .accessibilityLabel("Add 15 minutes")
+                        .accessibilityHint(canPlus15 ? "Add 15 minutes to timer" : "Maximum timer limit reached")
+                        .help(canPlus15 ? "Add 15 minutes to timer (preserves seconds)" : "Cannot add 15 minutes: reaches maximum duration (360:59)")
                     }
-                    .buttonStyle(.plain)
-                    .disabled(!canPlus15)
-                    .onHover { h in isPlus15Hovered = h }
-                    .accessibilityLabel("Add 15 minutes")
-                    .accessibilityHint(canPlus15 ? "Add 15 minutes to timer" : "Maximum timer limit reached")
-                    .help(canPlus15 ? "Add 15 minutes to timer (preserves seconds)" : "Cannot add 15 minutes: reaches maximum duration (360:59)")
+                    .padding(.horizontal, 4)
+                    .frame(maxWidth: .infinity, alignment: .center)
                 }
 
                 // MARK: - 3. Reserved 32pt Helper / Validation Row (Zero Layout Shift!)
@@ -444,29 +519,74 @@ public struct InPlaceTimeInputView: View {
 
 // MARK: - Shortcut Chip Subview
 struct ShortcutChipButton: View {
-    let minutes: Int
+    let title: String
     let isCurrent: Bool
     let accentColor: Color
     let isStageCompact: Bool
     let size: CGFloat
+    let isCustom: Bool
     let onSelect: () -> Void
 
     @State private var isHovered: Bool = false
 
+    init(
+        title: String,
+        isCurrent: Bool,
+        accentColor: Color,
+        isStageCompact: Bool,
+        size: CGFloat,
+        isCustom: Bool = false,
+        onSelect: @escaping () -> Void
+    ) {
+        self.title = title
+        self.isCurrent = isCurrent
+        self.accentColor = accentColor
+        self.isStageCompact = isStageCompact
+        self.size = size
+        self.isCustom = isCustom
+        self.onSelect = onSelect
+    }
+
+    init(
+        minutes: Int,
+        isCurrent: Bool,
+        accentColor: Color,
+        isStageCompact: Bool,
+        size: CGFloat,
+        onSelect: @escaping () -> Void
+    ) {
+        self.init(
+            title: "\(minutes)m",
+            isCurrent: isCurrent,
+            accentColor: accentColor,
+            isStageCompact: isStageCompact,
+            size: size,
+            isCustom: false,
+            onSelect: onSelect
+        )
+    }
+
     var body: some View {
         Button(action: onSelect) {
-            Text("\(minutes)m")
-                .font(.system(size: max(11, min(size * 0.028, 13)), weight: isCurrent ? .bold : .medium))
-                .foregroundColor(textColor)
-                .padding(.horizontal, isStageCompact ? 6 : (size < 400 ? 8 : 12))
-                .frame(height: max(28, min(size * 0.070, 34)))
-                .background(bgColor, in: RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(borderColor, lineWidth: 1))
-                .shadow(color: isCurrent ? accentColor.opacity(0.35) : Color.clear, radius: 6)
+            HStack(spacing: 3) {
+                if isCustom {
+                    Circle()
+                        .fill(isCurrent ? accentColor : Color.white.opacity(0.40))
+                        .frame(width: 4, height: 4)
+                }
+                Text(title)
+                    .font(.system(size: max(11, min(size * 0.028, 13)), weight: isCurrent ? .bold : .medium))
+                    .foregroundColor(textColor)
+            }
+            .padding(.horizontal, isStageCompact ? 6 : (size < 400 ? 8 : 12))
+            .frame(height: max(28, min(size * 0.070, 34)))
+            .background(bgColor, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(borderColor, lineWidth: 1))
+            .shadow(color: isCurrent ? accentColor.opacity(0.35) : Color.clear, radius: 6)
         }
         .buttonStyle(.plain)
         .onHover { h in isHovered = h }
-        .help("Set duration to \(minutes) minutes")
+        .help(isCustom ? "Custom duration: \(title)" : "Set duration to \(title)")
     }
 
     private var textColor: Color {

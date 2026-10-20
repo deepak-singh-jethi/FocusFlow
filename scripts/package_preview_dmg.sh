@@ -24,7 +24,13 @@ echo "=== FocusFlow Release Packaging Pipeline (Single DMG & Standalone App) ===
 echo "Project Root: $PROJECT_ROOT"
 mkdir -p "$RELEASES_DIR"
 
-# 0. Backup existing release artifacts only if explicitly requested via FOCUSFLOW_ENABLE_BACKUP=true
+# 0. Always preserve a safe rollback backup of existing DMG before packaging
+PREV_DMG_BACKUP="/tmp/FocusFlow_previous_backup_$TIMESTAMP.dmg"
+if [ -f "$ARTIFACT_DMG" ]; then
+    echo "--- Preserving safety rollback backup of existing DMG at $PREV_DMG_BACKUP ---"
+    cp -p "$ARTIFACT_DMG" "$PREV_DMG_BACKUP"
+fi
+
 if [ "${FOCUSFLOW_ENABLE_BACKUP:-false}" = "true" ]; then
     mkdir -p "$BACKUP_DIR"
     echo "--- Backing up existing releases to: $BACKUP_DIR ---"

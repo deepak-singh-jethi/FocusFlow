@@ -21601,6 +21601,267 @@ final class FocusFlowTests: XCTestCase {
         // Verify the hosting view respects the window's safe area
         XCTAssertGreaterThanOrEqual(hosting.safeAreaInsets.top, 28.0, "ContentView hosting view must receive window top safe area insets")
     }
+
+    // MARK: - PART F: Responsive Window Layout & Stabilization Regression Tests
+
+    @MainActor
+    func testResponsiveLayout_01_WindowLayoutMetrics_AuthoritativeGeometryConstants() {
+        XCTAssertEqual(WindowLayoutMetrics.titlebarChromeHeight, 32.0, "Native titlebar chrome height must be 32pt")
+        XCTAssertEqual(WindowLayoutMetrics.windowedBreathingRoom, 20.0, "Intentional breathing room must be 20pt")
+        XCTAssertEqual(WindowLayoutMetrics.standardTopClearance, 52.0, "Authoritative windowed top clearance must be exactly 52pt")
+        XCTAssertEqual(WindowLayoutMetrics.fullScreenTopClearance, 16.0, "Fullscreen top clearance must be 16pt (no traffic lights)")
+        XCTAssertEqual(WindowLayoutMetrics.postBannerSpacing, 12.0, "Post-banner spacing must be 12pt")
+        XCTAssertEqual(WindowLayoutMetrics.postMiniBarSpacing, 12.0, "Post-mini-bar spacing must be 12pt")
+
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: false), 52.0)
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: true), 16.0)
+    }
+
+    @MainActor
+    func testResponsiveLayout_02_WindowHosted_NormalAndFullScreenClearance() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+        let player = AmbientAudioPlayer()
+
+        let view = ContentView(viewModel: vm, audioPlayer: player)
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame = NSRect(x: 0, y: 0, width: 1050, height: 700)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 1050, height: 700),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.contentView = hosting
+        window.layoutIfNeeded()
+
+        // Windowed mode clearance: 52pt
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: false), 52.0)
+        // Fullscreen clearance: 16pt
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: true), 16.0)
+    }
+
+    @MainActor
+    func testResponsiveLayout_03_ExpandedAndCollapsedSidebarGeometry() {
+        XCTAssertEqual(SidebarTokens.sidebarWidth, 252.0)
+        XCTAssertEqual(SidebarTokens.collapsedWidth, 68.0)
+        XCTAssertEqual(SidebarTokens.collapsedItemWidth, 44.0)
+        XCTAssertEqual(SidebarTokens.headerTopPadding, 52.0)
+        XCTAssertEqual(SidebarTokens.headerBottomPadding, 16.0)
+
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var isCollapsed = false
+        let expandedSidebar = SidebarView(
+            gradient: LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing),
+            selection: .constant(.focusTimer),
+            isCollapsed: Binding(get: { isCollapsed }, set: { isCollapsed = $0 }),
+            viewModel: vm,
+            topPadding: 52.0
+        )
+        XCTAssertEqual(expandedSidebar.topPadding, 52.0)
+
+        isCollapsed = true
+        let collapsedSidebar = SidebarView(
+            gradient: LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing),
+            selection: .constant(.focusTimer),
+            isCollapsed: Binding(get: { isCollapsed }, set: { isCollapsed = $0 }),
+            viewModel: vm,
+            topPadding: 16.0
+        )
+        XCTAssertEqual(collapsedSidebar.topPadding, 16.0)
+    }
+
+    @MainActor
+    func testResponsiveLayout_04_CompactPresetDiscoverability_90mAndAllBasePresets() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Set duration to 90 minutes
+        vm.totalTime = 90 * 60
+        vm.timeRemaining = 90 * 60
+
+        let inputView = InPlaceTimeInputView(viewModel: vm, size: 240, isCompact: true)
+        let entries = inputView.shortcutEntries
+
+        // Verify 90m chip is present and highlighted as current
+        guard let entry90 = entries.first(where: { $0.title == "90m" }) else {
+            XCTFail("90m shortcut chip must be present in compact mode when 90:00 is active")
+            return
+        }
+        XCTAssertTrue(entry90.isCurrent, "90m chip must be marked as isCurrent when totalTime is 90:00")
+        XCTAssertEqual(entry90.minutes, 90)
+
+        // Verify base focus presets (5, 10, 15, 20, 25, 30, 45, 60, 90) are all present
+        let expectedFocusPresets = [5, 10, 15, 20, 25, 30, 45, 60, 90]
+        for m in expectedFocusPresets {
+            XCTAssertTrue(entries.contains(where: { $0.minutes == m }), "Preset \(m)m must be present in shortcutEntries")
+        }
+
+        // Test break presets
+        vm.switchToBreak(minutes: 30)
+        let breakInputView = InPlaceTimeInputView(viewModel: vm, size: 240, isCompact: true)
+        let breakEntries = breakInputView.shortcutEntries
+        let expectedBreakPresets = [3, 5, 10, 15, 20, 30]
+        for m in expectedBreakPresets {
+            XCTAssertTrue(breakEntries.contains(where: { $0.minutes == m }), "Break preset \(m)m must be present in break shortcutEntries")
+        }
+        guard let entry30Break = breakEntries.first(where: { $0.title == "30m" }) else {
+            XCTFail("30m break shortcut chip must be present in break mode")
+            return
+        }
+        XCTAssertTrue(entry30Break.isCurrent, "30m break chip must be marked as isCurrent when 30m break is active")
+    }
+
+    @MainActor
+    func testResponsiveLayout_05_CustomNonPresetDuration_GeneratesDynamicActiveChip() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Set custom whole-minute duration: 42 minutes
+        vm.setCustomDuration(minutes: 42, seconds: 0)
+        XCTAssertEqual(vm.totalTime, 42 * 60)
+
+        let inputView = InPlaceTimeInputView(viewModel: vm, size: 260, isCompact: true)
+        let entries = inputView.shortcutEntries
+
+        guard let entry42 = entries.first(where: { $0.minutes == 42 }) else {
+            XCTFail("Custom 42m duration must generate a discoverable shortcut chip")
+            return
+        }
+        XCTAssertTrue(entry42.isCurrent, "Custom 42m chip must be marked as isCurrent")
+        XCTAssertTrue(entry42.isCustom, "Custom 42m chip must be marked as isCustom")
+        XCTAssertEqual(entry42.title, "42m")
+
+        // Verify entries remain strictly sorted
+        let minutesList = entries.map(\.minutes)
+        XCTAssertEqual(minutesList, minutesList.sorted(), "Shortcut chips must remain sorted ascending")
+    }
+
+    @MainActor
+    func testResponsiveLayout_06_CustomDurationWithSeconds_GeneratesFormattedActiveChip() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Set custom duration with seconds: 25 minutes 30 seconds
+        vm.setCustomDuration(minutes: 25, seconds: 30)
+        XCTAssertEqual(vm.totalTime, 25 * 60 + 30)
+
+        let inputView = InPlaceTimeInputView(viewModel: vm, size: 260, isCompact: true)
+        let entries = inputView.shortcutEntries
+
+        guard let customEntry = entries.first(where: { $0.isCustom }) else {
+            XCTFail("Custom duration containing seconds must generate a dedicated active chip")
+            return
+        }
+        XCTAssertTrue(customEntry.isCurrent, "Custom 25:30 chip must be marked as isCurrent")
+        XCTAssertEqual(customEntry.title, "25:30", "Chip title must format as MM:SS")
+    }
+
+    @MainActor
+    func testResponsiveLayout_07_DurationPreservationAcrossResizeAndSidebarStates() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+        let player = AmbientAudioPlayer()
+
+        // Set to 90 minutes
+        vm.totalTime = 90 * 60
+        vm.timeRemaining = 90 * 60
+
+        let view = ContentView(viewModel: vm, audioPlayer: player)
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame = NSRect(x: 0, y: 0, width: 1440, height: 900)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 1440, height: 900),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.layoutIfNeeded()
+
+        // Resize down to minimum 850x600
+        window.setContentSize(NSSize(width: 850, height: 600))
+        hosting.frame = NSRect(x: 0, y: 0, width: 850, height: 600)
+        window.layoutIfNeeded()
+
+        // Duration must remain exactly 90:00 (5400s)
+        XCTAssertEqual(vm.totalTime, 5400, "Window resize must not alter configured totalTime")
+        XCTAssertEqual(vm.timeRemaining, 5400, "Window resize must not alter timeRemaining")
+
+        // Resize to medium 1050x700
+        window.setContentSize(NSSize(width: 1050, height: 700))
+        hosting.frame = NSRect(x: 0, y: 0, width: 1050, height: 700)
+        window.layoutIfNeeded()
+
+        XCTAssertEqual(vm.totalTime, 5400)
+        XCTAssertEqual(vm.timeRemaining, 5400)
+    }
+
+    @MainActor
+    func testResponsiveLayout_08_StageHeightBoundingAcrossWindowHeights() {
+        // Digital clock stage height formula: max(220, min(availableH * 0.35, 330))
+        // Small window (height 600 -> availableH ≈ 540)
+        let smallAvailableH: CGFloat = 540.0
+        let smallStageH = max(220, min(smallAvailableH * 0.35, 330))
+        XCTAssertEqual(smallStageH, 220.0, "Small window digital stage height must clamp to 220pt")
+
+        // Medium window (height 700 -> availableH ≈ 640)
+        let medAvailableH: CGFloat = 640.0
+        let medStageH = max(220, min(medAvailableH * 0.35, 330))
+        XCTAssertEqual(medStageH, 224.0, accuracy: 0.1)
+
+        // Large window (height 900 -> availableH ≈ 830)
+        let largeAvailableH: CGFloat = 830.0
+        let largeStageH = max(220, min(largeAvailableH * 0.35, 330))
+        XCTAssertEqual(largeStageH, 290.5, accuracy: 0.5)
+
+        // Ultra-tall / 4K window (height 1200 -> availableH ≈ 1130)
+        let tallAvailableH: CGFloat = 1130.0
+        let tallStageH = max(220, min(tallAvailableH * 0.35, 330))
+        XCTAssertEqual(tallStageH, 330.0, "Tall window digital stage height must cap at 330pt, eliminating the 520pt void")
+    }
+
+    @MainActor
+    func testResponsiveLayout_09_MinimumWindowSize850x600_FitConstraints() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+        let player = AmbientAudioPlayer()
+
+        let view = ContentView(viewModel: vm, audioPlayer: player)
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame = NSRect(x: 0, y: 0, width: 850, height: 600)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 850, height: 600),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.layoutIfNeeded()
+
+        XCTAssertEqual(window.contentView?.frame.size.width, 850)
+        XCTAssertEqual(window.contentView?.frame.size.height, 600)
+    }
+
+    @MainActor
+    func testResponsiveLayout_10_CrossModeMiniBar_TopClearanceDoesNotDuplicatePadding() {
+        XCTAssertEqual(WindowLayoutMetrics.postMiniBarSpacing, 12.0)
+        XCTAssertEqual(WindowLayoutMetrics.postBannerSpacing, 12.0)
+
+        // Verify that TasksView with postMiniBarSpacing starts at 12pt instead of 52pt
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let tasksView = TasksView(viewModel: vm, topPadding: WindowLayoutMetrics.postMiniBarSpacing)
+        XCTAssertEqual(tasksView.topPadding, 12.0, "TasksView under an active mini-bar must have 12pt top padding, preventing 140+ pt double padding")
+    }
 }
 
 

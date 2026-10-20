@@ -53,6 +53,7 @@ public struct SidebarView: View {
     @Binding public var selection: NavigationTab
     @Binding public var isCollapsed: Bool
     @ObservedObject public var viewModel: TimerViewModel
+    public var topPadding: CGFloat
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isCollapseHovered = false
@@ -61,16 +62,18 @@ public struct SidebarView: View {
         gradient: LinearGradient,
         selection: Binding<NavigationTab>,
         isCollapsed: Binding<Bool> = .constant(false),
-        viewModel: TimerViewModel
+        viewModel: TimerViewModel,
+        topPadding: CGFloat = SidebarTokens.headerTopPadding
     ) {
         self.gradient = gradient
         self._selection = selection
         self._isCollapsed = isCollapsed
         self.viewModel = viewModel
+        self.topPadding = topPadding
     }
 
-    public init(gradient: LinearGradient, selection: Binding<NavigationTab>, viewModel: TimerViewModel) {
-        self.init(gradient: gradient, selection: selection, isCollapsed: .constant(false), viewModel: viewModel)
+    public init(gradient: LinearGradient, selection: Binding<NavigationTab>, viewModel: TimerViewModel, topPadding: CGFloat = SidebarTokens.headerTopPadding) {
+        self.init(gradient: gradient, selection: selection, isCollapsed: .constant(false), viewModel: viewModel, topPadding: topPadding)
     }
 
     private var toggleAnimation: Animation {
@@ -108,7 +111,7 @@ public struct SidebarView: View {
                 }
                 .frame(width: SidebarTokens.collapsedItemWidth, height: 32)
                 .padding(.horizontal, SidebarTokens.horizontalPadding)
-                .padding(.top, SidebarTokens.headerTopPadding)
+                .padding(.top, topPadding)
                 .padding(.bottom, SidebarTokens.headerBottomPadding)
             } else {
                 HStack(spacing: SidebarTokens.itemIconSpacing) {
@@ -138,7 +141,7 @@ public struct SidebarView: View {
                     collapseButton
                 }
                 .padding(.horizontal, SidebarTokens.headerHorizontalPadding)
-                .padding(.top, SidebarTokens.headerTopPadding)
+                .padding(.top, topPadding)
                 .padding(.bottom, SidebarTokens.headerBottomPadding)
             }
         }

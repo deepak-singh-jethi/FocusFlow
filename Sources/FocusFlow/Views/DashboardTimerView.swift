@@ -12,6 +12,8 @@ public struct DashboardTimerView: View {
     public var onSwitchToStopwatch: (() -> Void)? = nil
     public var onSwitchToTimer: (() -> Void)? = nil
 
+    public var topPadding: CGFloat = WindowLayoutMetrics.standardTopClearance
+
     @State private var isPresetHovered = false
     @State private var isFocusHovered = false
     @State private var isBreakHovered = false
@@ -23,6 +25,7 @@ public struct DashboardTimerView: View {
         isFocusState: Binding<Bool>,
         showingWorkspace: Binding<Bool>,
         isStopwatchMode: Bool = false,
+        topPadding: CGFloat = WindowLayoutMetrics.standardTopClearance,
         onSwitchToStopwatch: (() -> Void)? = nil,
         onSwitchToTimer: (() -> Void)? = nil
     ) {
@@ -32,6 +35,7 @@ public struct DashboardTimerView: View {
         self._isFocusState = isFocusState
         self._showingWorkspace = showingWorkspace
         self.isStopwatchMode = isStopwatchMode
+        self.topPadding = topPadding
         self.onSwitchToStopwatch = onSwitchToStopwatch
         self.onSwitchToTimer = onSwitchToTimer
     }
@@ -518,74 +522,79 @@ public struct DashboardTimerView: View {
             let stageMaxWidth: CGFloat = min(availableW - (stageHorizontalMargin * 2), 1160)
 
             // Smooth responsive clock size
-            let rawClockSize = min(availableW * 0.48, availableH * 0.44)
-            let clockSize: CGFloat = max(220, min(rawClockSize, 490))
+            let rawClockSize = min(availableW * 0.44, availableH * 0.40)
+            let clockSize: CGFloat = max(210, min(rawClockSize, 460))
 
-            // Normalized stage height
-            let rawStageHeight = availableH * 0.46
-            let clockStageHeight: CGFloat = max(260, min(rawStageHeight, 520))
+            // Balanced stage height: prevents dead space in tall windows while keeping compact windows usable
+            let digitalStageHeight = max(220, min(availableH * 0.35, 330))
+            let dialStageHeight = max(240, min(clockSize + 28, 440))
+            let clockStageHeight: CGFloat = effectiveClockStyle == "Digital" ? digitalStageHeight : dialStageHeight
 
-            VStack(spacing: isCompact ? 12 : 18) {
-                // 1. Top Header Section
-                headerSection(isCompact: isCompact, stageMaxWidth: stageMaxWidth)
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: isCompact ? 10 : 16) {
+                    // 1. Top Header Section
+                    headerSection(isCompact: isCompact, stageMaxWidth: stageMaxWidth)
 
-                // 2. Persistent Cross-Mode Floating Mini Bar
-                crossModeMiniBarSection(stageMaxWidth: stageMaxWidth)
+                    // 2. Persistent Cross-Mode Floating Mini Bar
+                    crossModeMiniBarSection(stageMaxWidth: stageMaxWidth)
 
-                Spacer(minLength: 4)
+                    Spacer(minLength: isCompact ? 2 : 4)
 
-                // 3. The Focus Stage Card
-                VStack(spacing: isCompact ? 14 : 22) {
-                    stageHeaderSection(
-                        isCompact: isCompact,
-                        showPresetFullTitles: showPresetFullTitles,
-                        showStyleLabels: showStyleLabels,
-                        availableW: availableW
-                    )
+                    // 3. The Focus Stage Card
+                    VStack(spacing: isCompact ? 14 : 22) {
+                        stageHeaderSection(
+                            isCompact: isCompact,
+                            showPresetFullTitles: showPresetFullTitles,
+                            showStyleLabels: showStyleLabels,
+                            availableW: availableW
+                        )
 
-                    ClockFaceView(viewModel: viewModel, style: effectiveClockStyle, size: clockSize, isStopwatch: isStopwatchMode)
-                        .frame(height: clockStageHeight)
-                        .frame(maxWidth: .infinity)
+                        ClockFaceView(viewModel: viewModel, style: effectiveClockStyle, size: clockSize, isStopwatch: isStopwatchMode)
+                            .frame(height: clockStageHeight)
+                            .frame(maxWidth: .infinity)
 
-                    actionDockSection(isCompact: isCompact)
+                        actionDockSection(isCompact: isCompact)
 
-                    if isStopwatchMode {
-                        stopwatchLapsSection(isCompact: isCompact, stageMaxWidth: stageMaxWidth)
+                        if isStopwatchMode {
+                            stopwatchLapsSection(isCompact: isCompact, stageMaxWidth: stageMaxWidth)
+                        }
                     }
-                }
-                .padding(isCompact ? 16 : 24)
-                .frame(maxWidth: stageMaxWidth)
-                .background(
-                    RoundedRectangle(cornerRadius: 22)
-                        .fill(Color.white.opacity(0.02))
-                        .background(
-                            RadialGradient(
-                                colors: [(isStopwatchMode ? Color.cyan : (viewModel.isBreakPreset ? Color.teal : Color.orange)).opacity((isStopwatchMode ? viewModel.isStopwatchRunning : viewModel.isTimerRunning) ? 0.045 : 0.015), Color.clear],
-                                center: .center,
-                                startRadius: 40,
-                                endRadius: 460
+                    .padding(isCompact ? 16 : 24)
+                    .frame(maxWidth: stageMaxWidth)
+                    .background(
+                        RoundedRectangle(cornerRadius: 22)
+                            .fill(Color.white.opacity(0.02))
+                            .background(
+                                RadialGradient(
+                                    colors: [(isStopwatchMode ? Color.cyan : (viewModel.isBreakPreset ? Color.teal : Color.orange)).opacity((isStopwatchMode ? viewModel.isStopwatchRunning : viewModel.isTimerRunning) ? 0.045 : 0.015), Color.clear],
+                                    center: .center,
+                                    startRadius: 40,
+                                    endRadius: 460
+                                )
                             )
-                        )
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 22)
-                        .stroke(
-                            LinearGradient(
-                                colors: [Color.white.opacity(0.11), Color.white.opacity(0.03)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: 1
-                        )
-                )
-                .shadow(color: Color.black.opacity(0.22), radius: 24, y: 10)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 22)
+                            .stroke(
+                                LinearGradient(
+                                    colors: [Color.white.opacity(0.11), Color.white.opacity(0.03)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 1
+                            )
+                    )
+                    .shadow(color: Color.black.opacity(0.22), radius: 24, y: 10)
 
-                Spacer(minLength: 8)
+                    Spacer(minLength: isCompact ? 4 : 8)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: max(0, availableH - topPadding - (isCompact ? 10 : 20)))
+                .padding(.horizontal, stageHorizontalMargin)
+                .padding(.top, topPadding)
+                .padding(.bottom, isCompact ? 10 : 20)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(.horizontal, stageHorizontalMargin)
-            .padding(.top, 52)
-            .padding(.bottom, isCompact ? 10 : 20)
             .animation(.spring(response: 0.38, dampingFraction: 0.88), value: clockSize)
             .animation(.spring(response: 0.38, dampingFraction: 0.88), value: stageMaxWidth)
             .animation(.spring(response: 0.38, dampingFraction: 0.88), value: clockStageHeight)

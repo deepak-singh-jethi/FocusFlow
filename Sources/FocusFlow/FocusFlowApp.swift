@@ -10,6 +10,9 @@ public final class FocusFlowAppDelegate: NSObject, NSApplicationDelegate, NSWind
     public let audioPlayer = AmbientAudioPlayer()
     public var mainWindow: NSWindow?
 
+    /// Tracks whether the main window is currently in native macOS Full Screen mode
+    @Published public var isFullScreen: Bool = false
+
     /// Tracks whether a close request was received while the window was in native macOS Full Screen mode
     public private(set) var isPendingCloseAfterFullScreenExit: Bool = false
 
@@ -68,7 +71,12 @@ public final class FocusFlowAppDelegate: NSObject, NSApplicationDelegate, NSWind
         return false
     }
 
+    public func windowDidEnterFullScreen(_ notification: Notification) {
+        isFullScreen = true
+    }
+
     public func windowDidExitFullScreen(_ notification: Notification) {
+        isFullScreen = false
         guard let window = (notification.object as? NSWindow) ?? mainWindow else { return }
         if isPendingCloseAfterFullScreenExit {
             isPendingCloseAfterFullScreenExit = false
