@@ -584,7 +584,8 @@ public struct DashboardTimerView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding(.horizontal, stageHorizontalMargin)
-            .padding(.vertical, isCompact ? 10 : 20)
+            .padding(.top, 52)
+            .padding(.bottom, isCompact ? 10 : 20)
             .animation(.spring(response: 0.38, dampingFraction: 0.88), value: clockSize)
             .animation(.spring(response: 0.38, dampingFraction: 0.88), value: stageMaxWidth)
             .animation(.spring(response: 0.38, dampingFraction: 0.88), value: clockStageHeight)

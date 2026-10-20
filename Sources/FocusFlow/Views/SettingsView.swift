@@ -19,7 +19,7 @@ public struct SettingsView: View {
                         .font(.system(size: 13))
                         .foregroundColor(.gray)
                 }
-                .padding(.top, 20)
+                .padding(.top, 52)
 
                 VStack(spacing: 0) {
                     HStack {

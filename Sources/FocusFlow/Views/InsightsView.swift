@@ -36,7 +36,7 @@ public struct InsightsView: View {
                         .font(.system(size: 13))
                         .foregroundColor(.gray)
                 }
-                .padding(.top, 20)
+                .padding(.top, 52)
 
                 // Date-Aware Analytics Metric Cards
                 HStack(spacing: 12) {

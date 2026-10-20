@@ -82,7 +82,7 @@ public struct ContentView: View {
                                         }
                                     }
                                     .padding(.horizontal, 24)
-                                    .padding(.top, 14)
+                                    .padding(.top, 40)
                                     .padding(.bottom, 6)
                                     .transition(.move(edge: .top).combined(with: .opacity))
                                 }
@@ -95,7 +95,7 @@ public struct ContentView: View {
                                         }
                                     }
                                     .padding(.horizontal, 24)
-                                    .padding(.top, (viewModel.isTimerRunning || viewModel.timeRemaining < viewModel.totalTime || viewModel.hasPreservedSession) ? 4 : 14)
+                                    .padding(.top, (viewModel.isTimerRunning || viewModel.timeRemaining < viewModel.totalTime || viewModel.hasPreservedSession) ? 4 : 40)
                                     .padding(.bottom, 6)
                                     .transition(.move(edge: .top).combined(with: .opacity))
                                 }

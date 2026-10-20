@@ -25,7 +25,7 @@ public struct SoundscapesView: View {
                         .font(.system(size: 13))
                         .foregroundColor(.gray)
                 }
-                .padding(.top, 20)
+                .padding(.top, 52)
 
                 HStack(spacing: 12) {
                     ForEach(sounds, id: \.0) { sound, icon, detail in

@@ -21161,7 +21161,7 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(SidebarTokens.sidebarWidth, 252)
         XCTAssertEqual(SidebarTokens.horizontalPadding, 12)
         XCTAssertEqual(SidebarTokens.headerHorizontalPadding, 16)
-        XCTAssertEqual(SidebarTokens.headerTopPadding, 20)
+        XCTAssertEqual(SidebarTokens.headerTopPadding, 52)
         XCTAssertEqual(SidebarTokens.headerBottomPadding, 16)
         XCTAssertEqual(SidebarTokens.sectionSpacing, 6)
         XCTAssertEqual(SidebarTokens.itemSpacing, 3)
@@ -21567,9 +21567,9 @@ final class FocusFlowTests: XCTestCase {
 
     @MainActor
     func testSidebar_TitlebarClearanceIntegrity() {
-        // Verify that SidebarTokens.headerTopPadding provides sufficient breathing room (20pt)
-        // below the titlebar safe area so brand identity and collapse controls do not collide with traffic lights
-        XCTAssertEqual(SidebarTokens.headerTopPadding, 20, "headerTopPadding must be 20pt")
+        // Verify that SidebarTokens.headerTopPadding provides complete titlebar clearance (52pt = 32pt titlebar + 20pt breathing room)
+        // so brand identity and collapse controls sit comfortably below the native traffic lights
+        XCTAssertEqual(SidebarTokens.headerTopPadding, 52, "headerTopPadding must be 52pt for complete traffic light clearance")
         XCTAssertEqual(SidebarTokens.headerBottomPadding, 16, "headerBottomPadding must be 16pt")
         XCTAssertEqual(SidebarTokens.sidebarWidth, 252, "Expanded sidebar width must be 252pt")
         XCTAssertEqual(SidebarTokens.collapsedWidth, 68, "Collapsed sidebar width must be 68pt")
