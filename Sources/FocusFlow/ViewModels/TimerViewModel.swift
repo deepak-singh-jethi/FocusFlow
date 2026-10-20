@@ -127,6 +127,16 @@ public class TimerViewModel: ObservableObject {
     @Published public var lifetimeFocusedSeconds: Int = 0
     @Published public var focusedSeconds: Int = 0 // Maintained for backward compatibility with existing views
 
+    public var pendingFocusSeconds: Int {
+        idleReviewCoordinator.pendingIntervals
+            .filter { $0.status == .pending }
+            .reduce(0) { $0 + $1.eligibleDurationSeconds }
+    }
+
+    // Excluded intervals for active or deferred sessions awaiting finalization
+    internal var sessionExcludedIntervals: [UUID: [IdleReviewInterval]] = [:]
+    internal var resolvedIntervalIds: Set<UUID> = []
+
     // Wall-clock segment tracking (prevents duplicate counting on pause/resume/tick)
     internal var sessionSegmentStartDate: Date?
     internal var segmentCreditedSeconds: Int = 0
@@ -593,6 +603,9 @@ public class TimerViewModel: ObservableObject {
             guard let self = self else { return }
             self.handleIdleReviewResolution(interval: interval, decision: decision)
         }
+        idleReviewCoordinator.onIntervalCreated = { [weak self] interval in
+            self?.handleIdleIntervalCreated(&interval)
+        }
         idleReviewCoordinator.objectWillChange
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
@@ -657,7 +670,7 @@ public class TimerViewModel: ObservableObject {
 
         if isTimerRunning {
             stopTimer(at: now)
-        } else {
+        } else if !isDeferredCompletionPending {
             recordActiveSessionSegment(at: now)
         }
 
@@ -952,6 +965,7 @@ public class TimerViewModel: ObservableObject {
                     if !isAlreadyRecorded && credited > 0 {
                         let record = FocusSessionRecord(
                             id: recovery.timerSessionId,
+                            sessionId: recovery.timerSessionId,
                             startTime: startTime,
                             endTime: validEnd,
                             durationSeconds: credited,
@@ -1040,6 +1054,7 @@ public class TimerViewModel: ObservableObject {
                     if !isAlreadyRecorded {
                         let record = FocusSessionRecord(
                             id: recovery.timerSessionId,
+                            sessionId: recovery.timerSessionId,
                             startTime: startTime,
                             endTime: boundedEnd,
                             durationSeconds: credited,
@@ -1300,8 +1315,9 @@ public class TimerViewModel: ObservableObject {
             currentSelectedTaskId = nil
         }
 
+        let shouldPersistRecovery = isDeferredCompletionPending || ((isTimerRunning || isStopwatchRunning) && !hasTerminated)
         let recoveryState: ActiveSessionRecoveryState?
-        if (isTimerRunning || isStopwatchRunning || isDeferredCompletionPending) && !hasTerminated {
+        if shouldPersistRecovery {
             let activeSwTaskId: UUID?
             if isStopwatchRunning && tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted {
                 activeSwTaskId = tasks[activeTaskIndex].id
@@ -1705,6 +1721,7 @@ public class TimerViewModel: ObservableObject {
 
         if isFocusPreset {
             let record = FocusSessionRecord(
+                sessionId: activeTimerSessionId,
                 startTime: start,
                 endTime: boundedEnd,
                 durationSeconds: elapsed,
@@ -2950,69 +2967,129 @@ public class TimerViewModel: ObservableObject {
         }
     }
 
+    public func handleIdleIntervalCreated(_ interval: inout IdleReviewInterval) {
+        guard !interval.isProvisionalCreditDeducted else { return }
+        interval.isProvisionalCreditDeducted = true
+        let seconds = interval.eligibleDurationSeconds
+        guard seconds > 0 else { return }
+
+        if let taskId = interval.taskId {
+            deductTaskTime(taskId: taskId, seconds: seconds)
+        }
+        if isTimerRunning && isFocusPreset && activeTimerSessionId == interval.sessionId {
+            segmentCreditedSeconds = max(0, segmentCreditedSeconds - seconds)
+        }
+        if isDeferredCompletionPending && (deferredCompletionSessionId == interval.sessionId || activeTimerSessionId == interval.sessionId) {
+            deferredCompletionSegmentCreditedSeconds = max(0, deferredCompletionSegmentCreditedSeconds - seconds)
+        }
+        recalculateFocusMetrics(now: currentDateProvider())
+        persistData()
+    }
+
     public func handleIdleReviewResolution(interval: IdleReviewInterval, decision: IdleReviewDecision) {
         let now = currentDateProvider()
+        let targetSessionId = interval.sessionId
 
         switch decision {
         case .countAsFocus:
-            if isDeferredCompletionPending {
+            guard !resolvedIntervalIds.contains(interval.id) else { return }
+            resolvedIntervalIds.insert(interval.id)
+
+            // If credit was provisionally deducted, restore it to confirmed focus
+            if interval.isProvisionalCreditDeducted {
+                if let taskId = interval.taskId {
+                    creditTaskTime(taskId: taskId, seconds: interval.eligibleDurationSeconds)
+                }
+                if isTimerRunning && isFocusPreset && activeTimerSessionId == interval.sessionId {
+                    segmentCreditedSeconds += interval.eligibleDurationSeconds
+                }
+                if isDeferredCompletionPending && (deferredCompletionSessionId == interval.sessionId || activeTimerSessionId == interval.sessionId) {
+                    deferredCompletionSegmentCreditedSeconds += interval.eligibleDurationSeconds
+                }
+            }
+
+            recalculateFocusMetrics(now: now)
+
+            // Check if there are other pending reviews for this session
+            let remainingPendingForSession = idleReviewCoordinator.pendingIntervals.contains { $0.sessionId == targetSessionId && $0.id != interval.id }
+            if isDeferredCompletionPending && !remainingPendingForSession && (deferredCompletionSessionId == targetSessionId || activeTimerSessionId == targetSessionId) {
                 finalizeDeferredSession(decision: .countAsFocus)
             } else {
-                persistData()
+                persistData(force: true)
             }
 
         case .excludeFromFocus:
+            guard !resolvedIntervalIds.contains(interval.id) else { return }
+            resolvedIntervalIds.insert(interval.id)
+
             let deduction = interval.eligibleDurationSeconds
 
-            if isDeferredCompletionPending {
-                if let taskId = deferredCompletionTaskId {
-                    deductTaskTime(taskId: taskId, seconds: deduction)
-                }
-                deferredCompletionSegmentCreditedSeconds = max(0, deferredCompletionSegmentCreditedSeconds - deduction)
-                finalizeDeferredSession(decision: .excludeFromFocus)
-            } else {
-                if let taskId = interval.taskId {
-                    deductTaskTime(taskId: taskId, seconds: deduction)
-                }
-                if isTimerRunning && isFocusPreset && activeTimerSessionId == interval.sessionId {
-                    if let start = sessionSegmentStartDate {
-                        let timeBeforeIdle = max(0, Int(interval.startTime.timeIntervalSince(start)))
-                        if timeBeforeIdle > 0 {
-                            let preRecord = FocusSessionRecord(
-                                startTime: start,
-                                endTime: interval.startTime,
-                                durationSeconds: timeBeforeIdle,
-                                mode: activePreset,
-                                taskId: activeSessionTaskId
-                            )
-                            sessionRecords.append(preRecord)
-                        }
-                        sessionSegmentStartDate = interval.endTime
-                        segmentCreditedSeconds = max(0, segmentCreditedSeconds - deduction - timeBeforeIdle)
-                    } else {
+            // If credit was not deducted yet (legacy/injected interval), deduct now
+            if !interval.isProvisionalCreditDeducted {
+                if isDeferredCompletionPending && (deferredCompletionSessionId == targetSessionId || activeTimerSessionId == targetSessionId) {
+                    if let taskId = deferredCompletionTaskId {
+                        deductTaskTime(taskId: taskId, seconds: deduction)
+                    }
+                    deferredCompletionSegmentCreditedSeconds = max(0, deferredCompletionSegmentCreditedSeconds - deduction)
+                } else {
+                    if let taskId = interval.taskId {
+                        deductTaskTime(taskId: taskId, seconds: deduction)
+                    }
+                    if isTimerRunning && isFocusPreset && activeTimerSessionId == interval.sessionId {
                         segmentCreditedSeconds = max(0, segmentCreditedSeconds - deduction)
                     }
                 }
-                reconcileSessionRecordsExcluding(interval: interval)
-                recalculateFocusMetrics(now: now)
-                persistData()
+            }
+
+            // Track exclusion for this session
+            sessionExcludedIntervals[targetSessionId, default: []].append(interval)
+
+            if isTimerRunning && isFocusPreset && activeTimerSessionId == interval.sessionId {
+                if let start = sessionSegmentStartDate {
+                    let timeBeforeIdle = max(0, Int(interval.startTime.timeIntervalSince(start)))
+                    if timeBeforeIdle > 0 {
+                        let preRecord = FocusSessionRecord(
+                            sessionId: activeTimerSessionId,
+                            startTime: start,
+                            endTime: interval.startTime,
+                            durationSeconds: timeBeforeIdle,
+                            mode: activePreset,
+                            taskId: activeSessionTaskId
+                        )
+                        sessionRecords.append(preRecord)
+                    }
+                    sessionSegmentStartDate = interval.endTime
+                    segmentCreditedSeconds = max(0, segmentCreditedSeconds - timeBeforeIdle)
+                }
+            }
+
+            // Reconcile existing session records (session-scoped)
+            reconcileSessionRecordsExcluding(interval: interval)
+            recalculateFocusMetrics(now: now)
+
+            // Check if there are other pending reviews for this session
+            let remainingPendingForSession = idleReviewCoordinator.pendingIntervals.contains { $0.sessionId == targetSessionId && $0.id != interval.id }
+            if isDeferredCompletionPending && !remainingPendingForSession && (deferredCompletionSessionId == targetSessionId || activeTimerSessionId == targetSessionId) {
+                finalizeDeferredSession(decision: .excludeFromFocus)
+            } else {
+                persistData(force: true)
             }
 
         case .decideLater:
-            if isDeferredCompletionPending {
-                finalizeDeferredSession(decision: .decideLater)
-            } else {
-                persistData()
-            }
+            // Crucial: Decide Later must NEVER finalize deferred completion.
+            // Pending time remains in queue; confirmed time remains without provisional credit.
+            persistData(force: true)
         }
     }
 
     internal func finalizeDeferredSession(decision: IdleReviewDecision) {
         guard isDeferredCompletionPending else { return }
+        guard decision != .decideLater else { return }
+
         let now = currentDateProvider()
         let deadline = deferredCompletionTargetEndDate ?? now
         let sessionStart = deferredCompletionSegmentStartDate ?? deadline
-        let creditedTotal = deferredCompletionSegmentCreditedSeconds
+        let sessId = deferredCompletionSessionId ?? activeTimerSessionId
         let taskId = deferredCompletionTaskId
         let preset = activePreset
         let isBreak = isBreakPreset
@@ -3024,25 +3101,39 @@ public class TimerViewModel: ObservableObject {
         deferredCompletionSegmentStartDate = nil
         deferredCompletionSegmentCreditedSeconds = 0
 
-        // Native notification and completion sound
-        NotificationService.shared.sendSessionCompleteNotification(presetName: preset, isBreak: isBreak)
-        if let chime = NSSound(named: NSSound.Name("Glass")) {
-            chime.play()
-        } else {
-            NSSound.beep()
+        // Fix 5: Suppress delayed completion sound and notification if resolved long after deadline (>60s)
+        let secondsSinceDeadline = now.timeIntervalSince(deadline)
+        if secondsSinceDeadline <= 60.0 {
+            NotificationService.shared.sendSessionCompleteNotification(presetName: preset, isBreak: isBreak)
+            if let chime = NSSound(named: NSSound.Name("Glass")) {
+                chime.play()
+            } else {
+                NSSound.beep()
+            }
         }
 
         if !isBreak {
-            if creditedTotal > 0 {
-                let boundedEnd = min(now, sessionStart.addingTimeInterval(Double(creditedTotal)))
-                let record = FocusSessionRecord(
+            let totalSessionSeconds = max(0, Int(deadline.timeIntervalSince(sessionStart)))
+            if totalSessionSeconds > 0 {
+                let baseRecord = FocusSessionRecord(
+                    id: sessId,
+                    sessionId: sessId,
                     startTime: sessionStart,
-                    endTime: max(sessionStart, boundedEnd),
-                    durationSeconds: creditedTotal,
+                    endTime: deadline,
+                    durationSeconds: totalSessionSeconds,
                     mode: preset,
                     taskId: taskId
                 )
-                sessionRecords.append(record)
+                sessionRecords.append(baseRecord)
+
+                // Apply any excluded intervals for this session to accurately split the record into true wall-clock intervals
+                if let exclusions = sessionExcludedIntervals[sessId] {
+                    for exc in exclusions {
+                        reconcileSessionRecordsExcluding(interval: exc)
+                    }
+                    sessionExcludedIntervals.removeValue(forKey: sessId)
+                }
+
                 recalculateFocusMetrics(now: now)
             }
 
@@ -3057,7 +3148,7 @@ public class TimerViewModel: ObservableObject {
             }
 
             applyPresetDirectly(name: nextBreakPreset, minutes: nextBreakMinutes, mode: "Pomodoro", isBreak: true)
-            persistData()
+            persistData(force: true)
             if autoStartNextSession && !hasTerminated {
                 startTimer(at: now)
             }
@@ -3069,7 +3160,7 @@ public class TimerViewModel: ObservableObject {
                 preservedSession = nil
             }
             applyPresetDirectly(name: "Focus", minutes: 25, mode: "Pomodoro", isBreak: false)
-            persistData()
+            persistData(force: true)
             if autoStartNextSession && !hasTerminated {
                 startTimer(at: now)
             }
@@ -3081,6 +3172,20 @@ public class TimerViewModel: ObservableObject {
         var didModify = false
 
         for record in sessionRecords {
+            // Invariant: An idle interval can affect only its owning session.
+            let isMatchingSession: Bool
+            if let recSessionId = record.sessionId {
+                isMatchingSession = (recSessionId == interval.sessionId)
+            } else {
+                // Historical legacy record without sessionId: only match if record.id matches interval.sessionId
+                isMatchingSession = (record.id == interval.sessionId)
+            }
+
+            guard isMatchingSession else {
+                newRecords.append(record)
+                continue
+            }
+
             let overlapStart = max(record.startTime, interval.startTime)
             let overlapEnd = min(record.endTime, interval.endTime)
 
@@ -3090,46 +3195,67 @@ public class TimerViewModel: ObservableObject {
             }
 
             didModify = true
-            let idleSecs = Int(overlapEnd.timeIntervalSince(overlapStart))
-            let beforeDuration = Int(overlapStart.timeIntervalSince(record.startTime))
-            let afterDuration = Int(record.endTime.timeIntervalSince(overlapEnd))
 
-            if beforeDuration > 0 && afterDuration > 0 {
+            // Allocate duration across the three partitions:
+            // 1. [record.startTime, overlapStart] (left / before idle)
+            // 2. [overlapStart, overlapEnd] (excluded idle)
+            // 3. [overlapEnd, record.endTime] (right / after idle)
+            // Using FocusIntervalAllocator to strictly guarantee exact integer conservation and zero drift
+            let leftDuration = FocusIntervalAllocator.allocatedDuration(
+                recordStart: record.startTime,
+                recordEnd: record.endTime,
+                durationSeconds: record.durationSeconds,
+                intervalStart: record.startTime,
+                intervalEnd: overlapStart
+            )
+            let idleDuration = FocusIntervalAllocator.allocatedDuration(
+                recordStart: record.startTime,
+                recordEnd: record.endTime,
+                durationSeconds: record.durationSeconds,
+                intervalStart: overlapStart,
+                intervalEnd: overlapEnd
+            )
+            let rightDuration = max(0, record.durationSeconds - leftDuration - idleDuration)
+
+            if leftDuration > 0 && rightDuration > 0 {
                 let r1 = FocusSessionRecord(
                     id: UUID(),
+                    sessionId: record.sessionId,
                     startTime: record.startTime,
                     endTime: overlapStart,
-                    durationSeconds: min(record.durationSeconds, beforeDuration),
+                    durationSeconds: leftDuration,
                     mode: record.mode,
                     taskId: record.taskId
                 )
-                let remainingDur = max(0, record.durationSeconds - beforeDuration - idleSecs)
                 let r2 = FocusSessionRecord(
                     id: UUID(),
+                    sessionId: record.sessionId,
                     startTime: overlapEnd,
                     endTime: record.endTime,
-                    durationSeconds: min(remainingDur, afterDuration),
+                    durationSeconds: rightDuration,
                     mode: record.mode,
                     taskId: record.taskId
                 )
                 newRecords.append(r1)
                 newRecords.append(r2)
-            } else if beforeDuration > 0 {
+            } else if leftDuration > 0 {
                 let truncated = FocusSessionRecord(
                     id: record.id,
+                    sessionId: record.sessionId,
                     startTime: record.startTime,
                     endTime: overlapStart,
-                    durationSeconds: max(0, min(record.durationSeconds - idleSecs, beforeDuration)),
+                    durationSeconds: leftDuration,
                     mode: record.mode,
                     taskId: record.taskId
                 )
                 newRecords.append(truncated)
-            } else if afterDuration > 0 {
+            } else if rightDuration > 0 {
                 let truncated = FocusSessionRecord(
                     id: record.id,
+                    sessionId: record.sessionId,
                     startTime: overlapEnd,
                     endTime: record.endTime,
-                    durationSeconds: max(0, min(record.durationSeconds - idleSecs, afterDuration)),
+                    durationSeconds: rightDuration,
                     mode: record.mode,
                     taskId: record.taskId
                 )

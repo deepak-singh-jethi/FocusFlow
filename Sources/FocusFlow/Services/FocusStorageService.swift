@@ -3,6 +3,7 @@ import Foundation
 // MARK: - Focus Session Record (Date-Aware Analytics)
 public struct FocusSessionRecord: Codable, Identifiable, Equatable {
     public let id: UUID
+    public let sessionId: UUID?
     public let startTime: Date
     public let endTime: Date
     public let durationSeconds: Int
@@ -11,6 +12,7 @@ public struct FocusSessionRecord: Codable, Identifiable, Equatable {
 
     public init(
         id: UUID = UUID(),
+        sessionId: UUID? = nil,
         startTime: Date,
         endTime: Date,
         durationSeconds: Int,
@@ -18,6 +20,7 @@ public struct FocusSessionRecord: Codable, Identifiable, Equatable {
         taskId: UUID? = nil
     ) {
         self.id = id
+        self.sessionId = sessionId
         self.startTime = startTime
         self.endTime = endTime
         self.durationSeconds = max(0, durationSeconds)

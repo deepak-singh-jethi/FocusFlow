@@ -18430,7 +18430,7 @@ final class FocusFlowTests: XCTestCase {
         currentTime = currentTime.addingTimeInterval(600)
         vm.reconcileActiveTimers(at: currentTime)
 
-        let idleInterval = IdleReviewInterval(
+        var idleInterval = IdleReviewInterval(
             sessionId: vm.activeTimerSessionId,
             sessionType: "Focus",
             taskId: taskId,
@@ -18439,16 +18439,19 @@ final class FocusFlowTests: XCTestCase {
             eligibleDurationSeconds: 420,
             status: .pending
         )
+        vm.handleIdleIntervalCreated(&idleInterval)
         coordinator.pendingIntervals.append(idleInterval)
         coordinator.openReview(for: idleInterval)
         XCTAssertNotNil(coordinator.activeReviewInterval)
 
         coordinator.resolve(intervalId: idleInterval.id, decision: .decideLater, at: currentTime)
 
-        // Modal dismissed, but interval remains in queue
+        // Modal dismissed, but interval remains in queue as pending time (not confirmed)
         XCTAssertNil(coordinator.activeReviewInterval)
         XCTAssertEqual(coordinator.pendingIntervals.count, 1)
-        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 600)
+        // Confirmed time excludes unresolved idle time: 600 - 420 = 180s
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 180)
+        XCTAssertEqual(coordinator.pendingIntervals.first?.eligibleDurationSeconds, 420)
     }
 
     @MainActor
@@ -18910,6 +18913,863 @@ final class FocusFlowTests: XCTestCase {
         coordinator.openReview(for: interval)
         XCTAssertEqual(coordinator.activeReviewInterval?.id, id1)
         XCTAssertEqual(coordinator.state, .reviewing(intervalId: id1))
+    }
+
+    // MARK: - Task 9 Critical Patch Regression Tests (Part G Scenarios 1-25)
+
+    // Scenario 1: Deferred session survives graceful app termination
+    @MainActor
+    func testTask9_Patch01_DeferredSessionSurvivesGracefulQuit() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_p1_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.startTimer(at: currentTime)
+
+        // Expire during inactivity
+        currentTime = currentTime.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+
+        // User returns
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1)
+
+        // Graceful quit
+        vm.handleAppTermination()
+
+        // Relaunch
+        let vm2 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm2.loadPersistedData()
+
+        XCTAssertTrue(vm2.isDeferredCompletionPending)
+        XCTAssertEqual(vm2.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vm2.timeRemaining, 0)
+        XCTAssertEqual(vm2.completedSessions, 0)
+        XCTAssertTrue(vm2.sessionRecords.isEmpty)
+    }
+
+    // Scenario 2: Deferred session survives force-quit
+    @MainActor
+    func testTask9_Patch02_DeferredSessionSurvivesForceQuit() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_p2_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        vm.persistData(force: true)
+
+        // Drop vm without calling handleAppTermination (simulating crash / kill)
+        let vm2 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm2.loadPersistedData()
+
+        XCTAssertTrue(vm2.isDeferredCompletionPending)
+        XCTAssertEqual(vm2.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vm2.timeRemaining, 0)
+    }
+
+    // Scenario 3: Same review ID survives relaunch
+    @MainActor
+    func testTask9_Patch03_SameReviewIDSurvivesRelaunch() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_p3_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        guard let originalInterval = vm.idleReviewCoordinator.pendingIntervals.first else {
+            XCTFail("Missing pending interval")
+            return
+        }
+        let originalId = originalInterval.id
+        let originalSessionId = originalInterval.sessionId
+
+        vm.handleAppTermination()
+
+        let vm2 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm2.loadPersistedData()
+
+        XCTAssertEqual(vm2.idleReviewCoordinator.pendingIntervals.first?.id, originalId)
+        XCTAssertEqual(vm2.idleReviewCoordinator.pendingIntervals.first?.sessionId, originalSessionId)
+    }
+
+    // Scenario 4: No duplicate record after recovery
+    @MainActor
+    func testTask9_Patch04_NoDuplicateRecordAfterRecovery() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_p4_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        vm.handleAppTermination()
+
+        let vm2 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm2.loadPersistedData()
+
+        if let interval = vm2.idleReviewCoordinator.pendingIntervals.first {
+            vm2.idleReviewCoordinator.resolve(intervalId: interval.id, decision: .countAsFocus, at: currentTime)
+        }
+
+        XCTAssertEqual(vm2.completedSessions, 1)
+        XCTAssertEqual(vm2.sessionRecords.count, 1)
+
+        vm2.handleAppTermination()
+
+        let vm3 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm3.loadPersistedData()
+
+        XCTAssertEqual(vm3.completedSessions, 1)
+        XCTAssertEqual(vm3.sessionRecords.count, 1)
+    }
+
+    // Scenario 5: Resolved decision survives crash immediately after saving
+    @MainActor
+    func testTask9_Patch05_ResolvedDecisionSurvivesCrashImmediatelyAfterSaving() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_p5_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        guard let interval = vm.idleReviewCoordinator.pendingIntervals.first else {
+            XCTFail("Missing interval")
+            return
+        }
+
+        vm.idleReviewCoordinator.resolve(intervalId: interval.id, decision: .excludeFromFocus, at: currentTime)
+        XCTAssertFalse(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords.first?.durationSeconds, 900)
+
+        // Drop instance without handleAppTermination
+        let vm2 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm2.loadPersistedData()
+
+        XCTAssertFalse(vm2.isDeferredCompletionPending)
+        XCTAssertTrue(vm2.idleReviewCoordinator.pendingIntervals.isEmpty)
+        XCTAssertEqual(vm2.sessionRecords.count, 1)
+        XCTAssertEqual(vm2.sessionRecords.first?.durationSeconds, 900)
+    }
+
+    // Scenario 6: Idle exclusion does not modify another overlapping session
+    @MainActor
+    func testTask9_Patch06_IdleExclusionDoesNotModifyOverlappingSession() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let sessionAId = UUID()
+        let sessionBId = UUID()
+
+        let baseTime = Date(timeIntervalSince1970: 1700000000)
+        let recordA = FocusSessionRecord(
+            id: UUID(),
+            sessionId: sessionAId,
+            startTime: baseTime,
+            endTime: baseTime.addingTimeInterval(1500),
+            durationSeconds: 1500,
+            mode: "Focus"
+        )
+        let recordB = FocusSessionRecord(
+            id: UUID(),
+            sessionId: sessionBId,
+            startTime: baseTime.addingTimeInterval(600),
+            endTime: baseTime.addingTimeInterval(1800),
+            durationSeconds: 1200,
+            mode: "Focus"
+        )
+        vm.sessionRecords = [recordA, recordB]
+
+        // Idle interval strictly belonging to Session A
+        let idleIntervalA = IdleReviewInterval(
+            sessionId: sessionAId,
+            sessionType: "Focus",
+            taskId: nil,
+            startTime: baseTime.addingTimeInterval(420),
+            endTime: baseTime.addingTimeInterval(960),
+            eligibleDurationSeconds: 540,
+            status: .pending
+        )
+
+        vm.reconcileSessionRecordsExcluding(interval: idleIntervalA)
+
+        // Session B record must be completely intact and unmodified!
+        let survivingB = vm.sessionRecords.first { $0.sessionId == sessionBId }
+        XCTAssertNotNil(survivingB)
+        XCTAssertEqual(survivingB?.durationSeconds, 1200)
+        XCTAssertEqual(survivingB?.startTime, baseTime.addingTimeInterval(600))
+        XCTAssertEqual(survivingB?.endTime, baseTime.addingTimeInterval(1800))
+
+        // Session A must be split
+        let survivingA = vm.sessionRecords.filter { $0.sessionId == sessionAId }
+        XCTAssertEqual(survivingA.count, 2)
+        XCTAssertEqual(survivingA.reduce(0) { $0 + $1.durationSeconds }, 960)
+    }
+
+    // Scenario 7: Previously split records maintain exact conservation
+    @MainActor
+    func testTask9_Patch07_PreviouslySplitRecordsMaintainExactConservation() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let sessId = UUID()
+        let baseTime = Date(timeIntervalSince1970: 1700000000)
+        // Adjusted record: spans 600 wall-clock seconds but duration is 400s
+        let adjustedRecord = FocusSessionRecord(
+            id: UUID(),
+            sessionId: sessId,
+            startTime: baseTime,
+            endTime: baseTime.addingTimeInterval(600),
+            durationSeconds: 400,
+            mode: "Focus"
+        )
+        vm.sessionRecords = [adjustedRecord]
+
+        // Idle interval overlapping 120 wall-clock seconds (from 240 to 360)
+        let interval = IdleReviewInterval(
+            sessionId: sessId,
+            sessionType: "Focus",
+            taskId: nil,
+            startTime: baseTime.addingTimeInterval(240),
+            endTime: baseTime.addingTimeInterval(360),
+            eligibleDurationSeconds: 120,
+            status: .pending
+        )
+
+        vm.reconcileSessionRecordsExcluding(interval: interval)
+
+        let remainingDuration = vm.sessionRecords.reduce(0) { $0 + $1.durationSeconds }
+        let allocatedExcluded = FocusIntervalAllocator.allocatedDuration(
+            recordStart: baseTime,
+            recordEnd: baseTime.addingTimeInterval(600),
+            durationSeconds: 400,
+            intervalStart: baseTime.addingTimeInterval(240),
+            intervalEnd: baseTime.addingTimeInterval(360)
+        )
+        // Conservation invariant: remaining + allocatedExcluded == 400
+        XCTAssertEqual(remainingDuration + allocatedExcluded, 400)
+        XCTAssertEqual(remainingDuration, 320)
+        XCTAssertEqual(allocatedExcluded, 80)
+    }
+
+    // Scenario 8: Task time cannot go negative
+    @MainActor
+    func testTask9_Patch08_TaskTimeCannotGoNegative() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let taskId = vm.tasks[0].id
+        vm.tasks[0].timeSpentSeconds = 100
+
+        vm.deductTaskTime(taskId: taskId, seconds: 500)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 0)
+    }
+
+    // Scenario 9: Pending time is not included in confirmed focus totals
+    @MainActor
+    func testTask9_Patch09_PendingTimeNotIncludedInConfirmedFocusTotals() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        currentTime = currentTime.addingTimeInterval(1200) // 20m elapsed
+        vm.reconcileActiveTimers(at: currentTime)
+
+        var idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-420),
+            endTime: currentTime,
+            eligibleDurationSeconds: 420, // 7m idle
+            status: .pending
+        )
+        vm.handleIdleIntervalCreated(&idleInterval)
+        vm.idleReviewCoordinator.pendingIntervals.append(idleInterval)
+
+        XCTAssertEqual(vm.pendingFocusSeconds, 420)
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 780) // 13m confirmed
+    }
+
+    // Scenario 10: Include moves pending credit into confirmed exactly once
+    @MainActor
+    func testTask9_Patch10_IncludeMovesPendingCreditIntoConfirmedExactlyOnce() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        currentTime = currentTime.addingTimeInterval(1200)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        var idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-420),
+            endTime: currentTime,
+            eligibleDurationSeconds: 420,
+            status: .pending
+        )
+        vm.handleIdleIntervalCreated(&idleInterval)
+        vm.idleReviewCoordinator.pendingIntervals.append(idleInterval)
+
+        vm.idleReviewCoordinator.resolve(intervalId: idleInterval.id, decision: .countAsFocus, at: currentTime)
+
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 1200)
+        XCTAssertEqual(vm.pendingFocusSeconds, 0)
+
+        // Idempotent: repeated resolution does not increase confirmed time
+        vm.handleIdleReviewResolution(interval: idleInterval, decision: .countAsFocus)
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 1200)
+    }
+
+    // Scenario 11: Exclude removes only eligible credit
+    @MainActor
+    func testTask9_Patch11_ExcludeRemovesOnlyEligibleCredit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        currentTime = currentTime.addingTimeInterval(1200)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        var idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-420),
+            endTime: currentTime,
+            eligibleDurationSeconds: 420,
+            status: .pending
+        )
+        vm.handleIdleIntervalCreated(&idleInterval)
+        vm.idleReviewCoordinator.pendingIntervals.append(idleInterval)
+
+        vm.idleReviewCoordinator.resolve(intervalId: idleInterval.id, decision: .excludeFromFocus, at: currentTime)
+
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 780)
+        XCTAssertEqual(vm.pendingFocusSeconds, 0)
+    }
+
+    // Scenario 12: Repeated resolution does not change totals
+    @MainActor
+    func testTask9_Patch12_RepeatedResolutionDoesNotChangeTotals() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let taskId = vm.tasks[0].id
+        vm.tasks[0].timeSpentSeconds = 600
+
+        let interval = IdleReviewInterval(
+            sessionId: UUID(),
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: Date().addingTimeInterval(-300),
+            endTime: Date(),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: false
+        )
+
+        vm.handleIdleReviewResolution(interval: interval, decision: .excludeFromFocus)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 300)
+
+        // Second call with marked deducted interval
+        var deducted = interval
+        deducted.isProvisionalCreditDeducted = true
+        vm.handleIdleReviewResolution(interval: deducted, decision: .excludeFromFocus)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 300)
+    }
+
+    // Scenario 13: Correct credit distribution across midnight
+    @MainActor
+    func testTask9_Patch13_CorrectCreditDistributionAcrossMidnight() {
+        let cal = Calendar.current
+        var components = DateComponents()
+        components.year = 2026
+        components.month = 10
+        components.day = 20
+        components.hour = 23
+        components.minute = 45
+        components.second = 0
+        guard let startMidnight = cal.date(from: components),
+              let endMidnight = cal.date(byAdding: .minute, value: 30, to: startMidnight) else {
+            XCTFail("Failed to create midnight dates")
+            return
+        }
+
+        let sessId = UUID()
+        let record = FocusSessionRecord(
+            id: UUID(),
+            sessionId: sessId,
+            startTime: startMidnight,
+            endTime: endMidnight,
+            durationSeconds: 1800,
+            mode: "Focus"
+        )
+
+        let idleStart = startMidnight.addingTimeInterval(600) // 23:55
+        let idleEnd = startMidnight.addingTimeInterval(1200)  // 00:05
+        let idle = IdleReviewInterval(
+            sessionId: sessId,
+            sessionType: "Focus",
+            taskId: nil,
+            startTime: idleStart,
+            endTime: idleEnd,
+            eligibleDurationSeconds: 600,
+            status: .pending
+        )
+
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+        vm.sessionRecords = [record]
+        vm.reconcileSessionRecordsExcluding(interval: idle)
+
+        XCTAssertEqual(vm.sessionRecords.count, 2)
+        let r1 = vm.sessionRecords[0]
+        let r2 = vm.sessionRecords[1]
+        XCTAssertEqual(r1.durationSeconds, 600)
+        XCTAssertEqual(r2.durationSeconds, 600)
+
+        let day1 = cal.startOfDay(for: startMidnight)
+        guard let day2 = cal.date(byAdding: .day, value: 1, to: day1) else { return }
+
+        let day1Total = vm.sessionRecords.reduce(0) { $0 + $1.duration(on: day1, calendar: cal) }
+        let day2Total = vm.sessionRecords.reduce(0) { $0 + $1.duration(on: day2, calendar: cal) }
+        XCTAssertEqual(day1Total, 600)
+        XCTAssertEqual(day2Total, 600)
+    }
+
+    // Scenario 14: Correct original task attribution following task switching
+    @MainActor
+    func testTask9_Patch14_CorrectOriginalTaskAttributionFollowingTaskSwitching() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let task1Id = vm.tasks[0].id
+
+        vm.tasks[0].timeSpentSeconds = 600
+        vm.tasks[1].timeSpentSeconds = 200
+
+        // Inactivity occurred under Task 1
+        let intervalTask1 = IdleReviewInterval(
+            sessionId: UUID(),
+            sessionType: "Focus",
+            taskId: task1Id,
+            startTime: Date().addingTimeInterval(-300),
+            endTime: Date(),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: false
+        )
+
+        // User switches active task to Task 2 in UI
+        vm.activeTaskIndex = 1
+
+        // User resolves the review for Task 1
+        vm.handleIdleReviewResolution(interval: intervalTask1, decision: .excludeFromFocus)
+
+        // Task 1 should be deducted, Task 2 untouched
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 300)
+        XCTAssertEqual(vm.tasks[1].timeSpentSeconds, 200)
+    }
+
+    // Scenario 15: Deferred session record retains actual wall-clock timestamps
+    @MainActor
+    func testTask9_Patch15_DeferredSessionRecordRetainsActualWallClockTimestamps() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_p15_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        let baseStart = Date(timeIntervalSince1970: 1700000000)
+        var currentTime = baseStart
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.startTimer(at: currentTime)
+
+        // Idle from minute 5 to 15 (600s in middle)
+        let idleStart = baseStart.addingTimeInterval(300)
+        let idleEnd = baseStart.addingTimeInterval(900)
+
+        // Advance to deadline
+        currentTime = baseStart.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+
+        // Manually configure the middle idle interval
+        let middleIdle = IdleReviewInterval(
+            sessionId: vm.deferredCompletionSessionId ?? vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: vm.deferredCompletionTaskId,
+            startTime: idleStart,
+            endTime: idleEnd,
+            eligibleDurationSeconds: 600,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+        vm.idleReviewCoordinator.pendingIntervals = [middleIdle]
+
+        // Resolve exclude
+        vm.idleReviewCoordinator.resolve(intervalId: middleIdle.id, decision: .excludeFromFocus, at: currentTime)
+
+        XCTAssertFalse(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.sessionRecords.count, 2)
+        let r1 = vm.sessionRecords[0]
+        let r2 = vm.sessionRecords[1]
+
+        // True historical positions
+        XCTAssertEqual(r1.startTime, baseStart)
+        XCTAssertEqual(r1.endTime, idleStart)
+        XCTAssertEqual(r1.durationSeconds, 300)
+
+        XCTAssertEqual(r2.startTime, idleEnd)
+        XCTAssertEqual(r2.endTime, baseStart.addingTimeInterval(1500))
+        XCTAssertEqual(r2.durationSeconds, 600)
+    }
+
+    // Scenario 16: Two pending intervals belonging to one session
+    @MainActor
+    func testTask9_Patch16_TwoPendingIntervalsBelongingToOneSession() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let sessId = vm.activeTimerSessionId
+        let baseTime = Date()
+
+        let intv1 = IdleReviewInterval(
+            sessionId: sessId,
+            sessionType: "Focus",
+            startTime: baseTime.addingTimeInterval(-1000),
+            endTime: baseTime.addingTimeInterval(-700),
+            eligibleDurationSeconds: 300,
+            status: .pending
+        )
+        let intv2 = IdleReviewInterval(
+            sessionId: sessId,
+            sessionType: "Focus",
+            startTime: baseTime.addingTimeInterval(-500),
+            endTime: baseTime.addingTimeInterval(-200),
+            eligibleDurationSeconds: 300,
+            status: .pending
+        )
+
+        vm.idleReviewCoordinator.pendingIntervals = [intv1, intv2]
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.filter { $0.sessionId == sessId }.count, 2)
+    }
+
+    // Scenario 17: Resolving only the first does not finalize the session
+    @MainActor
+    func testTask9_Patch17_ResolvingFirstIntervalDoesNotFinalizeSession() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let sessId = UUID()
+        vm.isDeferredCompletionPending = true
+        vm.deferredCompletionSessionId = sessId
+        vm.deferredCompletionTargetEndDate = Date()
+        vm.deferredCompletionSegmentStartDate = Date().addingTimeInterval(-1500)
+        vm.deferredCompletionSegmentCreditedSeconds = 1500
+
+        let id1 = UUID()
+        let id2 = UUID()
+        let intv1 = IdleReviewInterval(
+            id: id1,
+            sessionId: sessId,
+            sessionType: "Focus",
+            startTime: Date().addingTimeInterval(-1000),
+            endTime: Date().addingTimeInterval(-700),
+            eligibleDurationSeconds: 300,
+            status: .pending
+        )
+        let intv2 = IdleReviewInterval(
+            id: id2,
+            sessionId: sessId,
+            sessionType: "Focus",
+            startTime: Date().addingTimeInterval(-500),
+            endTime: Date().addingTimeInterval(-200),
+            eligibleDurationSeconds: 300,
+            status: .pending
+        )
+        vm.idleReviewCoordinator.pendingIntervals = [intv1, intv2]
+
+        // Resolve interval 1
+        vm.idleReviewCoordinator.resolve(intervalId: id1, decision: .countAsFocus)
+
+        // Session must STILL be pending completion because interval 2 remains!
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.completedSessions, 0)
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1)
+    }
+
+    // Scenario 18: Resolving the final interval finalizes exactly once
+    @MainActor
+    func testTask9_Patch18_ResolvingFinalIntervalFinalizesExactlyOnce() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let sessId = UUID()
+        vm.isDeferredCompletionPending = true
+        vm.deferredCompletionSessionId = sessId
+        vm.deferredCompletionTargetEndDate = Date()
+        vm.deferredCompletionSegmentStartDate = Date().addingTimeInterval(-1500)
+        vm.deferredCompletionSegmentCreditedSeconds = 1500
+
+        let id2 = UUID()
+        let intv2 = IdleReviewInterval(
+            id: id2,
+            sessionId: sessId,
+            sessionType: "Focus",
+            startTime: Date().addingTimeInterval(-500),
+            endTime: Date().addingTimeInterval(-200),
+            eligibleDurationSeconds: 300,
+            status: .pending
+        )
+        vm.idleReviewCoordinator.pendingIntervals = [intv2]
+
+        // Resolve final interval
+        vm.idleReviewCoordinator.resolve(intervalId: id2, decision: .countAsFocus)
+
+        // Finalizes!
+        XCTAssertFalse(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertTrue(vm.idleReviewCoordinator.pendingIntervals.isEmpty)
+    }
+
+    // Scenario 19: Decide Later preserves pending completion
+    @MainActor
+    func testTask9_Patch19_DecideLaterPreservesPendingCompletion() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let sessId = UUID()
+        vm.isDeferredCompletionPending = true
+        vm.deferredCompletionSessionId = sessId
+        vm.deferredCompletionTargetEndDate = Date()
+
+        let id1 = UUID()
+        let intv = IdleReviewInterval(
+            id: id1,
+            sessionId: sessId,
+            sessionType: "Focus",
+            startTime: Date().addingTimeInterval(-500),
+            endTime: Date().addingTimeInterval(-200),
+            eligibleDurationSeconds: 300,
+            status: .pending
+        )
+        vm.idleReviewCoordinator.pendingIntervals = [intv]
+
+        vm.idleReviewCoordinator.resolve(intervalId: id1, decision: .decideLater)
+
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.completedSessions, 0)
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1)
+    }
+
+    // Scenario 20: Intervals belonging to other sessions remain unaffected
+    @MainActor
+    func testTask9_Patch20_IntervalsBelongingToOtherSessionsRemainUnaffected() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let sess1 = UUID()
+        let sess2 = UUID()
+
+        let intv1 = IdleReviewInterval(id: UUID(), sessionId: sess1, sessionType: "Focus", startTime: Date().addingTimeInterval(-1000), endTime: Date().addingTimeInterval(-700), eligibleDurationSeconds: 300, status: .pending)
+        let intv2 = IdleReviewInterval(id: UUID(), sessionId: sess2, sessionType: "Focus", startTime: Date().addingTimeInterval(-500), endTime: Date().addingTimeInterval(-200), eligibleDurationSeconds: 300, status: .pending)
+
+        vm.idleReviewCoordinator.pendingIntervals = [intv1, intv2]
+
+        vm.idleReviewCoordinator.resolve(intervalId: intv1.id, decision: .countAsFocus)
+
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.first?.id, intv2.id)
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.first?.sessionId, sess2)
+    }
+
+    // Scenario 21: Late resolution does not play a delayed completion chime
+    @MainActor
+    func testTask9_Patch21_LateResolutionSuppressesDelayedCompletionChime() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let pastDeadline = Date().addingTimeInterval(-3600) // 1 hour ago
+        vm.isDeferredCompletionPending = true
+        vm.deferredCompletionSessionId = UUID()
+        vm.deferredCompletionTargetEndDate = pastDeadline
+        vm.deferredCompletionSegmentStartDate = pastDeadline.addingTimeInterval(-1500)
+        vm.deferredCompletionSegmentCreditedSeconds = 1500
+
+        // Finalize deferred session 1 hour after deadline
+        vm.finalizeDeferredSession(decision: .countAsFocus)
+
+        XCTAssertFalse(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.completedSessions, 1)
+        // Notification & chime suppressed cleanly without crashes
+    }
+
+    // Scenario 22: Normal completion retains its established notification behavior
+    @MainActor
+    func testTask9_Patch22_NormalCompletionRetainsEstablishedNotificationBehavior() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_p22_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(0.0) // User is active!
+        vm.reconcileActiveTimers(at: currentTime)
+
+        // Completes immediately without deferral
+        XCTAssertFalse(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertTrue(vm.isBreakPreset)
+    }
+
+    // Scenario 23: Return detection works when tick misses sub-second window
+    @MainActor
+    func testTask9_Patch23_ReturnDetectionWorksWhenTickMissesSubSecondWindow() {
+        let mockActivity = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mockActivity, thresholdSeconds: 300)
+
+        var now = Date()
+        coordinator.tick(now: now, isSessionActive: true, sessionType: "Focus", sessionId: UUID(), taskId: nil)
+
+        // Idle for 400s
+        now = now.addingTimeInterval(400)
+        mockActivity.setSimulatedIdle(400)
+        coordinator.tick(now: now, isSessionActive: true, sessionType: "Focus", sessionId: UUID(), taskId: nil)
+        XCTAssertTrue(coordinator.state.isIdleDetected)
+
+        // User returned 1.8 seconds ago (missed sub-second window < 1.0)
+        now = now.addingTimeInterval(2.0)
+        mockActivity.setSimulatedIdle(1.8)
+        coordinator.tick(now: now, isSessionActive: true, sessionType: "Focus", sessionId: UUID(), taskId: nil)
+
+        // Return MUST be recognized!
+        XCTAssertFalse(coordinator.state.isIdleDetected)
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+    }
+
+    // Scenario 24: Repeated sleep/wake events do not create duplicate intervals
+    @MainActor
+    func testTask9_Patch24_RepeatedSleepWakeEventsDoNotCreateDuplicateIntervals() {
+        let mockActivity = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mockActivity, thresholdSeconds: 300)
+
+        let now = Date()
+        let sessId = UUID()
+        coordinator.handleSleep(at: now)
+        coordinator.handleWake(at: now.addingTimeInterval(600), isSessionActive: true, sessionType: "Focus", sessionId: sessId, taskId: nil)
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+
+        // Duplicate wake event at same interval
+        coordinator.handleWake(at: now.addingTimeInterval(600), isSessionActive: true, sessionType: "Focus", sessionId: sessId, taskId: nil)
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+    }
+
+    // Scenario 25: Stopwatch display and laps remain unchanged
+    @MainActor
+    func testTask9_Patch25_StopwatchDisplayAndLapsRemainUnchanged() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        vm.startStopwatch()
+
+        currentTime = currentTime.addingTimeInterval(100)
+        vm.reconcileActiveTimers(at: currentTime)
+        vm.recordLap()
+
+        currentTime = currentTime.addingTimeInterval(100)
+        vm.reconcileActiveTimers(at: currentTime)
+        vm.recordLap()
+
+        XCTAssertEqual(vm.laps.count, 2)
+        let originalLaps = vm.laps
+        let originalTime = vm.stopwatchTime
+
+        // Idle review resolution on stopwatch
+        let intv = IdleReviewInterval(
+            sessionId: UUID(),
+            sessionType: "Stopwatch",
+            taskId: vm.tasks[0].id,
+            startTime: currentTime.addingTimeInterval(-60),
+            endTime: currentTime,
+            eligibleDurationSeconds: 60,
+            status: .pending,
+            isProvisionalCreditDeducted: false
+        )
+        vm.handleIdleReviewResolution(interval: intv, decision: .excludeFromFocus)
+
+        // Stopwatch laps and display must be 100% preserved
+        XCTAssertEqual(vm.laps, originalLaps)
+        XCTAssertEqual(vm.stopwatchTime, originalTime)
     }
 }
 

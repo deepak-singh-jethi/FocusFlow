@@ -57,6 +57,7 @@ public class IdleReviewCoordinator: ObservableObject {
     // Callbacks
     public var onResolution: ((_ interval: IdleReviewInterval, _ decision: IdleReviewDecision) -> Void)? = nil
     public var onPendingCountChange: ((_ count: Int) -> Void)? = nil
+    public var onIntervalCreated: ((_ interval: inout IdleReviewInterval) -> Void)? = nil
 
     public init(
         activityProvider: IdleActivityProvider = MacOSNativeIdleActivityProvider(),
@@ -175,30 +176,42 @@ public class IdleReviewCoordinator: ObservableObject {
             isCurrentlyIdle = true
             state = .idleDetected(startedAt: currentCandidateStart ?? now)
 
-        } else if rawIdleSeconds > 0 && !isCurrentlyIdle {
-            // Idle candidate (inactivity begun, but threshold not yet reached)
-            let candidateStart = now.addingTimeInterval(-rawIdleSeconds)
-            currentCandidateStart = candidateStart
-            state = .idleCandidate(since: candidateStart)
-
-        } else if rawIdleSeconds < 1.0 {
-            // Activity detected (user moved mouse or pressed key)
-            if isCurrentlyIdle, let candidateStart = currentCandidateStart {
-                // User was idle and has just returned!
+        } else if isCurrentlyIdle {
+            // Fix 6 & Part F.1: User was idle and has now returned (rawIdleSeconds < thresholdSeconds)!
+            // Do not require rawIdleSeconds < 1.0; detect return even if polling tick missed sub-second window.
+            let returnTime = now.addingTimeInterval(-max(0, rawIdleSeconds))
+            if let candidateStart = currentCandidateStart {
                 recordCompletedIdleInterval(
                     candidateStart: candidateStart,
-                    now: now,
+                    now: returnTime,
                     sessionId: sessionId,
                     sessionType: sessionType,
                     taskId: taskId,
                     sessionDeadline: sessionDeadline,
                     sessionStartDate: sessionStartDate
                 )
-                isCurrentlyIdle = false
-                currentCandidateStart = nil
-            } else {
-                currentCandidateStart = nil
             }
+            isCurrentlyIdle = false
+            currentCandidateStart = nil
+
+            // Update UI state
+            if let active = activeReviewInterval {
+                state = .reviewing(intervalId: active.id)
+            } else if !pendingIntervals.isEmpty {
+                state = .pendingReview
+            } else {
+                state = .monitoring
+            }
+
+        } else if rawIdleSeconds > 0 {
+            // Idle candidate (inactivity begun, but threshold not yet reached)
+            let candidateStart = now.addingTimeInterval(-rawIdleSeconds)
+            currentCandidateStart = candidateStart
+            state = .idleCandidate(since: candidateStart)
+
+        } else {
+            // Fully active
+            currentCandidateStart = nil
 
             // Update UI state
             if let active = activeReviewInterval {
@@ -250,7 +263,7 @@ public class IdleReviewCoordinator: ObservableObject {
         }
         guard !isDuplicate else { return }
 
-        let interval = IdleReviewInterval(
+        var interval = IdleReviewInterval(
             sessionId: sessionId,
             sessionType: sessionType,
             taskId: taskId,
@@ -260,6 +273,7 @@ public class IdleReviewCoordinator: ObservableObject {
             status: .pending
         )
 
+        onIntervalCreated?(&interval)
         pendingIntervals.append(interval)
 
         // If no active review is currently presented, auto-surface the oldest pending review
@@ -389,6 +403,7 @@ public class IdleReviewCoordinator: ObservableObject {
             if activeReviewInterval?.id == intervalId {
                 activeReviewInterval = nil
             }
+            onResolution?(interval, .decideLater)
         }
 
         if let nextActive = activeReviewInterval {

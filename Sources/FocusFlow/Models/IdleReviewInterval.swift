@@ -26,6 +26,7 @@ public struct IdleReviewInterval: Codable, Identifiable, Equatable, Sendable {
     public var status: IdleReviewStatus
     public var decisionDate: Date?
     public var isEstimated: Bool
+    public var isProvisionalCreditDeducted: Bool
 
     public init(
         id: UUID = UUID(),
@@ -37,7 +38,8 @@ public struct IdleReviewInterval: Codable, Identifiable, Equatable, Sendable {
         eligibleDurationSeconds: Int,
         status: IdleReviewStatus = .pending,
         decisionDate: Date? = nil,
-        isEstimated: Bool = false
+        isEstimated: Bool = false,
+        isProvisionalCreditDeducted: Bool = false
     ) {
         self.id = id
         self.sessionId = sessionId
@@ -49,6 +51,26 @@ public struct IdleReviewInterval: Codable, Identifiable, Equatable, Sendable {
         self.status = status
         self.decisionDate = decisionDate
         self.isEstimated = isEstimated
+        self.isProvisionalCreditDeducted = isProvisionalCreditDeducted
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, sessionId, sessionType, taskId, startTime, endTime, eligibleDurationSeconds, status, decisionDate, isEstimated, isProvisionalCreditDeducted
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        sessionId = try container.decode(UUID.self, forKey: .sessionId)
+        sessionType = try container.decode(String.self, forKey: .sessionType)
+        taskId = try container.decodeIfPresent(UUID.self, forKey: .taskId)
+        startTime = try container.decode(Date.self, forKey: .startTime)
+        endTime = try container.decode(Date.self, forKey: .endTime)
+        eligibleDurationSeconds = try container.decode(Int.self, forKey: .eligibleDurationSeconds)
+        status = try container.decode(IdleReviewStatus.self, forKey: .status)
+        decisionDate = try container.decodeIfPresent(Date.self, forKey: .decisionDate)
+        isEstimated = try container.decodeIfPresent(Bool.self, forKey: .isEstimated) ?? false
+        isProvisionalCreditDeducted = try container.decodeIfPresent(Bool.self, forKey: .isProvisionalCreditDeducted) ?? false
     }
 
     /// Formatted time range string for display (e.g. "10:07 AM — 10:16 AM")
