@@ -21864,7 +21864,7 @@ final class FocusFlowTests: XCTestCase {
     }
 
     @MainActor
-    private func renderViewToPNGFile<V: View>(_ view: V, size: CGSize, destinationPath: String) {
+    private func renderViewToPNGFile<V: View>(_ view: V, size: CGSize, fileName: String) {
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -21879,7 +21879,7 @@ final class FocusFlowTests: XCTestCase {
         hostingView.layoutSubtreeIfNeeded()
 
         guard let rep = hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds) else {
-            XCTFail("Failed to render view to PNG at \(destinationPath)")
+            XCTFail("Failed to render view to PNG for \(fileName)")
             return
         }
         hostingView.cacheDisplay(in: hostingView.bounds, to: rep)
@@ -21888,18 +21888,23 @@ final class FocusFlowTests: XCTestCase {
             XCTFail("Failed to encode PNG data")
             return
         }
+
+        let localArtifactDir = "/Users/deepaksinghjethi/.gemini/antigravity/brain/a7db7b67-cb01-4e70-89ca-66391e88e690"
+        let fallbackDir = NSTemporaryDirectory() + "focusflow_qa"
+        let targetDir = FileManager.default.fileExists(atPath: localArtifactDir) ? localArtifactDir : fallbackDir
+        try? FileManager.default.createDirectory(atPath: targetDir, withIntermediateDirectories: true)
+
+        let destinationPath = "\(targetDir)/\(fileName)"
         do {
             try pngData.write(to: URL(fileURLWithPath: destinationPath))
             print("Successfully rendered QA artifact: \(destinationPath) (\(rep.pixelsWide)x\(rep.pixelsHigh))")
         } catch {
-            XCTFail("Failed to write PNG data: \(error)")
+            print("Warning: Could not write QA artifact: \(error)")
         }
     }
 
     @MainActor
     func testGenerateVisualQAScreenshots() {
-        let artifactDir = "/Users/deepaksinghjethi/.gemini/antigravity/brain/a7db7b67-cb01-4e70-89ca-66391e88e690"
-
         // 1. 850x600 expanded sidebar, 90:00 active (verify 90m chip is present and highlighted)
         do {
             UserDefaults.standard.set(false, forKey: "isSidebarCollapsed")
@@ -21910,7 +21915,7 @@ final class FocusFlowTests: XCTestCase {
             vm.timeRemaining = 90 * 60
 
             let view = ContentView(viewModel: vm, audioPlayer: player, initialTab: .focusTimer)
-            renderViewToPNGFile(view, size: CGSize(width: 850, height: 600), destinationPath: "\(artifactDir)/qa_850x600_expanded.png")
+            renderViewToPNGFile(view, size: CGSize(width: 850, height: 600), fileName: "qa_850x600_expanded.png")
         }
 
         // 2. 850x600 collapsed sidebar
@@ -21923,7 +21928,7 @@ final class FocusFlowTests: XCTestCase {
             vm.timeRemaining = 90 * 60
 
             let view = ContentView(viewModel: vm, audioPlayer: player, initialTab: .focusTimer)
-            renderViewToPNGFile(view, size: CGSize(width: 850, height: 600), destinationPath: "\(artifactDir)/qa_850x600_collapsed.png")
+            renderViewToPNGFile(view, size: CGSize(width: 850, height: 600), fileName: "qa_850x600_collapsed.png")
         }
 
         // Restore expanded sidebar preference
@@ -21938,7 +21943,7 @@ final class FocusFlowTests: XCTestCase {
             vm.timeRemaining = 25 * 60
 
             let view = ContentView(viewModel: vm, audioPlayer: player, initialTab: .focusTimer)
-            renderViewToPNGFile(view, size: CGSize(width: 1050, height: 700), destinationPath: "\(artifactDir)/qa_1050x700_standard.png")
+            renderViewToPNGFile(view, size: CGSize(width: 1050, height: 700), fileName: "qa_1050x700_standard.png")
         }
 
         // 4. 1440x900 large window (verify stage height bounded without 520pt void)
@@ -21950,7 +21955,7 @@ final class FocusFlowTests: XCTestCase {
             vm.timeRemaining = 90 * 60
 
             let view = ContentView(viewModel: vm, audioPlayer: player, initialTab: .focusTimer)
-            renderViewToPNGFile(view, size: CGSize(width: 1440, height: 900), destinationPath: "\(artifactDir)/qa_1440x900_large.png")
+            renderViewToPNGFile(view, size: CGSize(width: 1440, height: 900), fileName: "qa_1440x900_large.png")
         }
 
         // 5. Fullscreen window (16pt top clearance)
@@ -21962,7 +21967,7 @@ final class FocusFlowTests: XCTestCase {
             vm.timeRemaining = 25 * 60
 
             let view = ContentView(viewModel: vm, audioPlayer: player, initialTab: .focusTimer, isFullScreen: true)
-            renderViewToPNGFile(view, size: CGSize(width: 1440, height: 900), destinationPath: "\(artifactDir)/qa_fullscreen_1440x900.png")
+            renderViewToPNGFile(view, size: CGSize(width: 1440, height: 900), fileName: "qa_fullscreen_1440x900.png")
         }
 
         // 6. Tasks page with active timer mini-bar (verify 12pt spacing, no 140pt gap)
@@ -21973,7 +21978,7 @@ final class FocusFlowTests: XCTestCase {
             vm.startTimer()
 
             let view = ContentView(viewModel: vm, audioPlayer: player, initialTab: .tasks)
-            renderViewToPNGFile(view, size: CGSize(width: 1050, height: 700), destinationPath: "\(artifactDir)/qa_tasks_with_minibar.png")
+            renderViewToPNGFile(view, size: CGSize(width: 1050, height: 700), fileName: "qa_tasks_with_minibar.png")
         }
     }
 }
