@@ -21524,7 +21524,85 @@ final class FocusFlowTests: XCTestCase {
             XCTFail("Failed to decode legacy JSON: \(error)")
         }
     }
+
+    // MARK: - Titlebar Safe-Area & Layout Regression Tests
+
+    @MainActor
+    func testMainWindow_StyleMaskAndTitlebarConfiguration() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+        let player = AmbientAudioPlayer()
+
+        let contentView = ContentView(viewModel: vm, audioPlayer: player)
+            .preferredColorScheme(.dark)
+            .frame(minWidth: 850, minHeight: 600)
+
+        let hosting = NSHostingController(rootView: contentView)
+        let window = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 1050, height: 700),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentViewController = hosting
+        window.setContentSize(NSSize(width: 1050, height: 700))
+        window.minSize = NSSize(width: 850, height: 600)
+        window.title = "FocusFlow"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+
+        // Verify window configuration
+        XCTAssertTrue(window.styleMask.contains(.fullSizeContentView), "Window must use fullSizeContentView for continuous background")
+        XCTAssertTrue(window.styleMask.contains(.titled), "Window must retain titled mask for native titlebar and traffic lights")
+        XCTAssertTrue(window.titlebarAppearsTransparent, "Titlebar must appear transparent for modern dark aesthetic")
+        XCTAssertEqual(window.titleVisibility, .hidden, "Native window title text must be hidden")
+        XCTAssertEqual(window.minSize.width, 850, "Window minWidth must be 850")
+        XCTAssertEqual(window.minSize.height, 600, "Window minHeight must be 600")
+
+        // Verify safe area insets are present for content layout
+        window.layoutIfNeeded()
+        let topInset = hosting.view.safeAreaInsets.top
+        XCTAssertGreaterThanOrEqual(topInset, 28.0, "NSHostingView must provide >= 28pt top safe area inset for the transparent titlebar")
+    }
+
+    @MainActor
+    func testSidebar_TitlebarClearanceIntegrity() {
+        // Verify that SidebarTokens.headerTopPadding provides sufficient breathing room (20pt)
+        // below the titlebar safe area so brand identity and collapse controls do not collide with traffic lights
+        XCTAssertEqual(SidebarTokens.headerTopPadding, 20, "headerTopPadding must be 20pt")
+        XCTAssertEqual(SidebarTokens.headerBottomPadding, 16, "headerBottomPadding must be 16pt")
+        XCTAssertEqual(SidebarTokens.sidebarWidth, 252, "Expanded sidebar width must be 252pt")
+        XCTAssertEqual(SidebarTokens.collapsedWidth, 68, "Collapsed sidebar width must be 68pt")
+        XCTAssertEqual(SidebarTokens.collapsedItemWidth, 44, "Collapsed item width must be 44pt")
+    }
+
+    @MainActor
+    func testContentView_RootViewSafeArePropagation() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+        let player = AmbientAudioPlayer()
+
+        // Create ContentView and embed in NSHostingView
+        let view = ContentView(viewModel: vm, audioPlayer: player)
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame = NSRect(x: 0, y: 0, width: 1050, height: 700)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 1050, height: 700),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.contentView = hosting
+        window.layoutIfNeeded()
+
+        // Verify the hosting view respects the window's safe area
+        XCTAssertGreaterThanOrEqual(hosting.safeAreaInsets.top, 28.0, "ContentView hosting view must receive window top safe area insets")
+    }
 }
+
 
 
 

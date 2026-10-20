@@ -59,7 +59,7 @@ public struct TasksView: View {
                         if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
                     }
                 }
-                .padding(.top, 30)
+                .padding(.top, 20)
 
                 // Metric Summary Cards
                 HStack(spacing: 12) {

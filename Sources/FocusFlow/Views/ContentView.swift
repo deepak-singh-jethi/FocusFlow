@@ -147,7 +147,6 @@ public struct ContentView: View {
         .animation(.spring(response: 0.40, dampingFraction: 0.80), value: isFocusState)
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: viewModel.idleReviewCoordinator.activeReviewInterval != nil)
         .background(bgMain)
-        .ignoresSafeArea(.container, edges: .top)
         .sheet(isPresented: $showingWorkspace) {
             RightPanelView(viewModel: viewModel, showLaps: sidebarSelection == .stopwatch)
                 .frame(minWidth: 390, idealWidth: 430, minHeight: 520)
