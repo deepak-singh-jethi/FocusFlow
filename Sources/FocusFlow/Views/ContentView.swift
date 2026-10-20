@@ -5,9 +5,11 @@ public struct ContentView: View {
     @ObservedObject public var viewModel: TimerViewModel
     @ObservedObject public var audioPlayer: AmbientAudioPlayer
     @State private var sidebarSelection: NavigationTab = .focusTimer
+    @AppStorage("isSidebarCollapsed") private var isSidebarCollapsed: Bool = false
     @State private var isFocusState = false
     @State private var showingWorkspace = false
     @AppStorage("clockStyle") private var clockStyle = "Digital"
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let bgMain = Color(red: 0.08, green: 0.09, blue: 0.13)
     let bgSidebar = Color(red: 0.11, green: 0.12, blue: 0.16)
@@ -113,6 +115,10 @@ public struct ContentView: View {
                 }
             }
             .animation(.spring(response: 0.38, dampingFraction: 0.82), value: sidebarSelection)
+            .animation(
+                reduceMotion ? .linear(duration: 0.05) : .spring(response: 0.32, dampingFraction: 0.85),
+                value: isSidebarCollapsed
+            )
 
             if isFocusState {
                 FocusStateView(viewModel: viewModel, clockStyle: $clockStyle, isPresented: $isFocusState, isStopwatch: sidebarSelection == .stopwatch)
@@ -150,9 +156,14 @@ public struct ContentView: View {
     }
 
     private var sidebar: some View {
-        SidebarView(gradient: accentGradient, selection: $sidebarSelection, viewModel: viewModel)
-            .frame(width: SidebarTokens.sidebarWidth)
-            .background(SidebarTokens.sidebarBackground)
+        SidebarView(
+            gradient: accentGradient,
+            selection: $sidebarSelection,
+            isCollapsed: $isSidebarCollapsed,
+            viewModel: viewModel
+        )
+        .frame(width: isSidebarCollapsed ? SidebarTokens.collapsedWidth : SidebarTokens.sidebarWidth)
+        .background(SidebarTokens.sidebarBackground)
     }
 
     @ViewBuilder

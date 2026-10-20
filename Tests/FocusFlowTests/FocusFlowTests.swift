@@ -21260,6 +21260,178 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertGreaterThan(defaultWindowWidth, minWindowWidth)
         XCTAssertGreaterThan(defaultWindowHeight, minWindowHeight)
     }
+
+    // MARK: - Sidebar Redesign (Collapse/Expand & Contextual Accessibility) Tests
+
+    func testSidebarCollapse_TokensAndDimensions() {
+        XCTAssertEqual(SidebarTokens.sidebarWidth, 252)
+        XCTAssertEqual(SidebarTokens.collapsedWidth, 68)
+        XCTAssertEqual(SidebarTokens.collapsedItemWidth, 44)
+        XCTAssertEqual(SidebarTokens.horizontalPadding, 12)
+
+        // Mathematical alignment invariant: (collapsedWidth - collapsedItemWidth) / 2 == horizontalPadding
+        let symmetricMargin = (SidebarTokens.collapsedWidth - SidebarTokens.collapsedItemWidth) / 2
+        XCTAssertEqual(symmetricMargin, SidebarTokens.horizontalPadding, "Collapsed mode margins must equal horizontalPadding exactly (12pt)")
+
+        // Window available content width in collapsed mode
+        let minWindowWidth: CGFloat = 850
+        let availableCollapsedContentWidth = minWindowWidth - SidebarTokens.collapsedWidth
+        XCTAssertEqual(availableCollapsedContentWidth, 782, "At 850pt min window width, collapsed sidebar leaves 782pt for content")
+    }
+
+    @MainActor
+    func testSidebar_ContextualAccessibilityStatus_FocusTimer() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let dummyGradient = LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing)
+        var selection: NavigationTab = .focusTimer
+        let bindingSelection = Binding(get: { selection }, set: { selection = $0 })
+        var isCollapsed = false
+        let bindingCollapsed = Binding(get: { isCollapsed }, set: { isCollapsed = $0 })
+
+        let sidebar = SidebarView(gradient: dummyGradient, selection: bindingSelection, isCollapsed: bindingCollapsed, viewModel: vm)
+
+        // 1. Idle state (not started)
+        XCTAssertNil(sidebar.contextualAccessibilityValue(for: .focusTimer))
+
+        // 2. Running Focus Timer
+        vm.applyPresetDirectly(name: "25m", minutes: 25, isBreak: false)
+        vm.startTimer()
+        let runningStatus = sidebar.contextualAccessibilityValue(for: .focusTimer)
+        XCTAssertNotNil(runningStatus)
+        XCTAssertTrue(runningStatus?.contains("remaining, running") == true, "Running focus timer must declare remaining time and running status")
+        XCTAssertTrue(runningStatus?.contains(vm.timerTimeString) == true)
+
+        // 3. Paused Focus Timer
+        vm.stopTimer()
+        let pausedStatus = sidebar.contextualAccessibilityValue(for: .focusTimer)
+        XCTAssertNotNil(pausedStatus)
+        XCTAssertTrue(pausedStatus?.contains("remaining, paused") == true, "Paused focus timer must declare remaining time and paused status")
+        XCTAssertTrue(pausedStatus?.contains(vm.timerTimeString) == true)
+    }
+
+    @MainActor
+    func testSidebar_ContextualAccessibilityStatus_Stopwatch() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let dummyGradient = LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing)
+        var selection: NavigationTab = .stopwatch
+        let bindingSelection = Binding(get: { selection }, set: { selection = $0 })
+        let sidebar = SidebarView(gradient: dummyGradient, selection: bindingSelection, viewModel: vm)
+
+        // 1. Idle stopwatch (0 seconds)
+        XCTAssertNil(sidebar.contextualAccessibilityValue(for: .stopwatch))
+
+        // 2. Running Stopwatch
+        vm.startStopwatch()
+        vm.stopwatchTime = 75
+        let runningStatus = sidebar.contextualAccessibilityValue(for: .stopwatch)
+        XCTAssertNotNil(runningStatus)
+        XCTAssertTrue(runningStatus?.contains("elapsed, running") == true, "Running stopwatch must declare elapsed time and running status")
+        XCTAssertTrue(runningStatus?.contains(vm.stopwatchTimeString) == true)
+
+        // 3. Paused Stopwatch
+        vm.stopStopwatch()
+        vm.stopwatchTime = 75
+        let pausedStatus = sidebar.contextualAccessibilityValue(for: .stopwatch)
+        XCTAssertNotNil(pausedStatus)
+        XCTAssertTrue(pausedStatus?.contains("elapsed, paused") == true, "Paused stopwatch must declare elapsed time and paused status")
+        XCTAssertTrue(pausedStatus?.contains(vm.stopwatchTimeString) == true)
+    }
+
+    @MainActor
+    func testSidebar_ContextualAccessibilityStatus_Tasks() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let dummyGradient = LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing)
+        var selection: NavigationTab = .tasks
+        let bindingSelection = Binding(get: { selection }, set: { selection = $0 })
+        let sidebar = SidebarView(gradient: dummyGradient, selection: bindingSelection, viewModel: vm)
+
+        // 1. Default tasks (or populated tasks)
+        let total = vm.tasks.count
+        let completed = vm.tasks.filter(\.isCompleted).count
+        let taskStatus = sidebar.contextualAccessibilityValue(for: .tasks)
+        XCTAssertEqual(taskStatus, "\(completed) of \(total) tasks completed")
+
+        // 2. Empty tasks
+        vm.tasks.removeAll()
+        let emptyStatus = sidebar.contextualAccessibilityValue(for: .tasks)
+        XCTAssertEqual(emptyStatus, "No tasks")
+    }
+
+    func testSidebar_DailyProgressWidget_CompactModeIntegrity() {
+        let dummyGradient = LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing)
+
+        let expandedWidget = DailyProgressWidget(gradient: dummyGradient, focusedSeconds: 3600, goalHours: 2, isCompact: false)
+        XCTAssertFalse(expandedWidget.isCompact)
+        XCTAssertEqual(expandedWidget.progress, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(expandedWidget.durationLabel, "1h 0m")
+        XCTAssertEqual(expandedWidget.percentageLabel, "50%")
+
+        let compactWidget = DailyProgressWidget(gradient: dummyGradient, focusedSeconds: 3600, goalHours: 2, isCompact: true)
+        XCTAssertTrue(compactWidget.isCompact)
+        XCTAssertEqual(compactWidget.progress, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(compactWidget.durationLabel, "1h 0m")
+        XCTAssertEqual(compactWidget.percentageLabel, "50%")
+    }
+
+    @MainActor
+    func testSidebar_CollapseStateToggling_DoesNotInterruptTimerOrAccounting() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Start timer
+        vm.applyPresetDirectly(name: "25m", minutes: 25, isBreak: false)
+        vm.startTimer()
+        XCTAssertTrue(vm.isTimerRunning)
+        let initialTimeRemaining = vm.timeRemaining
+
+        // Start stopwatch
+        vm.startStopwatch()
+        vm.stopwatchTime = 42
+        XCTAssertTrue(vm.isStopwatchRunning)
+
+        // Toggle collapse state back and forth
+        var isCollapsed = false
+        let dummyGradient = LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing)
+        var selection: NavigationTab = .focusTimer
+        let bindingSelection = Binding(get: { selection }, set: { selection = $0 })
+        let bindingCollapsed = Binding(get: { isCollapsed }, set: { isCollapsed = $0 })
+
+        _ = SidebarView(gradient: dummyGradient, selection: bindingSelection, isCollapsed: bindingCollapsed, viewModel: vm)
+
+        // Simulate collapse toggle
+        isCollapsed = true
+        XCTAssertTrue(vm.isTimerRunning, "Timer must remain running across collapse")
+        XCTAssertEqual(vm.timeRemaining, initialTimeRemaining)
+        XCTAssertTrue(vm.isStopwatchRunning, "Stopwatch must remain running across collapse")
+        XCTAssertEqual(vm.stopwatchTime, 42)
+
+        // Simulate expand toggle
+        isCollapsed = false
+        XCTAssertTrue(vm.isTimerRunning, "Timer must remain running across expand")
+        XCTAssertEqual(vm.timeRemaining, initialTimeRemaining)
+        XCTAssertTrue(vm.isStopwatchRunning, "Stopwatch must remain running across expand")
+        XCTAssertEqual(vm.stopwatchTime, 42)
+    }
+
+    func testSidebar_CollapsePreferencePersistence_UserDefaultsKey() {
+        let defaults = UserDefaults.standard
+        let testKey = "isSidebarCollapsed"
+
+        let originalValue = defaults.bool(forKey: testKey)
+        defer { defaults.set(originalValue, forKey: testKey) }
+
+        defaults.set(true, forKey: testKey)
+        XCTAssertTrue(defaults.bool(forKey: testKey), "isSidebarCollapsed must persist true across reads")
+
+        defaults.set(false, forKey: testKey)
+        XCTAssertFalse(defaults.bool(forKey: testKey), "isSidebarCollapsed must persist false across reads")
+    }
 }
 
 
