@@ -4,21 +4,28 @@ import SwiftUI
 public struct ContentView: View {
     @ObservedObject public var viewModel: TimerViewModel
     @ObservedObject public var audioPlayer: AmbientAudioPlayer
-    @State private var sidebarSelection: NavigationTab = .focusTimer
+    @State private var sidebarSelection: NavigationTab
     @AppStorage("isSidebarCollapsed") private var isSidebarCollapsed: Bool = false
     @State private var isFocusState = false
     @State private var showingWorkspace = false
     @AppStorage("clockStyle") private var clockStyle = "Digital"
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var isFullScreen: Bool = false
+    @State private var isFullScreen: Bool
 
     let bgMain = Color(red: 0.08, green: 0.09, blue: 0.13)
     let bgSidebar = Color(red: 0.11, green: 0.12, blue: 0.16)
     let accentGradient = LinearGradient(colors: [Color.orange, Color.pink], startPoint: .topLeading, endPoint: .bottomTrailing)
 
-    public init(viewModel: TimerViewModel? = nil, audioPlayer: AmbientAudioPlayer? = nil) {
+    public init(
+        viewModel: TimerViewModel? = nil,
+        audioPlayer: AmbientAudioPlayer? = nil,
+        initialTab: NavigationTab = .focusTimer,
+        isFullScreen: Bool = false
+    ) {
         self.viewModel = viewModel ?? TimerViewModel()
         self.audioPlayer = audioPlayer ?? AmbientAudioPlayer()
+        self._sidebarSelection = State(initialValue: initialTab)
+        self._isFullScreen = State(initialValue: isFullScreen)
     }
 
     private var hasBanner: Bool {
@@ -182,7 +189,8 @@ public struct ContentView: View {
             }
         }
         .onAppear {
-            if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            guard let app = NSApp else { return }
+            if let window = app.keyWindow ?? app.mainWindow {
                 isFullScreen = window.styleMask.contains(.fullScreen)
             }
         }

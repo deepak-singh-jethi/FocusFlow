@@ -21862,7 +21862,122 @@ final class FocusFlowTests: XCTestCase {
         let tasksView = TasksView(viewModel: vm, topPadding: WindowLayoutMetrics.postMiniBarSpacing)
         XCTAssertEqual(tasksView.topPadding, 12.0, "TasksView under an active mini-bar must have 12pt top padding, preventing 140+ pt double padding")
     }
+
+    @MainActor
+    private func renderViewToPNGFile<V: View>(_ view: V, size: CGSize, destinationPath: String) {
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        let hostingView = NSHostingView(rootView: view.frame(width: size.width, height: size.height).preferredColorScheme(.dark))
+        hostingView.frame = NSRect(origin: .zero, size: size)
+        window.contentView = hostingView
+        window.orderBack(nil)
+        window.layoutIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+
+        guard let rep = hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds) else {
+            XCTFail("Failed to render view to PNG at \(destinationPath)")
+            return
+        }
+        hostingView.cacheDisplay(in: hostingView.bounds, to: rep)
+
+        guard let pngData = rep.representation(using: .png, properties: [:]) else {
+            XCTFail("Failed to encode PNG data")
+            return
+        }
+        do {
+            try pngData.write(to: URL(fileURLWithPath: destinationPath))
+            print("Successfully rendered QA artifact: \(destinationPath) (\(rep.pixelsWide)x\(rep.pixelsHigh))")
+        } catch {
+            XCTFail("Failed to write PNG data: \(error)")
+        }
+    }
+
+    @MainActor
+    func testGenerateVisualQAScreenshots() {
+        let artifactDir = "/Users/deepaksinghjethi/.gemini/antigravity/brain/a7db7b67-cb01-4e70-89ca-66391e88e690"
+
+        // 1. 850x600 expanded sidebar, 90:00 active (verify 90m chip is present and highlighted)
+        do {
+            UserDefaults.standard.set(false, forKey: "isSidebarCollapsed")
+            let (vm, tempURL) = makeIsolatedViewModel()
+            defer { cleanup(url: tempURL) }
+            let player = AmbientAudioPlayer()
+            vm.totalTime = 90 * 60
+            vm.timeRemaining = 90 * 60
+
+            let view = ContentView(viewModel: vm, audioPlayer: player, initialTab: .focusTimer)
+            renderViewToPNGFile(view, size: CGSize(width: 850, height: 600), destinationPath: "\(artifactDir)/qa_850x600_expanded.png")
+        }
+
+        // 2. 850x600 collapsed sidebar
+        do {
+            UserDefaults.standard.set(true, forKey: "isSidebarCollapsed")
+            let (vm, tempURL) = makeIsolatedViewModel()
+            defer { cleanup(url: tempURL) }
+            let player = AmbientAudioPlayer()
+            vm.totalTime = 90 * 60
+            vm.timeRemaining = 90 * 60
+
+            let view = ContentView(viewModel: vm, audioPlayer: player, initialTab: .focusTimer)
+            renderViewToPNGFile(view, size: CGSize(width: 850, height: 600), destinationPath: "\(artifactDir)/qa_850x600_collapsed.png")
+        }
+
+        // Restore expanded sidebar preference
+        UserDefaults.standard.set(false, forKey: "isSidebarCollapsed")
+
+        // 3. 1050x700 standard window
+        do {
+            let (vm, tempURL) = makeIsolatedViewModel()
+            defer { cleanup(url: tempURL) }
+            let player = AmbientAudioPlayer()
+            vm.totalTime = 25 * 60
+            vm.timeRemaining = 25 * 60
+
+            let view = ContentView(viewModel: vm, audioPlayer: player, initialTab: .focusTimer)
+            renderViewToPNGFile(view, size: CGSize(width: 1050, height: 700), destinationPath: "\(artifactDir)/qa_1050x700_standard.png")
+        }
+
+        // 4. 1440x900 large window (verify stage height bounded without 520pt void)
+        do {
+            let (vm, tempURL) = makeIsolatedViewModel()
+            defer { cleanup(url: tempURL) }
+            let player = AmbientAudioPlayer()
+            vm.totalTime = 90 * 60
+            vm.timeRemaining = 90 * 60
+
+            let view = ContentView(viewModel: vm, audioPlayer: player, initialTab: .focusTimer)
+            renderViewToPNGFile(view, size: CGSize(width: 1440, height: 900), destinationPath: "\(artifactDir)/qa_1440x900_large.png")
+        }
+
+        // 5. Fullscreen window (16pt top clearance)
+        do {
+            let (vm, tempURL) = makeIsolatedViewModel()
+            defer { cleanup(url: tempURL) }
+            let player = AmbientAudioPlayer()
+            vm.totalTime = 25 * 60
+            vm.timeRemaining = 25 * 60
+
+            let view = ContentView(viewModel: vm, audioPlayer: player, initialTab: .focusTimer, isFullScreen: true)
+            renderViewToPNGFile(view, size: CGSize(width: 1440, height: 900), destinationPath: "\(artifactDir)/qa_fullscreen_1440x900.png")
+        }
+
+        // 6. Tasks page with active timer mini-bar (verify 12pt spacing, no 140pt gap)
+        do {
+            let (vm, tempURL) = makeIsolatedViewModel()
+            defer { cleanup(url: tempURL) }
+            let player = AmbientAudioPlayer()
+            vm.startTimer()
+
+            let view = ContentView(viewModel: vm, audioPlayer: player, initialTab: .tasks)
+            renderViewToPNGFile(view, size: CGSize(width: 1050, height: 700), destinationPath: "\(artifactDir)/qa_tasks_with_minibar.png")
+        }
+    }
 }
+
 
 
 
