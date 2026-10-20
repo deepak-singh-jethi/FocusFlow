@@ -25,6 +25,7 @@ public struct InPlaceTimeInputView: View {
     @State private var isSecondsHovered: Bool = false
     @State private var isMinusHovered: Bool = false
     @State private var isPlusHovered: Bool = false
+    @State private var isPlus15Hovered: Bool = false
 
     public init(
         viewModel: TimerViewModel,
@@ -325,6 +326,7 @@ public struct InPlaceTimeInputView: View {
                     }
 
                     // +15m Quick Boost (Seconds-Preserving, with dedicated '+' icon)
+                    let canPlus15 = model.canAdjustPlus15
                     Button {
                         model.adjustMinutes(by: 15)
                     } label: {
@@ -334,16 +336,18 @@ public struct InPlaceTimeInputView: View {
                             Text("15m")
                                 .font(.system(size: max(10, min(size * 0.026, 12)), weight: .semibold))
                         }
-                        .foregroundColor(model.canAdjustPlus5 ? activeColor.opacity(0.95) : Color.white.opacity(0.20))
+                        .foregroundColor(canPlus15 ? activeColor.opacity(0.95) : Color.white.opacity(0.20))
                         .padding(.horizontal, isStageCompact ? 6 : (size < 400 ? 8 : 10))
                         .frame(height: max(28, min(size * 0.070, 34)))
-                        .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(model.canAdjustPlus5 ? activeColor.opacity(0.35) : Color.white.opacity(0.08), lineWidth: 1))
+                        .background(Color.white.opacity(isPlus15Hovered && canPlus15 ? 0.10 : 0.04), in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(canPlus15 ? activeColor.opacity(0.35) : Color.white.opacity(0.08), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
-                    .disabled(!model.canAdjustPlus5)
+                    .disabled(!canPlus15)
+                    .onHover { h in isPlus15Hovered = h }
                     .accessibilityLabel("Add 15 minutes")
-                    .help("Add 15 minutes to timer (preserves seconds)")
+                    .accessibilityHint(canPlus15 ? "Add 15 minutes to timer" : "Maximum timer limit reached")
+                    .help(canPlus15 ? "Add 15 minutes to timer (preserves seconds)" : "Cannot add 15 minutes: reaches maximum duration (360:59)")
                 }
 
                 // MARK: - 3. Reserved 32pt Helper / Validation Row (Zero Layout Shift!)

@@ -17628,4 +17628,296 @@ final class FocusFlowTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - +15m Boundary & Stepper Hardening Regression Tests
+
+    @MainActor
+    func testCustomTimerBoundary_01_Plus15mOn25MinutesBecomes40Minutes() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        controller.sync(from: vm.totalTime)
+
+        XCTAssertTrue(controller.canAdjustPlus15, "Can add 15 minutes to 25:00")
+        XCTAssertTrue(controller.canAdjustMinutes(by: 15))
+
+        controller.adjustMinutes(by: 15)
+        XCTAssertEqual(vm.totalTime, 40 * 60)
+        XCTAssertEqual(controller.committedMinutes, 40)
+        XCTAssertEqual(controller.committedSeconds, 0)
+        XCTAssertEqual(controller.inputMinutes, "40")
+        XCTAssertEqual(controller.inputSeconds, "00")
+    }
+
+    @MainActor
+    func testCustomTimerBoundary_02_Plus15mOn10Minutes30SecondsBecomes25Minutes30Seconds() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        vm.setCustomDuration(minutes: 10, seconds: 30)
+        controller.sync(from: vm.totalTime)
+
+        XCTAssertTrue(controller.canAdjustPlus15)
+        controller.adjustMinutes(by: 15)
+
+        XCTAssertEqual(vm.totalTime, 25 * 60 + 30)
+        XCTAssertEqual(controller.committedMinutes, 25)
+        XCTAssertEqual(controller.committedSeconds, 30, "Seconds must be preserved exactly")
+        XCTAssertEqual(controller.inputMinutes, "25")
+        XCTAssertEqual(controller.inputSeconds, "30")
+    }
+
+    @MainActor
+    func testCustomTimerBoundary_03_Plus15mOn345Minutes59SecondsReachesMaximum360Minutes59Seconds() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        vm.setCustomDuration(minutes: 345, seconds: 59)
+        controller.sync(from: vm.totalTime)
+
+        XCTAssertTrue(controller.canAdjustPlus15, "345:59 + 15m is exactly 360:59, which is supported maximum")
+        XCTAssertEqual(controller.committedTotalSeconds + 15 * 60, TimeInputController.maxDurationSeconds)
+
+        controller.adjustMinutes(by: 15)
+        XCTAssertEqual(vm.totalTime, 360 * 60 + 59)
+        XCTAssertEqual(controller.committedMinutes, 360)
+        XCTAssertEqual(controller.committedSeconds, 59)
+        XCTAssertEqual(controller.inputMinutes, "360")
+        XCTAssertEqual(controller.inputSeconds, "59")
+
+        // Once at maximum, neither +15m nor +5m can be applied
+        XCTAssertFalse(controller.canAdjustPlus15, "Cannot add 15 minutes when at max 360:59")
+        XCTAssertFalse(controller.canAdjustPlus5, "Cannot add 5 minutes when at max 360:59")
+    }
+
+    @MainActor
+    func testCustomTimerBoundary_04_Plus15mAtBoundariesIsUnavailable() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+
+        // 346:00 + 15m = 361:00 (exceeds 360:59) -> Unavailable
+        vm.setCustomDuration(minutes: 346, seconds: 0)
+        controller.sync(from: vm.totalTime)
+        XCTAssertFalse(controller.canAdjustPlus15, "346:00 + 15m exceeds maxDurationSeconds")
+        XCTAssertFalse(controller.canAdjustMinutes(by: 15))
+
+        // 350:30 + 15m = 365:30 -> Unavailable
+        vm.setCustomDuration(minutes: 350, seconds: 30)
+        controller.sync(from: vm.totalTime)
+        XCTAssertFalse(controller.canAdjustPlus15, "350:30 + 15m exceeds maxDurationSeconds")
+        XCTAssertFalse(controller.canAdjustMinutes(by: 15))
+
+        // 360:00 + 15m = 375:00 -> Unavailable
+        vm.setCustomDuration(minutes: 360, seconds: 0)
+        controller.sync(from: vm.totalTime)
+        XCTAssertFalse(controller.canAdjustPlus15, "360:00 + 15m exceeds maxDurationSeconds")
+        XCTAssertFalse(controller.canAdjustMinutes(by: 15))
+    }
+
+    @MainActor
+    func testCustomTimerBoundary_05_InvalidPlus15mDoesNotInvokeOnCommit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        vm.setCustomDuration(minutes: 350, seconds: 30)
+        controller.sync(from: vm.totalTime)
+
+        var commitCount = 0
+        controller.onCommit = { _, _ in
+            commitCount += 1
+        }
+
+        controller.adjustMinutes(by: 15)
+        XCTAssertEqual(commitCount, 0, "onCommit must not be invoked when adjustment is invalid")
+        XCTAssertEqual(vm.totalTime, 350 * 60 + 30)
+        XCTAssertEqual(controller.committedMinutes, 350)
+        XCTAssertEqual(controller.committedSeconds, 30)
+    }
+
+    @MainActor
+    func testCustomTimerBoundary_06_InvalidIncrementPreservesTimerDurationExactlyNoPartialClamping() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        vm.setCustomDuration(minutes: 355, seconds: 0)
+        controller.sync(from: vm.totalTime)
+
+        // Attempting +15m on 355:00 would exceed 360:00.
+        // It must NOT partially clamp to 360:00; it must strictly reject all-or-nothing.
+        controller.adjustMinutes(by: 15)
+        XCTAssertEqual(controller.committedMinutes, 355, "Must not apply partial increment to 360")
+        XCTAssertEqual(controller.committedSeconds, 0)
+        XCTAssertEqual(controller.inputMinutes, "355")
+        XCTAssertEqual(controller.inputSeconds, "00")
+        XCTAssertEqual(vm.totalTime, 355 * 60)
+    }
+
+    @MainActor
+    func testCustomTimerBoundary_07_Plus5mWorksAtCorrectUpperBoundary() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+
+        // 355:59 + 5m = 360:59 (exactly max) -> Valid
+        vm.setCustomDuration(minutes: 355, seconds: 59)
+        controller.sync(from: vm.totalTime)
+        XCTAssertTrue(controller.canAdjustPlus5)
+        controller.adjustMinutes(by: 5)
+        XCTAssertEqual(controller.committedMinutes, 360)
+        XCTAssertEqual(controller.committedSeconds, 59)
+        XCTAssertEqual(vm.totalTime, 360 * 60 + 59)
+
+        // 356:00 + 5m = 361:00 (exceeds max 360:59) -> Invalid
+        vm.setCustomDuration(minutes: 356, seconds: 0)
+        controller.sync(from: vm.totalTime)
+        XCTAssertFalse(controller.canAdjustPlus5)
+        controller.adjustMinutes(by: 5)
+        XCTAssertEqual(controller.committedMinutes, 356, "356:00 must remain unchanged")
+        XCTAssertEqual(vm.totalTime, 356 * 60)
+    }
+
+    @MainActor
+    func testCustomTimerBoundary_08_Minus5mRespectsMinimumDurationBoundary() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+
+        // 05:05 - 5m = 00:05 (exactly minimum supported duration) -> Valid
+        vm.setCustomDuration(minutes: 5, seconds: 5)
+        controller.sync(from: vm.totalTime)
+        XCTAssertTrue(controller.canAdjustMinus5)
+        controller.adjustMinutes(by: -5)
+        XCTAssertEqual(controller.committedMinutes, 0)
+        XCTAssertEqual(controller.committedSeconds, 5)
+        XCTAssertEqual(vm.totalTime, 5)
+
+        // 05:00 - 5m = 00:00 (less than 00:05) -> Invalid
+        vm.setCustomDuration(minutes: 5, seconds: 0)
+        controller.sync(from: vm.totalTime)
+        XCTAssertFalse(controller.canAdjustMinus5)
+        controller.adjustMinutes(by: -5)
+        XCTAssertEqual(controller.committedMinutes, 5, "05:00 must remain unchanged")
+        XCTAssertEqual(vm.totalTime, 300)
+
+        // 04:00 - 5m = -01:00 -> Invalid
+        vm.setCustomDuration(minutes: 4, seconds: 0)
+        controller.sync(from: vm.totalTime)
+        XCTAssertFalse(controller.canAdjustMinus5)
+        controller.adjustMinutes(by: -5)
+        XCTAssertEqual(controller.committedMinutes, 4, "04:00 must remain unchanged")
+        XCTAssertEqual(vm.totalTime, 240)
+    }
+
+    @MainActor
+    func testCustomTimerBoundary_09_SecondsPreservedByAllValidMinuteAdjustments() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        vm.setCustomDuration(minutes: 20, seconds: 47)
+        controller.sync(from: vm.totalTime)
+
+        // +5m -> 25:47
+        controller.adjustMinutes(by: 5)
+        XCTAssertEqual(controller.committedMinutes, 25)
+        XCTAssertEqual(controller.committedSeconds, 47)
+
+        // +15m -> 40:47
+        controller.adjustMinutes(by: 15)
+        XCTAssertEqual(controller.committedMinutes, 40)
+        XCTAssertEqual(controller.committedSeconds, 47)
+
+        // -5m -> 35:47
+        controller.adjustMinutes(by: -5)
+        XCTAssertEqual(controller.committedMinutes, 35)
+        XCTAssertEqual(controller.committedSeconds, 47)
+
+        // -15m -> 20:47
+        controller.adjustMinutes(by: -15)
+        XCTAssertEqual(controller.committedMinutes, 20)
+        XCTAssertEqual(controller.committedSeconds, 47)
+    }
+
+    @MainActor
+    func testCustomTimerBoundary_10_ActiveDraftCancellationAndStepperDeterministic() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        controller.sync(from: vm.totalTime)
+
+        var commits: [(Int, Int)] = []
+        controller.onCommit = { m, s in
+            commits.append((m, s))
+            vm.setCustomDuration(minutes: m, seconds: s)
+        }
+
+        // Case A: User starts editing, enters half-typed draft, then clicks valid +15m stepper
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "99")
+        XCTAssertTrue(controller.isEditing)
+
+        controller.adjustMinutes(by: 15)
+        XCTAssertFalse(controller.isEditing, "Draft editing must be cancelled")
+        XCTAssertEqual(commits.count, 1, "Exactly one commit must be triggered")
+        XCTAssertEqual(commits.first?.0, 40)
+        XCTAssertEqual(commits.first?.1, 0)
+        XCTAssertEqual(vm.totalTime, 40 * 60)
+
+        // Case B: User has invalid draft when committed is 350:00 and clicks invalid +15m
+        vm.setCustomDuration(minutes: 350, seconds: 0)
+        controller.sync(from: vm.totalTime)
+        commits.removeAll()
+
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "999") // invalid
+        controller.adjustMinutes(by: 15) // invalid delta
+
+        XCTAssertFalse(controller.isEditing)
+        XCTAssertEqual(commits.count, 0, "No commits triggered for invalid stepper delta")
+        XCTAssertEqual(controller.committedMinutes, 350)
+        XCTAssertEqual(controller.inputMinutes, "350")
+    }
+
+    @MainActor
+    func testCustomTimerBoundary_11_MainUIDisabledStateMatchesControllerCapability() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+
+        // At 350:30, +15m is disabled
+        vm.setCustomDuration(minutes: 350, seconds: 30)
+        controller.sync(from: vm.totalTime)
+        XCTAssertFalse(controller.canAdjustPlus15)
+
+        let disabledView = InPlaceTimeInputView(viewModel: vm, size: 400)
+        let hostingDisabled = NSHostingView(rootView: disabledView)
+        hostingDisabled.frame = NSRect(x: 0, y: 0, width: 600, height: 260)
+        hostingDisabled.layoutSubtreeIfNeeded()
+        XCTAssertFalse(controller.canAdjustPlus15)
+
+        // At 25:00, +15m is enabled
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        controller.sync(from: vm.totalTime)
+        XCTAssertTrue(controller.canAdjustPlus15)
+
+        let enabledView = InPlaceTimeInputView(viewModel: vm, size: 400)
+        let hostingEnabled = NSHostingView(rootView: enabledView)
+        hostingEnabled.frame = NSRect(x: 0, y: 0, width: 600, height: 260)
+        hostingEnabled.layoutSubtreeIfNeeded()
+        XCTAssertTrue(controller.canAdjustPlus15)
+    }
 }
+

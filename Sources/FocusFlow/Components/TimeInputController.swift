@@ -187,17 +187,25 @@ public class TimeInputController: ObservableObject {
         hasInvalidDraft = false
     }
 
-    // Stepper boundary capabilities
+    // MARK: - Stepper Boundary Capabilities
+    public func canAdjustMinutes(by delta: Int) -> Bool {
+        let (deltaSeconds, overflow1) = delta.multipliedReportingOverflow(by: 60)
+        guard !overflow1 else { return false }
+        let (proposedTotal, overflow2) = committedTotalSeconds.addingReportingOverflow(deltaSeconds)
+        guard !overflow2 else { return false }
+        return proposedTotal >= Self.minDurationSeconds && proposedTotal <= Self.maxDurationSeconds
+    }
+
     public var canAdjustMinus5: Bool {
-        let currentM = committedMinutes
-        let currentS = committedSeconds
-        let newTotal = (currentM - 5) * 60 + currentS
-        return newTotal >= Self.minDurationSeconds
+        canAdjustMinutes(by: -5)
     }
 
     public var canAdjustPlus5: Bool {
-        let currentM = committedMinutes
-        return (currentM + 5) <= Self.maxMinutes
+        canAdjustMinutes(by: 5)
+    }
+
+    public var canAdjustPlus15: Bool {
+        canAdjustMinutes(by: 15)
     }
 
     public func validateDraft() -> Result<(minutes: Int, seconds: Int), TimeInputValidationError> {
@@ -272,19 +280,18 @@ public class TimeInputController: ObservableObject {
         onCancel?()
     }
 
-    // MARK: - Stepper Adjustments (Seconds-Preserving)
+    // MARK: - Stepper Adjustments (Seconds-Preserving, All-or-Nothing)
     public func adjustMinutes(by delta: Int) {
         if activeEditingField != nil || hasInvalidDraft {
             cancelEditing()
         }
-        let currentM = committedMinutes
-        let currentS = committedSeconds // Preserve existing seconds!
-        let newM = min(max(currentM + delta, 0), Self.maxMinutes)
-        let newTotal = newM * 60 + currentS
 
-        guard newTotal >= Self.minDurationSeconds else {
+        guard canAdjustMinutes(by: delta) else {
             return
         }
+
+        let newM = committedMinutes + delta
+        let currentS = committedSeconds // Preserve existing seconds!
 
         committedMinutes = newM
         committedSeconds = currentS

@@ -7,21 +7,45 @@ STAGING_DIR="/tmp/focusflow-preview-staging"
 STAGING_APP="$STAGING_DIR/FocusFlow.app"
 
 RELEASES_DIR="$PROJECT_ROOT/releases"
-ARTIFACT_A_APP="$RELEASES_DIR/FocusFlow.app"
-ARTIFACT_B_DMG="$RELEASES_DIR/FocusFlow-Preview-macOS14-arm64.dmg"
-ARTIFACT_C_DMG="$RELEASES_DIR/FocusFlow-Testing-Preview-Tasks1-8-macOS14-arm64.dmg"
+ARTIFACT_APP="$RELEASES_DIR/FocusFlow.app"
+ARTIFACT_DMG="$RELEASES_DIR/FocusFlow-Testing-Preview-Tasks1-8-macOS14-arm64.dmg"
+OBSOLETE_DMG="$RELEASES_DIR/FocusFlow-Preview-macOS14-arm64.dmg"
 
-TEMP_DMG="/tmp/FocusFlow_temp_packaging.dmg"
+BACKUPS_ROOT="$PROJECT_ROOT/../FocusFlow_backups"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+BACKUP_DIR="${FOCUSFLOW_BACKUP_DIR:-$BACKUPS_ROOT/FocusFlow_releases_backup_$TIMESTAMP}"
+
+TEMP_RW_DMG="/tmp/FocusFlow_temp_packaging_$TIMESTAMP.dmg"
+CANDIDATE_DMG="/tmp/FocusFlow_candidate_$TIMESTAMP.dmg"
 BG_IMAGE="/tmp/dmg_background.png"
 VOL_NAME="FocusFlow"
 
-echo "=== FocusFlow Unified Release Packaging Pipeline (Tasks 1-8) ==="
+echo "=== FocusFlow Release Packaging Pipeline (Single DMG & Standalone App) ==="
 echo "Project Root: $PROJECT_ROOT"
 mkdir -p "$RELEASES_DIR"
+mkdir -p "$BACKUP_DIR"
 
-# 1. Compile fresh release binary from checked-out source
+# 0. Backup existing release artifacts to durable sibling directory outside repo
+echo "--- Backing up existing releases to: $BACKUP_DIR ---"
+if [ -d "$ARTIFACT_APP" ]; then
+    echo "Backing up FocusFlow.app..."
+    cp -R "$ARTIFACT_APP" "$BACKUP_DIR/FocusFlow.app"
+fi
+for dmg in "$RELEASES_DIR"/*.dmg; do
+    if [ -f "$dmg" ]; then
+        echo "Backing up $(basename "$dmg")..."
+        cp -p "$dmg" "$BACKUP_DIR/$(basename "$dmg")"
+    fi
+done
+
+# 1. Compile fresh release binary from current working tree
 BUILD_COMMIT=$(git rev-parse HEAD)
+GIT_DIRTY=$(git status --porcelain)
 echo "Building fresh release binary from commit $BUILD_COMMIT..."
+if [ -n "$GIT_DIRTY" ]; then
+    echo "Note: Working tree contains uncommitted source changes which are included in this build."
+fi
+
 swift build -c release --scratch-path "$SCRATCH_PATH"
 
 if [ ! -f "$SCRATCH_PATH/release/FocusFlow" ]; then
@@ -64,6 +88,9 @@ for f in "$STAGING_APP/Contents/Resources/Soundscapes/"*.mp3; do
     fi
 done
 
+# Clean any extended attributes on staging app
+xattr -cr "$STAGING_APP" 2>/dev/null || true
+
 # Apply verified ad-hoc code signature with entitlements
 echo "Signing canonical staging application bundle..."
 codesign --force --sign - --entitlements "$PROJECT_ROOT/FocusFlow.entitlements" "$STAGING_APP"
@@ -73,81 +100,53 @@ codesign --verify --deep --strict --verbose=2 "$STAGING_APP"
 CANONICAL_EXEC_HASH=$(shasum -a 256 "$STAGING_APP/Contents/MacOS/FocusFlow" | awk '{print $1}')
 echo "Canonical Application Executable SHA-256: $CANONICAL_EXEC_HASH"
 
-# 3. Synchronize Artifact A: Standalone FocusFlow.app
-echo "--- Synchronizing Artifact A: $ARTIFACT_A_APP ---"
-if [ -d "$ARTIFACT_A_APP" ]; then
-    echo "Backing up previous FocusFlow.app..."
-    tar -czf "/tmp/FocusFlow_app_backup_$(date +%s).tar.gz" -C "$RELEASES_DIR" "FocusFlow.app" 2>/dev/null || true
-    rm -rf "$ARTIFACT_A_APP"
-fi
-cp -R "$STAGING_APP" "$ARTIFACT_A_APP"
-xattr -cr "$ARTIFACT_A_APP" 2>/dev/null || true
-xattr -d com.apple.FinderInfo "$ARTIFACT_A_APP" 2>/dev/null || true
-codesign --force --sign - --entitlements "$PROJECT_ROOT/FocusFlow.entitlements" "$ARTIFACT_A_APP"
-codesign --verify --verbose=2 "$ARTIFACT_A_APP"
-A_EXEC_HASH=$(shasum -a 256 "$ARTIFACT_A_APP/Contents/MacOS/FocusFlow" | awk '{print $1}')
-if [ "$A_EXEC_HASH" != "$CANONICAL_EXEC_HASH" ]; then
-    echo "Error: Artifact A executable hash does not match canonical bundle!"
-    exit 1
-fi
-echo "Artifact A verified successfully."
-
-# 4. Generate DMG background if needed
+# 3. Generate DMG background if needed
 if [ ! -f "$BG_IMAGE" ]; then
     echo "Rendering high-res background graphic..."
     swift "$PROJECT_ROOT/scripts/make_dmg_background.swift"
 fi
 
-# Function to package a DMG from the canonical staging bundle
-package_dmg() {
-    local target_dmg="$1"
-    local dmg_label="$2"
+# 4. Package single Testing Preview DMG at candidate location
+echo "--- Packaging Single Testing Preview DMG: $ARTIFACT_DMG ---"
 
-    echo "--- Packaging $dmg_label: $target_dmg ---"
-
-    # Backup existing DMG if present
-    if [ -f "$target_dmg" ]; then
-        echo "Backing up existing $(basename "$target_dmg")..."
-        cp -p "$target_dmg" "/tmp/$(basename "$target_dmg")_backup_$(date +%s).dmg" 2>/dev/null || true
-    fi
-
-    # Cleanup previous mounts or temp DMGs
-    rm -f "$TEMP_DMG"
-    hdiutil info | grep '/Volumes/FocusFlow' | awk '{print $1}' | while read -r dev; do
-        hdiutil detach "$dev" -force 2>/dev/null || true
-    done
+# Clean up any lingering temporary mount of FocusFlow
+if mount | grep -q "/Volumes/$VOL_NAME"; then
+    echo "Cleaning up lingering $VOL_NAME mount point..."
+    diskutil eject "/Volumes/$VOL_NAME" 2>/dev/null || hdiutil detach "/Volumes/$VOL_NAME" -force 2>/dev/null || true
     sleep 1
+fi
+rm -f "$TEMP_RW_DMG" "$CANDIDATE_DMG"
 
-    # Create temporary read-write HFS+ disk image
-    hdiutil create -size 140m -fs HFS+ -volname "$VOL_NAME" "$TEMP_DMG"
+# Create temporary read-write HFS+ disk image
+hdiutil create -size 140m -fs HFS+ -volname "$VOL_NAME" "$TEMP_RW_DMG"
 
-    # Mount disk image
-    ATTACH_INFO=$(hdiutil attach -readwrite -noverify -noautoopen "$TEMP_DMG")
-    MOUNT_POINT=$(echo "$ATTACH_INFO" | grep "/Volumes/" | awk -F'\t' '{print $NF}' | sed 's/^[ \t]*//')
-    DEVICE=$(echo "$ATTACH_INFO" | grep -E '^/dev/' | head -n 1 | awk '{print $1}')
-    echo "Mounted on device $DEVICE at $MOUNT_POINT"
+# Mount disk image
+ATTACH_INFO=$(hdiutil attach -readwrite -noverify -noautoopen "$TEMP_RW_DMG")
+MOUNT_POINT=$(echo "$ATTACH_INFO" | grep "/Volumes/" | awk -F'\t' '{print $NF}' | sed 's/^[ \t]*//')
+DEVICE=$(echo "$ATTACH_INFO" | grep -E '^/dev/' | head -n 1 | awk '{print $1}')
+echo "Mounted candidate volume on device $DEVICE at $MOUNT_POINT"
 
-    # Copy staged FocusFlow.app into volume
-    cp -R "$STAGING_APP" "$MOUNT_POINT/"
+# Copy staged FocusFlow.app into volume
+cp -R "$STAGING_APP" "$MOUNT_POINT/"
 
-    # Symlink Applications
-    ln -sfn /Applications "$MOUNT_POINT/Applications"
+# Symlink Applications
+ln -sfn /Applications "$MOUNT_POINT/Applications"
 
-    # Background artwork
-    mkdir -p "$MOUNT_POINT/.background"
-    cp "$BG_IMAGE" "$MOUNT_POINT/.background/background.png"
-    SetFile -a V "$MOUNT_POINT/.background" 2>/dev/null || true
-    SetFile -a V "$MOUNT_POINT/.background/background.png" 2>/dev/null || true
+# Background artwork
+mkdir -p "$MOUNT_POINT/.background"
+cp "$BG_IMAGE" "$MOUNT_POINT/.background/background.png"
+SetFile -a V "$MOUNT_POINT/.background" 2>/dev/null || true
+SetFile -a V "$MOUNT_POINT/.background/background.png" 2>/dev/null || true
 
-    # Volume icon
-    if [ -f "$PROJECT_ROOT/Assets/AppIcon.icns" ]; then
-        cp "$PROJECT_ROOT/Assets/AppIcon.icns" "$MOUNT_POINT/.VolumeIcon.icns"
-        SetFile -a C "$MOUNT_POINT" 2>/dev/null || true
-        SetFile -a V "$MOUNT_POINT/.VolumeIcon.icns" 2>/dev/null || true
-    fi
+# Volume icon
+if [ -f "$PROJECT_ROOT/Assets/AppIcon.icns" ]; then
+    cp "$PROJECT_ROOT/Assets/AppIcon.icns" "$MOUNT_POINT/.VolumeIcon.icns"
+    SetFile -a C "$MOUNT_POINT" 2>/dev/null || true
+    SetFile -a V "$MOUNT_POINT/.VolumeIcon.icns" 2>/dev/null || true
+fi
 
-    # Finder appearance
-    osascript <<APPLESCRIPT
+# Finder appearance
+osascript <<APPLESCRIPT
 tell application "Finder"
     open disk "$VOL_NAME"
     delay 1.5
@@ -172,62 +171,86 @@ tell application "Finder"
 end tell
 APPLESCRIPT
 
-    # Flush and unmount
-    sync
-    sleep 2
-    hdiutil detach "$DEVICE" -force || diskutil eject "$DEVICE"
-    sleep 2
+# Flush and unmount
+sync
+sleep 2
+diskutil eject "$DEVICE" 2>/dev/null || hdiutil detach "$DEVICE" -force 2>/dev/null || true
+sleep 2
 
-    # Convert to compressed read-only DMG
-    rm -f "$target_dmg"
-    hdiutil convert "$TEMP_DMG" -format UDZO -imagekey zlib-level=9 -o "$target_dmg"
-    rm -f "$TEMP_DMG"
+# Convert to compressed read-only candidate DMG
+hdiutil convert "$TEMP_RW_DMG" -format UDZO -imagekey zlib-level=9 -o "$CANDIDATE_DMG"
+rm -f "$TEMP_RW_DMG"
 
-    # Ad-hoc sign DMG container and verify
-    codesign --force --sign - "$target_dmg"
-    codesign --verify --verbose=2 "$target_dmg"
-    hdiutil verify "$target_dmg"
+# Ad-hoc sign candidate DMG container and verify
+codesign --force --sign - "$CANDIDATE_DMG"
+codesign --verify --verbose=2 "$CANDIDATE_DMG"
+hdiutil verify "$CANDIDATE_DMG"
 
-    # Mount and verify embedded executable SHA-256
-    echo "Verifying embedded executable inside $(basename "$target_dmg")..."
-    VERIFY_ATTACH=$(hdiutil attach -readonly -noverify -noautoopen "$target_dmg")
-    VERIFY_MOUNT=$(echo "$VERIFY_ATTACH" | grep "/Volumes/" | awk -F'\t' '{print $NF}' | sed 's/^[ \t]*//')
-    VERIFY_DEV=$(echo "$VERIFY_ATTACH" | grep -E '^/dev/' | head -n 1 | awk '{print $1}')
+# Mount and verify embedded executable SHA-256 matches canonical staging bundle
+echo "Verifying embedded executable inside candidate DMG..."
+VERIFY_ATTACH=$(hdiutil attach -readonly -noverify -noautoopen "$CANDIDATE_DMG")
+VERIFY_MOUNT=$(echo "$VERIFY_ATTACH" | grep "/Volumes/" | awk -F'\t' '{print $NF}' | sed 's/^[ \t]*//')
+VERIFY_DEV=$(echo "$VERIFY_ATTACH" | grep -E '^/dev/' | head -n 1 | awk '{print $1}')
 
-    EMBEDDED_HASH=$(shasum -a 256 "$VERIFY_MOUNT/FocusFlow.app/Contents/MacOS/FocusFlow" | awk '{print $1}')
-    hdiutil detach "$VERIFY_DEV" -force >/dev/null 2>&1 || true
+EMBEDDED_HASH=$(shasum -a 256 "$VERIFY_MOUNT/FocusFlow.app/Contents/MacOS/FocusFlow" | awk '{print $1}')
+diskutil eject "$VERIFY_DEV" 2>/dev/null || hdiutil detach "$VERIFY_DEV" -force >/dev/null 2>&1 || true
 
-    if [ "$EMBEDDED_HASH" != "$CANONICAL_EXEC_HASH" ]; then
-        echo "Error: Embedded executable in $(basename "$target_dmg") does not match canonical hash!"
-        exit 1
-    fi
-    echo "Verified $(basename "$target_dmg") embedded executable matches canonical hash."
-}
+if [ "$EMBEDDED_HASH" != "$CANONICAL_EXEC_HASH" ]; then
+    echo "Error: Candidate DMG embedded executable hash ($EMBEDDED_HASH) does not match canonical ($CANONICAL_EXEC_HASH)!"
+    rm -f "$CANDIDATE_DMG"
+    exit 1
+fi
+echo "Candidate DMG verified successfully with matching embedded hash."
 
-# 5. Build Artifact B: FocusFlow-Preview-macOS14-arm64.dmg
-package_dmg "$ARTIFACT_B_DMG" "Artifact B (Preview DMG)"
+# 5. Safely install validated artifacts into releases/
+echo "--- Installing validated candidate DMG to $ARTIFACT_DMG ---"
+mv -f "$CANDIDATE_DMG" "$ARTIFACT_DMG"
 
-# 6. Build Artifact C: FocusFlow-Testing-Preview-Tasks1-8-macOS14-arm64.dmg
-package_dmg "$ARTIFACT_C_DMG" "Artifact C (Testing Preview Tasks 1-8 DMG)"
+# Retire legacy Preview DMG to backup directory if present in releases
+if [ -f "$OBSOLETE_DMG" ]; then
+    echo "Moving obsolete legacy Preview DMG to backup: $BACKUP_DIR/$(basename "$OBSOLETE_DMG")"
+    mv -f "$OBSOLETE_DMG" "$BACKUP_DIR/$(basename "$OBSOLETE_DMG")"
+fi
+
+# 6. Synchronize Standalone FocusFlow.app
+echo "--- Synchronizing Standalone App: $ARTIFACT_APP ---"
+rm -rf "$ARTIFACT_APP"
+ditto "$STAGING_APP" "$ARTIFACT_APP"
+xattr -cr "$ARTIFACT_APP" 2>/dev/null || true
+codesign --verify --verbose=2 "$ARTIFACT_APP"
+
+APP_EXEC_HASH=$(shasum -a 256 "$ARTIFACT_APP/Contents/MacOS/FocusFlow" | awk '{print $1}')
+if [ "$APP_EXEC_HASH" != "$CANONICAL_EXEC_HASH" ]; then
+    echo "Error: Standalone FocusFlow.app executable hash ($APP_EXEC_HASH) does not match canonical ($CANONICAL_EXEC_HASH)!"
+    exit 1
+fi
+
+# 7. Inventory Verification: confirm exactly ONE DMG exists in releases/
+DMG_COUNT=$(ls -1 "$RELEASES_DIR"/*.dmg 2>/dev/null | wc -l | tr -d ' ')
+if [ "$DMG_COUNT" -ne 1 ]; then
+    echo "Error: releases/ directory must contain exactly ONE DMG, but found $DMG_COUNT!"
+    ls -la "$RELEASES_DIR"
+    exit 1
+fi
 
 echo ""
 echo "================================================================="
-echo "=== ALL THREE RELEASE ARTIFACTS VERIFIED AND SYNCHRONIZED ==="
+echo "=== RELEASE ARTIFACTS VERIFIED AND CONSOLIDATED (ONE DMG) ==="
 echo "================================================================="
 echo "Source Commit: $BUILD_COMMIT"
 echo "Canonical Executable SHA-256: $CANONICAL_EXEC_HASH"
 echo ""
-echo "Artifact A (Standalone App):"
-echo "  Path: $ARTIFACT_A_APP"
-echo "  Executable SHA-256: $A_EXEC_HASH"
+echo "Standalone Application:"
+echo "  Path: $ARTIFACT_APP"
+echo "  Executable SHA-256: $APP_EXEC_HASH"
 echo ""
-echo "Artifact B (Preview DMG):"
-echo "  Path: $ARTIFACT_B_DMG"
-echo "  DMG SHA-256: $(shasum -a 256 "$ARTIFACT_B_DMG" | awk '{print $1}')"
-echo "  Size: $(stat -f%z "$ARTIFACT_B_DMG") bytes"
+echo "Single Testing Preview DMG:"
+echo "  Path: $ARTIFACT_DMG"
+echo "  DMG SHA-256: $(shasum -a 256 "$ARTIFACT_DMG" | awk '{print $1}')"
+echo "  Size: $(stat -f%z "$ARTIFACT_DMG") bytes"
+echo "  Embedded Executable SHA-256: $EMBEDDED_HASH"
 echo ""
-echo "Artifact C (Testing Preview Tasks 1-8 DMG):"
-echo "  Path: $ARTIFACT_C_DMG"
-echo "  DMG SHA-256: $(shasum -a 256 "$ARTIFACT_C_DMG" | awk '{print $1}')"
-echo "  Size: $(stat -f%z "$ARTIFACT_C_DMG") bytes"
+echo "Durable Backup Location:"
+echo "  Directory: $BACKUP_DIR"
+echo "  Backed Up Artifacts: $(ls -m "$BACKUP_DIR")"
 echo "================================================================="
