@@ -85,6 +85,12 @@ public struct MenuBarCompanionView: View {
                 recoverySuccessBanner
             }
 
+            if let activeInterval = viewModel.idleReviewCoordinator.activeReviewInterval {
+                compactIdleReviewCard(interval: activeInterval)
+            } else if !viewModel.idleReviewCoordinator.pendingIntervals.isEmpty {
+                pendingIdleReviewBanner
+            }
+
             Group {
                 modeSegmentedControl
 
@@ -175,7 +181,9 @@ public struct MenuBarCompanionView: View {
     }
 
     private var statusPillText: String {
-        if selectedMode == .stopwatch {
+        if viewModel.isDeferredCompletionPending {
+            return "IDLE REVIEW"
+        } else if selectedMode == .stopwatch {
             return viewModel.isStopwatchRunning ? "RUNNING" : (viewModel.stopwatchTime > 0 ? "PAUSED" : "STOPWATCH")
         } else if viewModel.isTimerRunning {
             return isBreak ? "BREAK" : "RUNNING"
@@ -187,7 +195,9 @@ public struct MenuBarCompanionView: View {
     }
 
     private var statusPillColor: Color {
-        if selectedMode == .stopwatch {
+        if viewModel.isDeferredCompletionPending {
+            return .orange
+        } else if selectedMode == .stopwatch {
             return viewModel.isStopwatchRunning ? .cyan : (viewModel.stopwatchTime > 0 ? .yellow : .cyan)
         } else if isBreak {
             return .teal
@@ -1238,5 +1248,179 @@ public struct MenuBarCompanionView: View {
         .padding(.vertical, 6)
         .background(Color.orange.opacity(0.25), in: RoundedRectangle(cornerRadius: 6))
         .help(viewModel.saveErrorMessage ?? "Recent changes may not have been saved due to a storage error.")
+    }
+
+    // MARK: - Idle Review Components (Menu Bar)
+    @ViewBuilder
+    private func compactIdleReviewCard(interval: IdleReviewInterval) -> some View {
+        let accentColor = Color.orange
+        let totalPending = viewModel.idleReviewCoordinator.pendingIntervals.count
+        let currentIndex = (viewModel.idleReviewCoordinator.pendingIntervals.firstIndex(where: { $0.id == interval.id }) ?? 0) + 1
+        let taskTitle = interval.taskId.flatMap { id in viewModel.tasks.first(where: { $0.id == id })?.title }
+
+        VStack(spacing: 8) {
+            // Header
+            HStack(spacing: 6) {
+                Image(systemName: "moon.fill")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(accentColor)
+
+                Text("Inactive Time Review")
+                    .font(.system(size: 11.5, weight: .bold))
+                    .foregroundColor(.white)
+
+                if totalPending > 1 {
+                    Text("\(currentIndex) of \(totalPending)")
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundColor(accentColor)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(accentColor.opacity(0.18), in: Capsule())
+                }
+
+                Spacer()
+
+                Button {
+                    viewModel.idleReviewCoordinator.dismissActiveReviewToDecideLater()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundColor(.gray)
+                        .padding(4)
+                        .background(Color.white.opacity(0.06), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Decide Later (Esc)")
+            }
+
+            // Interval summary
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(interval.sessionType == "Stopwatch" ? "Stopwatch" : "\(interval.sessionType) Session")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.white.opacity(0.70))
+
+                    if let title = taskTitle, !title.isEmpty {
+                        Text(title)
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                    }
+                }
+
+                Spacer()
+
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(interval.formattedDuration)
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .foregroundColor(accentColor)
+
+                    Text(interval.formattedTimeRange())
+                        .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.55))
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+
+            // Action Buttons
+            HStack(spacing: 6) {
+                // Decide Later
+                Button {
+                    viewModel.idleReviewCoordinator.resolve(intervalId: interval.id, decision: .decideLater)
+                } label: {
+                    Text("Later")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.white.opacity(0.75))
+                        .frame(maxWidth: .infinity, minHeight: 26)
+                        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.10), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .help("Decide Later")
+
+                // Exclude
+                Button {
+                    viewModel.idleReviewCoordinator.resolve(intervalId: interval.id, decision: .excludeFromFocus)
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "minus.circle")
+                            .font(.system(size: 9, weight: .bold))
+                        Text("Exclude")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .foregroundColor(.white.opacity(0.90))
+                    .frame(maxWidth: .infinity, minHeight: 26)
+                    .background(Color.red.opacity(0.18), in: RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.red.opacity(0.35), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .help("Exclude from focus time")
+
+                // Count as Focus
+                Button {
+                    viewModel.idleReviewCoordinator.resolve(intervalId: interval.id, decision: .countAsFocus)
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 9, weight: .bold))
+                        Text("Count")
+                            .font(.system(size: 10, weight: .bold))
+                    }
+                    .foregroundColor(Color(red: 0.02, green: 0.18, blue: 0.08))
+                    .frame(maxWidth: .infinity, minHeight: 26)
+                    .background(
+                        LinearGradient(
+                            colors: [Color(red: 0.20, green: 0.85, blue: 0.45), Color(red: 0.15, green: 0.75, blue: 0.38)],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        ),
+                        in: RoundedRectangle(cornerRadius: 6)
+                    )
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.20), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .help("Count as focused time")
+            }
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity)
+        .background(Color(red: 0.11, green: 0.12, blue: 0.16), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(accentColor.opacity(0.35), lineWidth: 1))
+    }
+
+    @ViewBuilder
+    private var pendingIdleReviewBanner: some View {
+        let count = viewModel.idleReviewCoordinator.pendingIntervals.count
+        HStack(spacing: 6) {
+            Image(systemName: "moon.fill")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.orange)
+
+            Text("\(count) Inactive Review\(count > 1 ? "s" : "")")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.white)
+
+            Spacer()
+
+            Button {
+                if let first = viewModel.idleReviewCoordinator.pendingIntervals.first {
+                    viewModel.idleReviewCoordinator.openReview(for: first)
+                }
+            } label: {
+                Text("Review")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(Color(red: 0.10, green: 0.05, blue: 0.05))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2.5)
+                    .background(Color.orange, in: RoundedRectangle(cornerRadius: 4))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.orange.opacity(0.20), in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.orange.opacity(0.30), lineWidth: 1))
     }
 }

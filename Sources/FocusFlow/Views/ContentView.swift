@@ -122,8 +122,24 @@ public struct ContentView: View {
                     ))
                     .zIndex(100)
             }
+
+            if let activeInterval = viewModel.idleReviewCoordinator.activeReviewInterval {
+                let taskTitle: String? = {
+                    if let taskId = activeInterval.taskId, let found = viewModel.tasks.first(where: { $0.id == taskId }) {
+                        return found.title
+                    }
+                    return nil
+                }()
+                IdleReviewModalView(coordinator: viewModel.idleReviewCoordinator, interval: activeInterval, taskTitle: taskTitle)
+                    .transition(.asymmetric(
+                        insertion: .scale(scale: 0.96).combined(with: .opacity),
+                        removal: .scale(scale: 0.96).combined(with: .opacity)
+                    ))
+                    .zIndex(110)
+            }
         }
         .animation(.spring(response: 0.40, dampingFraction: 0.80), value: isFocusState)
+        .animation(.spring(response: 0.35, dampingFraction: 0.82), value: viewModel.idleReviewCoordinator.activeReviewInterval != nil)
         .background(bgMain)
         .ignoresSafeArea(.container, edges: .top)
         .sheet(isPresented: $showingWorkspace) {

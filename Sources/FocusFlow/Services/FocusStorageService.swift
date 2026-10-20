@@ -262,6 +262,10 @@ public struct ActiveSessionRecoveryState: Codable, Equatable {
     public var stopwatchElapsedSeconds: Double
     public var stopwatchTaskId: UUID?
 
+    // Task 9: Idle Time Review Recovery
+    public var isDeferredCompletionPending: Bool?
+    public var pendingIdleIntervals: [IdleReviewInterval]?
+
     public var checkpointTimestamp: Date
 
     public init(
@@ -285,6 +289,8 @@ public struct ActiveSessionRecoveryState: Codable, Equatable {
         isStopwatchRunning: Bool = false,
         stopwatchElapsedSeconds: Double = 0.0,
         stopwatchTaskId: UUID? = nil,
+        isDeferredCompletionPending: Bool? = nil,
+        pendingIdleIntervals: [IdleReviewInterval]? = nil,
         checkpointTimestamp: Date = Date()
     ) {
         self.version = version
@@ -307,6 +313,8 @@ public struct ActiveSessionRecoveryState: Codable, Equatable {
         self.isStopwatchRunning = isStopwatchRunning
         self.stopwatchElapsedSeconds = max(0.0, stopwatchElapsedSeconds)
         self.stopwatchTaskId = stopwatchTaskId
+        self.isDeferredCompletionPending = isDeferredCompletionPending
+        self.pendingIdleIntervals = pendingIdleIntervals
         self.checkpointTimestamp = checkpointTimestamp
     }
 }
@@ -340,6 +348,10 @@ public struct FocusAppData: Codable, Equatable {
     public var configuredIsBreakSession: Bool?
     // Task 8: Crash / Force-Quit Recovery State
     public var activeSessionRecovery: ActiveSessionRecoveryState?
+    // Task 9: Idle Time Review Settings and Unresolved Reviews
+    public var idleReviewEnabled: Bool?
+    public var idleThresholdSeconds: Int?
+    public var pendingIdleIntervals: [IdleReviewInterval]?
 
     enum CodingKeys: String, CodingKey {
         case tasks
@@ -368,6 +380,10 @@ public struct FocusAppData: Codable, Equatable {
         case configuredCurrentSession
         case configuredIsBreakSession
         case activeSessionRecovery
+        // Task 9 Keys
+        case idleReviewEnabled
+        case idleThresholdSeconds
+        case pendingIdleIntervals
     }
 
     public init(
@@ -395,7 +411,10 @@ public struct FocusAppData: Codable, Equatable {
         configuredCustomSeconds: Int? = nil,
         configuredCurrentSession: Int? = nil,
         configuredIsBreakSession: Bool? = nil,
-        activeSessionRecovery: ActiveSessionRecoveryState? = nil
+        activeSessionRecovery: ActiveSessionRecoveryState? = nil,
+        idleReviewEnabled: Bool? = nil,
+        idleThresholdSeconds: Int? = nil,
+        pendingIdleIntervals: [IdleReviewInterval]? = nil
     ) {
         self.tasks = tasks
         self.focusedSeconds = focusedSeconds
@@ -434,6 +453,9 @@ public struct FocusAppData: Codable, Equatable {
         self.configuredCurrentSession = configuredCurrentSession
         self.configuredIsBreakSession = configuredIsBreakSession
         self.activeSessionRecovery = activeSessionRecovery
+        self.idleReviewEnabled = idleReviewEnabled
+        self.idleThresholdSeconds = idleThresholdSeconds
+        self.pendingIdleIntervals = pendingIdleIntervals
     }
 
     public init(from decoder: Decoder) throws {
@@ -487,6 +509,10 @@ public struct FocusAppData: Codable, Equatable {
             print("[FocusStorageService] Warning: Failed to decode activeSessionRecovery: \(error)")
             self.activeSessionRecovery = nil
         }
+
+        self.idleReviewEnabled = try container.decodeIfPresent(Bool.self, forKey: .idleReviewEnabled)
+        self.idleThresholdSeconds = try container.decodeIfPresent(Int.self, forKey: .idleThresholdSeconds)
+        self.pendingIdleIntervals = try container.decodeIfPresent([IdleReviewInterval].self, forKey: .pendingIdleIntervals)
 
         // Backward compatibility migration:
         // If sessionRecords is empty and legacyLifetimeFocusedSeconds was nil,

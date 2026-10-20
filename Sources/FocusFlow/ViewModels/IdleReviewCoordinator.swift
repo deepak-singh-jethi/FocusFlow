@@ -1,0 +1,422 @@
+import Foundation
+import Combine
+import SwiftUI
+
+// MARK: - Idle Coordinator State
+public enum IdleCoordinatorState: Equatable, Sendable {
+    case inactive
+    case monitoring
+    case idleCandidate(since: Date)
+    case idleDetected(startedAt: Date)
+    case pendingReview
+    case reviewing(intervalId: UUID)
+
+    public var isIdleDetected: Bool {
+        if case .idleDetected = self { return true }
+        return false
+    }
+
+    public var isIdleCandidate: Bool {
+        if case .idleCandidate = self { return true }
+        return false
+    }
+
+    public var isReviewing: Bool {
+        if case .reviewing = self { return true }
+        return false
+    }
+}
+
+// MARK: - Idle Review Coordinator
+@MainActor
+public class IdleReviewCoordinator: ObservableObject {
+    // Configuration
+    @Published public var isEnabled: Bool = true
+    @Published public var thresholdSeconds: Int = 300 // Default 5 minutes
+    public static let supportedThresholds: [Int] = [120, 300, 600, 900] // 2m, 5m, 10m, 15m
+
+    // Observable State
+    @Published public private(set) var state: IdleCoordinatorState = .monitoring
+    @Published public var pendingIntervals: [IdleReviewInterval] = [] {
+        didSet {
+            onPendingCountChange?(pendingIntervals.count)
+        }
+    }
+    @Published public var activeReviewInterval: IdleReviewInterval? = nil
+
+    // Injected Dependencies
+    public let activityProvider: IdleActivityProvider
+    public var currentDateProvider: () -> Date
+
+    // Tracking state
+    private var currentCandidateStart: Date? = nil
+    private var isCurrentlyIdle: Bool = false
+    private var sleepStartDate: Date? = nil
+    private var lockStartDate: Date? = nil
+
+    // Callbacks
+    public var onResolution: ((_ interval: IdleReviewInterval, _ decision: IdleReviewDecision) -> Void)? = nil
+    public var onPendingCountChange: ((_ count: Int) -> Void)? = nil
+
+    public init(
+        activityProvider: IdleActivityProvider = MacOSNativeIdleActivityProvider(),
+        currentDateProvider: @escaping () -> Date = Date.init,
+        isEnabled: Bool = true,
+        thresholdSeconds: Int = 300
+    ) {
+        self.activityProvider = activityProvider
+        self.currentDateProvider = currentDateProvider
+        self.isEnabled = isEnabled
+        self.thresholdSeconds = thresholdSeconds
+    }
+
+    // MARK: - Periodic Engine Tick
+    /// Evaluates system idle state against the active timer/stopwatch session.
+    public func tick(
+        now: Date,
+        isSessionActive: Bool,
+        sessionType: String,
+        sessionId: UUID,
+        taskId: UUID?,
+        sessionDeadline: Date? = nil,
+        sessionStartDate: Date? = nil
+    ) {
+        // If feature disabled, break preset, or session not running:
+        guard isEnabled && isSessionActive && sessionType != "Break" else {
+            if isCurrentlyIdle, let candidateStart = currentCandidateStart {
+                // Session expired or stopped while user was away
+                recordCompletedIdleInterval(
+                    candidateStart: candidateStart,
+                    now: now,
+                    sessionId: sessionId,
+                    sessionType: sessionType,
+                    taskId: taskId,
+                    sessionDeadline: sessionDeadline,
+                    sessionStartDate: sessionStartDate
+                )
+                isCurrentlyIdle = false
+                currentCandidateStart = nil
+            }
+            if activeReviewInterval != nil {
+                state = .reviewing(intervalId: activeReviewInterval!.id)
+            } else if !pendingIntervals.isEmpty {
+                state = .pendingReview
+            } else {
+                state = .inactive
+            }
+            return
+        }
+
+        // Determine current idle duration from provider or screen lock
+        let isLocked = activityProvider.isScreenLocked()
+        let rawIdleSeconds = activityProvider.systemIdleDuration(at: now)
+
+        if isLocked {
+            if lockStartDate == nil {
+                lockStartDate = rawIdleSeconds > 0 ? now.addingTimeInterval(-rawIdleSeconds) : now
+                if currentCandidateStart == nil {
+                    currentCandidateStart = lockStartDate
+                }
+            }
+            let lockedDuration = now.timeIntervalSince(lockStartDate!)
+            if lockedDuration >= Double(thresholdSeconds) {
+                isCurrentlyIdle = true
+                state = .idleDetected(startedAt: currentCandidateStart ?? lockStartDate ?? now)
+            } else {
+                state = .idleCandidate(since: currentCandidateStart ?? lockStartDate ?? now)
+            }
+            return
+        }
+
+        // Screen is not locked. Check if user just unlocked after an idle lock period:
+        if let lockStart = lockStartDate {
+            let lockedDuration = now.timeIntervalSince(lockStart)
+            lockStartDate = nil
+            if lockedDuration >= Double(thresholdSeconds) || isCurrentlyIdle {
+                // User unlocked and returned after being locked/idle!
+                let candidateStart = currentCandidateStart ?? lockStart
+                recordCompletedIdleInterval(
+                    candidateStart: candidateStart,
+                    now: now,
+                    sessionId: sessionId,
+                    sessionType: sessionType,
+                    taskId: taskId,
+                    sessionDeadline: sessionDeadline,
+                    sessionStartDate: sessionStartDate
+                )
+                isCurrentlyIdle = false
+                currentCandidateStart = nil
+
+                if let active = activeReviewInterval {
+                    state = .reviewing(intervalId: active.id)
+                } else if !pendingIntervals.isEmpty {
+                    state = .pendingReview
+                } else {
+                    state = .monitoring
+                }
+                return
+            }
+        }
+
+        // Normal unlocked activity monitoring
+        if rawIdleSeconds >= Double(thresholdSeconds) {
+            // Threshold reached or exceeded
+            if currentCandidateStart == nil {
+                // Anchor to exact last activity date
+                let lastActivity = now.addingTimeInterval(-rawIdleSeconds)
+                let boundedStart: Date
+                if let sessionStart = sessionStartDate {
+                    boundedStart = max(lastActivity, sessionStart)
+                } else {
+                    boundedStart = lastActivity
+                }
+                currentCandidateStart = boundedStart
+            }
+            isCurrentlyIdle = true
+            state = .idleDetected(startedAt: currentCandidateStart ?? now)
+
+        } else if rawIdleSeconds > 0 && !isCurrentlyIdle {
+            // Idle candidate (inactivity begun, but threshold not yet reached)
+            let candidateStart = now.addingTimeInterval(-rawIdleSeconds)
+            currentCandidateStart = candidateStart
+            state = .idleCandidate(since: candidateStart)
+
+        } else if rawIdleSeconds < 1.0 {
+            // Activity detected (user moved mouse or pressed key)
+            if isCurrentlyIdle, let candidateStart = currentCandidateStart {
+                // User was idle and has just returned!
+                recordCompletedIdleInterval(
+                    candidateStart: candidateStart,
+                    now: now,
+                    sessionId: sessionId,
+                    sessionType: sessionType,
+                    taskId: taskId,
+                    sessionDeadline: sessionDeadline,
+                    sessionStartDate: sessionStartDate
+                )
+                isCurrentlyIdle = false
+                currentCandidateStart = nil
+            } else {
+                currentCandidateStart = nil
+            }
+
+            // Update UI state
+            if let active = activeReviewInterval {
+                state = .reviewing(intervalId: active.id)
+            } else if !pendingIntervals.isEmpty {
+                state = .pendingReview
+            } else {
+                state = .monitoring
+            }
+        }
+    }
+
+    // MARK: - Interval Creation & Deduplication
+    private func recordCompletedIdleInterval(
+        candidateStart: Date,
+        now: Date,
+        sessionId: UUID,
+        sessionType: String,
+        taskId: UUID?,
+        sessionDeadline: Date?,
+        sessionStartDate: Date?
+    ) {
+        // Bound interval strictly by session start and session deadline (Scenario B)
+        let boundedStart: Date
+        if let sessionStart = sessionStartDate {
+            boundedStart = max(candidateStart, sessionStart)
+        } else {
+            boundedStart = candidateStart
+        }
+
+        let boundedEnd: Date
+        if let deadline = sessionDeadline {
+            // Discard any inactivity elapsed after timer deadline
+            boundedEnd = min(now, deadline)
+        } else {
+            boundedEnd = now
+        }
+
+        guard boundedEnd > boundedStart else { return }
+        let durationSecs = Int(boundedEnd.timeIntervalSince(boundedStart))
+
+        guard durationSecs >= thresholdSeconds else { return }
+
+        // Deduplicate against existing intervals
+        let isDuplicate = pendingIntervals.contains { existing in
+            existing.sessionId == sessionId &&
+            abs(existing.startTime.timeIntervalSince(boundedStart)) < 2.0 &&
+            abs(existing.endTime.timeIntervalSince(boundedEnd)) < 2.0
+        }
+        guard !isDuplicate else { return }
+
+        let interval = IdleReviewInterval(
+            sessionId: sessionId,
+            sessionType: sessionType,
+            taskId: taskId,
+            startTime: boundedStart,
+            endTime: boundedEnd,
+            eligibleDurationSeconds: durationSecs,
+            status: .pending
+        )
+
+        pendingIntervals.append(interval)
+
+        // If no active review is currently presented, auto-surface the oldest pending review
+        if activeReviewInterval == nil {
+            activeReviewInterval = pendingIntervals.first
+            if let active = activeReviewInterval {
+                state = .reviewing(intervalId: active.id)
+            } else {
+                state = .pendingReview
+            }
+        } else {
+            state = .reviewing(intervalId: activeReviewInterval!.id)
+        }
+    }
+
+    // MARK: - Sleep, Wake & Screen Lock Handling
+    public func handleSleep(at now: Date) {
+        sleepStartDate = now
+    }
+
+    public func handleScreenLock(at now: Date) {
+        lockStartDate = now
+        if currentCandidateStart == nil {
+            currentCandidateStart = now
+        }
+    }
+
+    public func handleScreenUnlock(at now: Date) {
+        // State will resolve on next tick when user input is processed
+    }
+
+    public func handleWake(
+        at now: Date,
+        isSessionActive: Bool,
+        sessionType: String,
+        sessionId: UUID,
+        taskId: UUID?,
+        sessionDeadline: Date? = nil,
+        sessionStartDate: Date? = nil
+    ) {
+        guard let sleepStart = sleepStartDate else {
+            currentCandidateStart = nil
+            isCurrentlyIdle = false
+            return
+        }
+        sleepStartDate = nil
+
+        guard isEnabled && isSessionActive && sessionType != "Break" else {
+            return
+        }
+
+        let boundedStart: Date
+        if let sessionStart = sessionStartDate {
+            boundedStart = max(sleepStart, sessionStart)
+        } else {
+            boundedStart = sleepStart
+        }
+
+        let boundedEnd: Date
+        if let deadline = sessionDeadline {
+            boundedEnd = min(now, deadline)
+        } else {
+            boundedEnd = now
+        }
+
+        guard boundedEnd > boundedStart else { return }
+        let durationSecs = Int(boundedEnd.timeIntervalSince(boundedStart))
+
+        if durationSecs >= thresholdSeconds {
+            let isDuplicate = pendingIntervals.contains { existing in
+                existing.sessionId == sessionId &&
+                abs(existing.startTime.timeIntervalSince(boundedStart)) < 2.0 &&
+                abs(existing.endTime.timeIntervalSince(boundedEnd)) < 2.0
+            }
+            if !isDuplicate {
+                let interval = IdleReviewInterval(
+                    sessionId: sessionId,
+                    sessionType: sessionType,
+                    taskId: taskId,
+                    startTime: boundedStart,
+                    endTime: boundedEnd,
+                    eligibleDurationSeconds: durationSecs,
+                    status: .pending,
+                    isEstimated: true
+                )
+                pendingIntervals.append(interval)
+                if activeReviewInterval == nil {
+                    activeReviewInterval = pendingIntervals.first
+                    state = .reviewing(intervalId: interval.id)
+                }
+            }
+        }
+
+        isCurrentlyIdle = false
+        currentCandidateStart = nil
+    }
+
+    // MARK: - Resolution & Review Management
+    public func resolve(intervalId: UUID, decision: IdleReviewDecision, at now: Date = Date()) {
+        guard let index = pendingIntervals.firstIndex(where: { $0.id == intervalId }) else {
+            return
+        }
+
+        var interval = pendingIntervals[index]
+
+        switch decision {
+        case .countAsFocus:
+            interval.status = .included
+            interval.decisionDate = now
+            pendingIntervals.remove(at: index)
+            if activeReviewInterval?.id == intervalId {
+                activeReviewInterval = pendingIntervals.first
+            }
+            onResolution?(interval, .countAsFocus)
+
+        case .excludeFromFocus:
+            interval.status = .excluded
+            interval.decisionDate = now
+            pendingIntervals.remove(at: index)
+            if activeReviewInterval?.id == intervalId {
+                activeReviewInterval = pendingIntervals.first
+            }
+            onResolution?(interval, .excludeFromFocus)
+
+        case .decideLater:
+            // Stays in pendingIntervals
+            if activeReviewInterval?.id == intervalId {
+                activeReviewInterval = nil
+            }
+        }
+
+        if let nextActive = activeReviewInterval {
+            state = .reviewing(intervalId: nextActive.id)
+        } else if !pendingIntervals.isEmpty {
+            state = .pendingReview
+        } else {
+            state = .monitoring
+        }
+    }
+
+    public func openReview(for interval: IdleReviewInterval) {
+        activeReviewInterval = interval
+        state = .reviewing(intervalId: interval.id)
+    }
+
+    public func dismissActiveReviewToDecideLater() {
+        activeReviewInterval = nil
+        if !pendingIntervals.isEmpty {
+            state = .pendingReview
+        } else {
+            state = .monitoring
+        }
+    }
+
+    public func setThreshold(minutes: Int) {
+        let seconds = minutes * 60
+        guard Self.supportedThresholds.contains(seconds) else { return }
+        thresholdSeconds = seconds
+    }
+}

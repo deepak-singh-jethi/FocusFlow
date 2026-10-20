@@ -17919,5 +17919,998 @@ final class FocusFlowTests: XCTestCase {
         hostingEnabled.layoutSubtreeIfNeeded()
         XCTAssertTrue(controller.canAdjustPlus15)
     }
+
+    // MARK: - Task 9A: Idle Activity Monitor & Coordinator Tests
+
+    @MainActor
+    func testTask9A_01_UnderThresholdNoIdleDetected() {
+        let mock = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mock, thresholdSeconds: 300)
+        let sessionId = UUID()
+        let taskId = UUID()
+        let baseDate = Date(timeIntervalSince1970: 1700000000)
+
+        // At 4m 59s (299s) of idle time:
+        mock.setSimulatedIdle(299.0)
+        let checkDate = baseDate.addingTimeInterval(299.0)
+        coordinator.tick(
+            now: checkDate,
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: taskId,
+            sessionStartDate: baseDate
+        )
+
+        // Must NOT be idleDetected, must have NO pending reviews
+        XCTAssertTrue(coordinator.pendingIntervals.isEmpty)
+        XCTAssertNil(coordinator.activeReviewInterval)
+        if case .idleCandidate = coordinator.state {
+            // Expected
+        } else {
+            XCTFail("Expected state to be .idleCandidate, got \(coordinator.state)")
+        }
+
+        // User interacts (idle drops to 0)
+        mock.setSimulatedIdle(0.0)
+        coordinator.tick(
+            now: checkDate.addingTimeInterval(1.0),
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: taskId,
+            sessionStartDate: baseDate
+        )
+        XCTAssertEqual(coordinator.state, .monitoring)
+        XCTAssertTrue(coordinator.pendingIntervals.isEmpty)
+    }
+
+    @MainActor
+    func testTask9A_02_ThresholdReachedTriggersIdleDetected() {
+        let mock = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mock, thresholdSeconds: 300)
+        let sessionId = UUID()
+        let baseDate = Date(timeIntervalSince1970: 1700000000)
+
+        // Inactivity reaches 5m 01s (301s)
+        mock.setSimulatedIdle(301.0)
+        let now = baseDate.addingTimeInterval(301.0)
+        coordinator.tick(
+            now: now,
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: nil,
+            sessionStartDate: baseDate
+        )
+
+        if case .idleDetected(let startedAt) = coordinator.state {
+            // Must anchor to last interaction (baseDate), NOT the threshold arrival timestamp!
+            XCTAssertEqual(startedAt.timeIntervalSince1970, baseDate.timeIntervalSince1970, accuracy: 1.0)
+        } else {
+            XCTFail("Expected .idleDetected, got \(coordinator.state)")
+        }
+    }
+
+    @MainActor
+    func testTask9A_03_UserReturnCreatesPendingReviewWithAccurateInterval() {
+        let mock = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mock, thresholdSeconds: 300)
+        let sessionId = UUID()
+        let taskId = UUID()
+        let baseDate = Date(timeIntervalSince1970: 1700000000)
+
+        // Inactivity reaches 9 minutes (540s)
+        mock.setSimulatedIdle(540.0)
+        let idleDate = baseDate.addingTimeInterval(540.0)
+        coordinator.tick(
+            now: idleDate,
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: taskId,
+            sessionStartDate: baseDate
+        )
+
+        // User returns! Input detected (idle = 0)
+        mock.setSimulatedIdle(0.0)
+        let returnDate = baseDate.addingTimeInterval(541.0)
+        coordinator.tick(
+            now: returnDate,
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: taskId,
+            sessionStartDate: baseDate
+        )
+
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+        guard let interval = coordinator.pendingIntervals.first else {
+            XCTFail("No interval found")
+            return
+        }
+
+        XCTAssertEqual(interval.sessionId, sessionId)
+        XCTAssertEqual(interval.taskId, taskId)
+        XCTAssertEqual(interval.sessionType, "Focus")
+        XCTAssertEqual(interval.status, .pending)
+        XCTAssertEqual(interval.eligibleDurationSeconds, 541, accuracy: 2)
+        XCTAssertEqual(coordinator.activeReviewInterval?.id, interval.id)
+    }
+
+    @MainActor
+    func testTask9A_04_ExpiryWhileIdleBoundsIntervalToDeadline() {
+        let mock = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mock, thresholdSeconds: 300)
+        let sessionId = UUID()
+        let start = Date(timeIntervalSince1970: 1700000000) // 10:00
+        let deadline = start.addingTimeInterval(25 * 60) // 10:25 (1500s)
+        let returnDate = start.addingTimeInterval(32 * 60) // 10:32 (1920s)
+
+        // Inactivity started at 10:07 (420s after start)
+        // User was away 25 minutes (1500s of inactivity from 10:07 to 10:32)
+        let awayDuration = returnDate.timeIntervalSince(start.addingTimeInterval(420.0))
+        mock.setSimulatedIdle(awayDuration)
+
+        // Pre-tick while away
+        coordinator.tick(
+            now: returnDate,
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: nil,
+            sessionDeadline: deadline,
+            sessionStartDate: start
+        )
+
+        // User returns at 10:32
+        mock.setSimulatedIdle(0.0)
+        coordinator.tick(
+            now: returnDate,
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: nil,
+            sessionDeadline: deadline,
+            sessionStartDate: start
+        )
+
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+        guard let interval = coordinator.pendingIntervals.first else {
+            XCTFail("No interval found")
+            return
+        }
+
+        // Bounded strictly to deadline: 10:07 to 10:25 = 18 minutes (1080s)
+        // Must NOT include the 7 minutes after deadline!
+        XCTAssertEqual(interval.endTime.timeIntervalSince1970, deadline.timeIntervalSince1970, accuracy: 1.0)
+        XCTAssertEqual(interval.eligibleDurationSeconds, 18 * 60, accuracy: 2)
+    }
+
+    @MainActor
+    func testTask9A_05_BreakSessionsIgnoreInactivity() {
+        let mock = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mock, thresholdSeconds: 300)
+        let sessionId = UUID()
+        let baseDate = Date(timeIntervalSince1970: 1700000000)
+
+        // Inactivity during Break session
+        mock.setSimulatedIdle(600.0)
+        coordinator.tick(
+            now: baseDate.addingTimeInterval(600.0),
+            isSessionActive: true,
+            sessionType: "Break",
+            sessionId: sessionId,
+            taskId: nil
+        )
+
+        // User returns
+        mock.setSimulatedIdle(0.0)
+        coordinator.tick(
+            now: baseDate.addingTimeInterval(601.0),
+            isSessionActive: true,
+            sessionType: "Break",
+            sessionId: sessionId,
+            taskId: nil
+        )
+
+        XCTAssertTrue(coordinator.pendingIntervals.isEmpty, "Break sessions must never create idle review intervals")
+        XCTAssertNil(coordinator.activeReviewInterval)
+    }
+
+    @MainActor
+    func testTask9A_06_MultipleIntervalsQueuedOldestFirst() {
+        let mock = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mock, thresholdSeconds: 300)
+        let sessionId = UUID()
+        let t0 = Date(timeIntervalSince1970: 1700000000)
+
+        // Interval 1: 7 minutes away
+        mock.setSimulatedIdle(420.0)
+        coordinator.tick(now: t0.addingTimeInterval(420.0), isSessionActive: true, sessionType: "Focus", sessionId: sessionId, taskId: nil, sessionStartDate: t0)
+        mock.setSimulatedIdle(0.0)
+        coordinator.tick(now: t0.addingTimeInterval(421.0), isSessionActive: true, sessionType: "Focus", sessionId: sessionId, taskId: nil, sessionStartDate: t0)
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+
+        // User clicks Decide Later
+        let id1 = coordinator.pendingIntervals[0].id
+        coordinator.resolve(intervalId: id1, decision: .decideLater)
+        XCTAssertNil(coordinator.activeReviewInterval)
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+
+        // Interval 2: 8 minutes away
+        let t1 = t0.addingTimeInterval(1000.0)
+        mock.setSimulatedIdle(480.0)
+        coordinator.tick(now: t1.addingTimeInterval(480.0), isSessionActive: true, sessionType: "Focus", sessionId: sessionId, taskId: nil, sessionStartDate: t0)
+        mock.setSimulatedIdle(0.0)
+        coordinator.tick(now: t1.addingTimeInterval(481.0), isSessionActive: true, sessionType: "Focus", sessionId: sessionId, taskId: nil, sessionStartDate: t0)
+
+        // Both intervals must exist, oldest first
+        XCTAssertEqual(coordinator.pendingIntervals.count, 2)
+        XCTAssertEqual(coordinator.pendingIntervals[0].id, id1, "Oldest interval must remain first")
+        XCTAssertTrue(coordinator.pendingIntervals[0].startTime < coordinator.pendingIntervals[1].startTime)
+    }
+
+    @MainActor
+    func testTask9A_07_ResolutionTransitionsAndCallback() {
+        let mock = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mock, thresholdSeconds: 300)
+        let sessionId = UUID()
+        let t0 = Date(timeIntervalSince1970: 1700000000)
+
+        mock.setSimulatedIdle(360.0)
+        coordinator.tick(now: t0.addingTimeInterval(360.0), isSessionActive: true, sessionType: "Focus", sessionId: sessionId, taskId: nil, sessionStartDate: t0)
+        mock.setSimulatedIdle(0.0)
+        coordinator.tick(now: t0.addingTimeInterval(361.0), isSessionActive: true, sessionType: "Focus", sessionId: sessionId, taskId: nil, sessionStartDate: t0)
+
+        guard let interval = coordinator.pendingIntervals.first else {
+            XCTFail("No interval created")
+            return
+        }
+
+        var resolvedDecision: IdleReviewDecision?
+        var resolvedStatus: IdleReviewStatus?
+        coordinator.onResolution = { resolved, decision in
+            resolvedDecision = decision
+            resolvedStatus = resolved.status
+        }
+
+        // Test Count as Focus
+        coordinator.resolve(intervalId: interval.id, decision: .countAsFocus)
+        XCTAssertEqual(resolvedDecision, .countAsFocus)
+        XCTAssertEqual(resolvedStatus, .included)
+        XCTAssertTrue(coordinator.pendingIntervals.isEmpty)
+        XCTAssertNil(coordinator.activeReviewInterval)
+        XCTAssertEqual(coordinator.state, .monitoring)
+    }
+
+    @MainActor
+    func testTask9A_08_SleepAndWakeHandling() {
+        let mock = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mock, thresholdSeconds: 300)
+        let sessionId = UUID()
+        let sleepTime = Date(timeIntervalSince1970: 1700000000)
+        let wakeTime = sleepTime.addingTimeInterval(600.0) // 10 minutes sleep
+
+        coordinator.handleSleep(at: sleepTime)
+        coordinator.handleWake(
+            at: wakeTime,
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: nil
+        )
+
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+        guard let interval = coordinator.pendingIntervals.first else {
+            XCTFail("No sleep interval recorded")
+            return
+        }
+        XCTAssertTrue(interval.isEstimated, "Sleep intervals must be marked as estimated")
+        XCTAssertEqual(interval.eligibleDurationSeconds, 600)
+    }
+
+    @MainActor
+    func testTask9A_09_ScreenLockHandling() {
+        let mock = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mock, thresholdSeconds: 300)
+        let sessionId = UUID()
+        let lockTime = Date(timeIntervalSince1970: 1700000000)
+        // Screen is locked
+        coordinator.handleScreenLock(at: lockTime)
+        mock.setScreenLocked(true)
+        coordinator.tick(
+            now: lockTime.addingTimeInterval(360.0),
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: nil,
+            sessionStartDate: lockTime
+        )
+
+        // Screen is unlocked
+        mock.setScreenLocked(false)
+        mock.setSimulatedIdle(0.0)
+        coordinator.tick(
+            now: lockTime.addingTimeInterval(361.0),
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: nil,
+            sessionStartDate: lockTime
+        )
+
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+        guard let interval = coordinator.pendingIntervals.first else {
+            XCTFail("No interval found")
+            return
+        }
+        XCTAssertEqual(interval.eligibleDurationSeconds, 361, accuracy: 2)
+    }
+
+    @MainActor
+    func testTask9A_10_ConfigurableThresholds() {
+        let coordinator = IdleReviewCoordinator()
+        XCTAssertEqual(coordinator.thresholdSeconds, 300)
+
+        coordinator.setThreshold(minutes: 2)
+        XCTAssertEqual(coordinator.thresholdSeconds, 120)
+
+        coordinator.setThreshold(minutes: 10)
+        XCTAssertEqual(coordinator.thresholdSeconds, 600)
+
+        coordinator.setThreshold(minutes: 15)
+        XCTAssertEqual(coordinator.thresholdSeconds, 900)
+
+        // Unsupported threshold rejected
+        coordinator.setThreshold(minutes: 7)
+        XCTAssertEqual(coordinator.thresholdSeconds, 900, "Unsupported threshold must not be applied")
+    }
+
+    @MainActor
+    func testTask9A_11_DisabledFeatureGeneratesNoReviews() {
+        let mock = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mock, thresholdSeconds: 300)
+        coordinator.isEnabled = false
+
+        mock.setSimulatedIdle(3600.0) // 1 hour idle
+        coordinator.tick(
+            now: Date(),
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: UUID(),
+            taskId: nil
+        )
+
+        mock.setSimulatedIdle(0.0)
+        coordinator.tick(
+            now: Date().addingTimeInterval(1.0),
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: UUID(),
+            taskId: nil
+        )
+
+        XCTAssertTrue(coordinator.pendingIntervals.isEmpty)
+        XCTAssertNil(coordinator.activeReviewInterval)
+        XCTAssertEqual(coordinator.state, .inactive)
+    }
+
+    // MARK: - Task 9B: Accounting Reconciler, Deferred Completion & Persistence Tests
+
+    @MainActor
+    func testTask9B_01_InSessionIdle_CountAsFocus_ConfirmsProvisionalCredit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        let mockActivity = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(
+            activityProvider: mockActivity,
+            currentDateProvider: { currentTime },
+            isEnabled: true,
+            thresholdSeconds: 300
+        )
+        coordinator.onResolution = { [weak vm] interval, decision in
+            vm?.handleIdleReviewResolution(interval: interval, decision: decision)
+        }
+
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        // Advance 10 minutes active
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 600)
+
+        // 7 minutes idle (420s)
+        currentTime = currentTime.addingTimeInterval(420)
+        mockActivity.setSimulatedIdle(420)
+        coordinator.tick(
+            now: currentTime,
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: vm.activeTimerSessionId,
+            taskId: taskId,
+            sessionStartDate: currentTime.addingTimeInterval(-1020)
+        )
+
+        // User returns
+        mockActivity.setSimulatedIdle(0.0)
+        coordinator.tick(
+            now: currentTime,
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: vm.activeTimerSessionId,
+            taskId: taskId,
+            sessionStartDate: currentTime.addingTimeInterval(-1020)
+        )
+
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+        guard let interval = coordinator.pendingIntervals.first else {
+            XCTFail("Missing pending interval")
+            return
+        }
+
+        // Resolve with .countAsFocus
+        coordinator.resolve(intervalId: interval.id, decision: .countAsFocus, at: currentTime)
+
+        // Time remains confirmed at 1020s (600s active + 420s idle confirmed as focus), no deduction
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 1020)
+        XCTAssertTrue(coordinator.pendingIntervals.isEmpty)
+    }
+
+    @MainActor
+    func testTask9B_02_InSessionIdle_ExcludeFromFocus_DeductsTaskTime() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        let mockActivity = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(
+            activityProvider: mockActivity,
+            currentDateProvider: { currentTime },
+            isEnabled: true,
+            thresholdSeconds: 300
+        )
+        coordinator.onResolution = { [weak vm] interval, decision in
+            vm?.handleIdleReviewResolution(interval: interval, decision: decision)
+        }
+
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        // 10 minutes elapsed (600s credited provisionally)
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 600)
+
+        // User was idle for 7 minutes (420s)
+        let idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-420),
+            endTime: currentTime,
+            eligibleDurationSeconds: 420,
+            status: .pending
+        )
+        coordinator.pendingIntervals.append(idleInterval)
+
+        // Resolve with .excludeFromFocus
+        coordinator.resolve(intervalId: idleInterval.id, decision: .excludeFromFocus, at: currentTime)
+
+        // Task time must be retrospectively deducted: 600 - 420 = 180s
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 180)
+    }
+
+    @MainActor
+    func testTask9B_03_InSessionIdle_DecideLater_KeepsProvisionalCreditInQueue() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        let mockActivity = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(
+            activityProvider: mockActivity,
+            currentDateProvider: { currentTime },
+            isEnabled: true,
+            thresholdSeconds: 300
+        )
+        coordinator.onResolution = { [weak vm] interval, decision in
+            vm?.handleIdleReviewResolution(interval: interval, decision: decision)
+        }
+
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        let idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-420),
+            endTime: currentTime,
+            eligibleDurationSeconds: 420,
+            status: .pending
+        )
+        coordinator.pendingIntervals.append(idleInterval)
+        coordinator.openReview(for: idleInterval)
+        XCTAssertNotNil(coordinator.activeReviewInterval)
+
+        coordinator.resolve(intervalId: idleInterval.id, decision: .decideLater, at: currentTime)
+
+        // Modal dismissed, but interval remains in queue
+        XCTAssertNil(coordinator.activeReviewInterval)
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 600)
+    }
+
+    @MainActor
+    func testTask9B_04A_ActiveUserAtDeadline_CompletesNormallyWithoutDeferral() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_t9b_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+
+        vm.startTimer(at: currentTime)
+        let target = currentTime.addingTimeInterval(1500)
+
+        // User stays active throughout session (idle = 0s)
+        currentTime = target
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        // Session completes immediately without deferral
+        XCTAssertFalse(vm.isDeferredCompletionPending, "Completion must not be deferred when user was active at deadline")
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertTrue(vm.isBreakPreset)
+    }
+
+    @MainActor
+    func testTask9B_04B_ScenarioB_TimerExpiresWhileIdle_DefersCompletion() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_t9b_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.idleReviewCoordinator.thresholdSeconds = 300
+
+        vm.startTimer(at: currentTime)
+        let target = currentTime.addingTimeInterval(1500)
+
+        // User goes idle at minute 15
+        currentTime = currentTime.addingTimeInterval(900)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        // Deadline reached: user inactive for 600s (10m)
+        currentTime = target
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        // Verification of Scenario B invariants
+        XCTAssertTrue(vm.isDeferredCompletionPending, "Session completion must be deferred when user is inactive at deadline")
+        XCTAssertEqual(vm.timeRemaining, 0, "Display must show 00:00")
+        XCTAssertFalse(vm.isTimerRunning, "Countdown is not running")
+        XCTAssertEqual(vm.completedSessions, 0, "Session completion must be held")
+        XCTAssertFalse(vm.isBreakPreset, "Must not auto-advance to break yet")
+    }
+
+    @MainActor
+    func testTask9B_05_ScenarioB_PostDeadlineInactivityStrictlyExcluded() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_t9b_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+
+        vm.startTimer(at: currentTime)
+        let target = currentTime.addingTimeInterval(1500) // 10:25
+
+        // Inactive starting at minute 15 (10:15)
+        currentTime = currentTime.addingTimeInterval(900)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        // Reach deadline at 10:25
+        currentTime = target
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+
+        // Inactivity continues past deadline to 10:45 (another 20 minutes away!)
+        currentTime = target.addingTimeInterval(1200) // 10:45
+        mockActivity.setSimulatedIdle(1800) // 30 minutes idle
+        vm.reconcileActiveTimers(at: currentTime)
+
+        // User returns at 10:45
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1)
+        guard let interval = vm.idleReviewCoordinator.pendingIntervals.first else {
+            XCTFail("No interval found")
+            return
+        }
+
+        // Post-deadline time (10:25 to 10:45) must NOT be included!
+        // Eligible idle duration is strictly 10:15 to 10:25 = 600s (10 mins)
+        XCTAssertEqual(interval.eligibleDurationSeconds, 600, "Inactivity past deadline must be strictly excluded")
+        XCTAssertEqual(interval.endTime, target, "Interval end time must be capped at targetEndDate")
+    }
+
+    @MainActor
+    func testTask9B_06_ScenarioB_ResolveCountAsFocus_CompletesSession() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_t9b_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+
+        vm.startTimer(at: currentTime)
+        let target = currentTime.addingTimeInterval(1500)
+
+        currentTime = target
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+
+        // User returns
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        guard let interval = vm.idleReviewCoordinator.pendingIntervals.first else {
+            XCTFail("Missing interval")
+            return
+        }
+
+        // User selects Count As Focus
+        vm.idleReviewCoordinator.resolve(intervalId: interval.id, decision: .countAsFocus, at: currentTime)
+
+        // Session completes!
+        XCTAssertFalse(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertTrue(vm.isBreakPreset, "Should advance to Break preset")
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords.first?.durationSeconds, 1500, "Full duration credited")
+    }
+
+    @MainActor
+    func testTask9B_07_ScenarioB_ResolveExcludeFromFocus_DeductsIdleAndCompletesSession() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_t9b_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+        let target = currentTime.addingTimeInterval(1500)
+
+        // User idle from minute 15 (600s idle before deadline)
+        currentTime = target
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+
+        // User returns
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        guard let interval = vm.idleReviewCoordinator.pendingIntervals.first else {
+            XCTFail("Missing interval")
+            return
+        }
+
+        // User selects Exclude From Focus
+        vm.idleReviewCoordinator.resolve(intervalId: interval.id, decision: .excludeFromFocus, at: currentTime)
+
+        XCTAssertFalse(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertTrue(vm.isBreakPreset)
+
+        // Credited time: 1500 - 600 = 900s (15 mins)
+        XCTAssertEqual(vm.sessionRecords.first?.durationSeconds, 900)
+        if let idx = vm.tasks.firstIndex(where: { $0.id == taskId }) {
+            XCTAssertEqual(vm.tasks[idx].timeSpentSeconds, 900)
+        }
+    }
+
+    @MainActor
+    func testTask9B_08_Stopwatch_ExcludeFromFocus_DeductsTaskOnly_PreservesLapsAndDisplay() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        vm.startStopwatch()
+
+        // 120s elapsed -> record lap
+        currentTime = currentTime.addingTimeInterval(120)
+        vm.reconcileActiveTimers(at: currentTime)
+        vm.recordLap()
+        XCTAssertEqual(vm.laps.count, 1)
+
+        // 600s total elapsed (480s more)
+        currentTime = currentTime.addingTimeInterval(480)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.stopwatchTime, 600)
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 600)
+
+        // Exclude 300s of idle time
+        let interval = IdleReviewInterval(
+            sessionId: UUID(),
+            sessionType: "Stopwatch",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-300),
+            endTime: currentTime,
+            eligibleDurationSeconds: 300,
+            status: .pending
+        )
+        vm.handleIdleReviewResolution(interval: interval, decision: .excludeFromFocus)
+
+        // Task time is deducted: 600 - 300 = 300s
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 300)
+
+        // Stopwatch display time and laps are NOT altered!
+        XCTAssertEqual(vm.stopwatchTime, 600, "Stopwatch displayed time must remain exact wall-clock elapsed")
+        XCTAssertEqual(vm.laps.count, 1, "Laps must remain untouched")
+        XCTAssertEqual(vm.laps.first?.totalTime, 120)
+    }
+
+    @MainActor
+    func testTask9B_09_Persistence_SurvivesQuitAndReload() throws {
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_t9b_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        let vm = TimerViewModel(storage: storage)
+        vm.idleReviewEnabled = false
+        vm.idleThresholdSeconds = 600
+
+        let interval = IdleReviewInterval(
+            sessionId: UUID(),
+            sessionType: "Focus",
+            taskId: nil,
+            startTime: Date().addingTimeInterval(-600),
+            endTime: Date(),
+            eligibleDurationSeconds: 600
+        )
+        vm.idleReviewCoordinator.pendingIntervals = [interval]
+        vm.persistData(force: true)
+
+        // Load into fresh ViewModel
+        let loadedVM = TimerViewModel(storage: storage)
+        XCTAssertFalse(loadedVM.idleReviewEnabled)
+        XCTAssertEqual(loadedVM.idleThresholdSeconds, 600)
+        XCTAssertEqual(loadedVM.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(loadedVM.idleReviewCoordinator.pendingIntervals.first?.eligibleDurationSeconds, 600)
+    }
+
+    @MainActor
+    func testTask9B_10_CrashRecovery_DeferredCompletionRestoresCleanly() throws {
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_t9b_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        let mockActivity = MockIdleActivityProvider()
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+
+        vm.startTimer(at: currentTime)
+        let target = currentTime.addingTimeInterval(1500)
+
+        currentTime = target
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+
+        // Force-quit / reload without completing session
+        let recoveredVM = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        XCTAssertTrue(recoveredVM.isDeferredCompletionPending, "Deferred completion must survive force-quit recovery")
+        XCTAssertEqual(recoveredVM.timeRemaining, 0)
+        XCTAssertFalse(recoveredVM.isTimerRunning)
+    }
+
+    @MainActor
+    func testTask9B_11_ConservationOfSeconds_SessionRecordSplitting() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let sessionStart = Date(timeIntervalSince1970: 1700000000) // 10:00:00
+        let sessionEnd = sessionStart.addingTimeInterval(1500)      // 10:25:00
+
+        let initialRecord = FocusSessionRecord(
+            id: UUID(),
+            startTime: sessionStart,
+            endTime: sessionEnd,
+            durationSeconds: 1500,
+            mode: "Focus",
+            taskId: nil
+        )
+        vm.sessionRecords = [initialRecord]
+
+        // Idle from minute 7 to minute 16 (9m = 540s)
+        let idleStart = sessionStart.addingTimeInterval(420) // 10:07
+        let idleEnd = sessionStart.addingTimeInterval(960)   // 10:16
+        let idleInterval = IdleReviewInterval(
+            sessionId: initialRecord.id,
+            sessionType: "Focus",
+            taskId: nil,
+            startTime: idleStart,
+            endTime: idleEnd,
+            eligibleDurationSeconds: 540,
+            status: .pending
+        )
+
+        vm.reconcileSessionRecordsExcluding(interval: idleInterval)
+
+        XCTAssertEqual(vm.sessionRecords.count, 2, "Session record must be split into two sub-segments")
+        let r1 = vm.sessionRecords[0]
+        let r2 = vm.sessionRecords[1]
+
+        XCTAssertEqual(r1.startTime, sessionStart)
+        XCTAssertEqual(r1.endTime, idleStart)
+        XCTAssertEqual(r1.durationSeconds, 420) // 7m
+
+        XCTAssertEqual(r2.startTime, idleEnd)
+        XCTAssertEqual(r2.endTime, sessionEnd)
+        XCTAssertEqual(r2.durationSeconds, 540) // 9m
+
+        // Integer conservation: 420 + 540 = 960s active + 540s excluded = 1500s total
+        XCTAssertEqual(r1.durationSeconds + r2.durationSeconds + idleInterval.eligibleDurationSeconds, 1500)
+    }
+
+    // MARK: - Task 9C: UI, Interaction & Presentation Tests
+
+    @MainActor
+    func testTask9C_01_IdleReviewModalView_InitializationAndProperties() {
+        let coordinator = IdleReviewCoordinator()
+        let interval = IdleReviewInterval(
+            sessionId: UUID(),
+            sessionType: "Focus",
+            taskId: UUID(),
+            startTime: Date(timeIntervalSince1970: 1700000000),
+            endTime: Date(timeIntervalSince1970: 1700000600),
+            eligibleDurationSeconds: 600,
+            status: .pending
+        )
+        let modal = IdleReviewModalView(coordinator: coordinator, interval: interval, taskTitle: "Deep Work")
+        XCTAssertEqual(modal.interval.eligibleDurationSeconds, 600)
+        XCTAssertEqual(modal.taskTitle, "Deep Work")
+        XCTAssertEqual(modal.interval.formattedDuration, "10 minutes")
+    }
+
+    @MainActor
+    func testTask9C_02_SettingsView_IdleTimeReviewBinding() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        XCTAssertTrue(vm.idleReviewEnabled)
+        XCTAssertEqual(vm.idleThresholdSeconds, 300)
+
+        // Change settings
+        vm.idleReviewEnabled = false
+        XCTAssertFalse(vm.idleReviewCoordinator.isEnabled)
+
+        vm.idleThresholdSeconds = 600
+        XCTAssertEqual(vm.idleReviewCoordinator.thresholdSeconds, 600)
+
+        // Supported threshold values
+        XCTAssertEqual(IdleReviewCoordinator.supportedThresholds, [120, 300, 600, 900])
+    }
+
+    @MainActor
+    func testTask9C_03_MenuBarCompanion_StatusPillText_DeferredCompletion() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        XCTAssertFalse(vm.isDeferredCompletionPending)
+        vm.isDeferredCompletionPending = true
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+    }
+
+    @MainActor
+    func testTask9C_04_IdleReviewCoordinator_QueueProgression() {
+        let coordinator = IdleReviewCoordinator()
+        let id1 = UUID()
+        let id2 = UUID()
+        let interval1 = IdleReviewInterval(
+            id: id1,
+            sessionId: UUID(),
+            sessionType: "Focus",
+            taskId: nil,
+            startTime: Date(timeIntervalSince1970: 1700000000),
+            endTime: Date(timeIntervalSince1970: 1700000300),
+            eligibleDurationSeconds: 300,
+            status: .pending
+        )
+        let interval2 = IdleReviewInterval(
+            id: id2,
+            sessionId: UUID(),
+            sessionType: "Focus",
+            taskId: nil,
+            startTime: Date(timeIntervalSince1970: 1700000600),
+            endTime: Date(timeIntervalSince1970: 1700000960),
+            eligibleDurationSeconds: 360,
+            status: .pending
+        )
+
+        coordinator.pendingIntervals = [interval1, interval2]
+        coordinator.openReview(for: interval1)
+
+        XCTAssertEqual(coordinator.activeReviewInterval?.id, id1)
+        XCTAssertEqual(coordinator.pendingIntervals.count, 2)
+
+        // Resolve first interval as countAsFocus
+        coordinator.resolve(intervalId: id1, decision: .countAsFocus)
+
+        // Next interval should automatically become active
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(coordinator.activeReviewInterval?.id, id2)
+
+        // Resolve second interval
+        coordinator.resolve(intervalId: id2, decision: .excludeFromFocus)
+        XCTAssertEqual(coordinator.pendingIntervals.count, 0)
+        XCTAssertNil(coordinator.activeReviewInterval)
+        XCTAssertEqual(coordinator.state, .monitoring)
+    }
+
+    @MainActor
+    func testTask9C_05_IdleReviewCoordinator_DecideLater_Dismissal() {
+        let coordinator = IdleReviewCoordinator()
+        let id1 = UUID()
+        let interval = IdleReviewInterval(
+            id: id1,
+            sessionId: UUID(),
+            sessionType: "Focus",
+            taskId: nil,
+            startTime: Date(timeIntervalSince1970: 1700000000),
+            endTime: Date(timeIntervalSince1970: 1700000300),
+            eligibleDurationSeconds: 300,
+            status: .pending
+        )
+
+        coordinator.pendingIntervals = [interval]
+        coordinator.openReview(for: interval)
+        XCTAssertNotNil(coordinator.activeReviewInterval)
+
+        // User chooses Decide Later (or presses Esc)
+        coordinator.dismissActiveReviewToDecideLater()
+
+        // Active modal is dismissed, but interval remains safely pending
+        XCTAssertNil(coordinator.activeReviewInterval)
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(coordinator.state, .pendingReview)
+
+        // User reopens from Settings / Banner
+        coordinator.openReview(for: interval)
+        XCTAssertEqual(coordinator.activeReviewInterval?.id, id1)
+        XCTAssertEqual(coordinator.state, .reviewing(intervalId: id1))
+    }
 }
+
 
