@@ -391,7 +391,7 @@ public struct SidebarItem: View {
     }
 
     private var isStopwatch: Bool {
-        tab == .stopwatch || title == NavigationTab.stopwatch.title
+        tab == .stopwatch || title == NavigationTab.stopwatch.title || title == NavigationTab.stopwatch.rawValue
     }
 
     private var backgroundFill: Color {

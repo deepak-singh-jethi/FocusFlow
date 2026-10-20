@@ -21133,7 +21133,7 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertFalse(NavigationTab.settings.isWorkspaceTab, "Settings tab must not be recognized as a workspace tab")
         XCTAssertEqual(NavigationTab.allCases.count, 6, "Total tabs in NavigationTab must remain 6")
 
-        // Check titles and icons
+        // Check rawValues (must be preserved for Codable and storage compatibility)
         XCTAssertEqual(NavigationTab.focusTimer.rawValue, "Focus Timer")
         XCTAssertEqual(NavigationTab.focusTimer.icon, "hourglass")
         XCTAssertEqual(NavigationTab.stopwatch.rawValue, "Stopwatch & Laps")
@@ -21146,6 +21146,14 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(NavigationTab.insights.icon, "chart.bar")
         XCTAssertEqual(NavigationTab.settings.rawValue, "Settings")
         XCTAssertEqual(NavigationTab.settings.icon, "gearshape")
+
+        // Check updated concise display titles
+        XCTAssertEqual(NavigationTab.focusTimer.title, "Focus")
+        XCTAssertEqual(NavigationTab.stopwatch.title, "Stopwatch")
+        XCTAssertEqual(NavigationTab.tasks.title, "Tasks")
+        XCTAssertEqual(NavigationTab.soundscapes.title, "Sounds")
+        XCTAssertEqual(NavigationTab.insights.title, "Insights")
+        XCTAssertEqual(NavigationTab.settings.title, "Settings")
     }
 
     func testPhase1_SidebarTokens_GeometryAndTokensIntegrity() {
@@ -21432,6 +21440,91 @@ final class FocusFlowTests: XCTestCase {
         defaults.set(false, forKey: testKey)
         XCTAssertFalse(defaults.bool(forKey: testKey), "isSidebarCollapsed must persist false across reads")
     }
+
+    // MARK: - Concise Navigation Display Titles Tests
+
+    func testSidebar_ConciseDisplayTitles_MappingAndConsistency() {
+        // 1. Verify computed display titles vs rawValues
+        XCTAssertEqual(NavigationTab.focusTimer.title, "Focus")
+        XCTAssertEqual(NavigationTab.focusTimer.rawValue, "Focus Timer")
+
+        XCTAssertEqual(NavigationTab.stopwatch.title, "Stopwatch")
+        XCTAssertEqual(NavigationTab.stopwatch.rawValue, "Stopwatch & Laps")
+
+        XCTAssertEqual(NavigationTab.tasks.title, "Tasks")
+        XCTAssertEqual(NavigationTab.tasks.rawValue, "Tasks")
+
+        XCTAssertEqual(NavigationTab.soundscapes.title, "Sounds")
+        XCTAssertEqual(NavigationTab.soundscapes.rawValue, "Focus Soundscapes")
+
+        XCTAssertEqual(NavigationTab.insights.title, "Insights")
+        XCTAssertEqual(NavigationTab.insights.rawValue, "Insights & Stats")
+
+        XCTAssertEqual(NavigationTab.settings.title, "Settings")
+        XCTAssertEqual(NavigationTab.settings.rawValue, "Settings")
+
+        // 2. Verify all SidebarItem initializations inherit the concise display titles
+        for tab in NavigationTab.allCases {
+            let item = SidebarItem(tab: tab, isSelected: false) {}
+            XCTAssertEqual(item.title, tab.title, "SidebarItem title must match tab.title for \(tab)")
+            XCTAssertEqual(item.icon, tab.icon, "SidebarItem icon must match tab.icon for \(tab)")
+        }
+
+        // 3. Verify SidebarItem with badges and contextual descriptions
+        let focusItem = SidebarItem(tab: .focusTimer, badge: "25:00", contextualAccessibility: "25:00 remaining, running", isSelected: true) {}
+        XCTAssertEqual(focusItem.title, "Focus")
+        XCTAssertEqual(focusItem.badge, "25:00")
+        XCTAssertEqual(focusItem.contextualAccessibility, "25:00 remaining, running")
+
+        let soundsItem = SidebarItem(tab: .soundscapes, isSelected: false) {}
+        XCTAssertEqual(soundsItem.title, "Sounds")
+
+        let insightsItem = SidebarItem(tab: .insights, isSelected: false) {}
+        XCTAssertEqual(insightsItem.title, "Insights")
+    }
+
+    func testSidebar_ConciseDisplayTitles_CodableAndIdentifiersIntegrity() {
+        // Verify Codable serialization preserves rawValue strings for persistence compatibility
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        for tab in NavigationTab.allCases {
+            do {
+                let data = try encoder.encode(tab)
+                let jsonString = String(data: data, encoding: .utf8)
+                XCTAssertEqual(jsonString, "\"\(tab.rawValue)\"", "JSON encoding must use rawValue, not display title")
+
+                let decoded = try decoder.decode(NavigationTab.self, from: data)
+                XCTAssertEqual(decoded, tab)
+                XCTAssertEqual(decoded.title, tab.title)
+                XCTAssertEqual(decoded.rawValue, tab.rawValue)
+                XCTAssertEqual(decoded.id, tab.rawValue)
+            } catch {
+                XCTFail("Failed Codable roundtrip for \(tab): \(error)")
+            }
+        }
+
+        // Verify decoding legacy rawValues from JSON strings
+        let legacyJSON = "[\"Focus Timer\", \"Stopwatch & Laps\", \"Tasks\", \"Focus Soundscapes\", \"Insights & Stats\", \"Settings\"]"
+        guard let data = legacyJSON.data(using: .utf8) else {
+            XCTFail("Failed to convert legacyJSON to Data")
+            return
+        }
+
+        do {
+            let tabs = try decoder.decode([NavigationTab].self, from: data)
+            XCTAssertEqual(tabs.count, 6)
+            XCTAssertEqual(tabs[0].title, "Focus")
+            XCTAssertEqual(tabs[1].title, "Stopwatch")
+            XCTAssertEqual(tabs[2].title, "Tasks")
+            XCTAssertEqual(tabs[3].title, "Sounds")
+            XCTAssertEqual(tabs[4].title, "Insights")
+            XCTAssertEqual(tabs[5].title, "Settings")
+        } catch {
+            XCTFail("Failed to decode legacy JSON: \(error)")
+        }
+    }
 }
+
 
 
