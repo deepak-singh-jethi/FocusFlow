@@ -68,8 +68,10 @@ public enum WindowLayoutMetrics {
             }()
             return isChromeVisible ? standardTopClearance : fullScreenHiddenChromeClearance
         } else {
-            let effectiveChrome = chromeHeight > 0 ? chromeHeight : titlebarChromeHeight
-            return effectiveChrome + standardBreathingRoom
+            // In standard windowed mode, guarantee at least standardTopClearance (40pt)
+            // so header baselines remain identical across machines and window chrome variations.
+            // If chrome is unusually tall (e.g. custom toolbar), expand accordingly.
+            return max(standardTopClearance, chromeHeight + standardBreathingRoom)
         }
     }
 }
