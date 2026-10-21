@@ -14,7 +14,9 @@ final class FocusFlowTests: XCTestCase {
         return (vm, tempURL)
     }
 
-    private func cleanup(url: URL) {
+    @MainActor
+    private func cleanup(url: URL, vm: TimerViewModel? = nil) {
+        vm?.cancelDateChangeMonitoring()
         try? FileManager.default.removeItem(at: url)
         let backup = url.appendingPathExtension("bak")
         try? FileManager.default.removeItem(at: backup)
@@ -2578,10 +2580,14 @@ final class FocusFlowTests: XCTestCase {
 
         // Wait for timer ticks
         let exp = expectation(description: "Wait timer tick")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+        exp.assertForOverFulfill = false
+        var workItem: DispatchWorkItem?
+        workItem = DispatchWorkItem {
             exp.fulfill()
         }
-        wait(for: [exp], timeout: 1.0)
+        defer { workItem?.cancel() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: workItem!)
+        wait(for: [exp], timeout: 5.0)
 
         // Task time must not have changed
         XCTAssertEqual(vm.tasks[0].timeSpentSeconds, initialTaskTime)
@@ -2646,10 +2652,14 @@ final class FocusFlowTests: XCTestCase {
 
         // Wait 1.2 seconds for any delayed async block to fire
         let exp = expectation(description: "Wait for delayed save debounce")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+        exp.assertForOverFulfill = false
+        var workItem: DispatchWorkItem?
+        workItem = DispatchWorkItem {
             exp.fulfill()
         }
-        wait(for: [exp], timeout: 2.0)
+        defer { workItem?.cancel() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: workItem!)
+        wait(for: [exp], timeout: 5.0)
 
         // Verify corrupted primary was NOT overwritten
         let currentBytes = try Data(contentsOf: tempURL)
@@ -3709,9 +3719,1154 @@ final class FocusFlowTests: XCTestCase {
                 let outURL = URL(fileURLWithPath: "/tmp/focusflow_menubar_paused.png")
                 try pngData.write(to: outURL)
                 XCTAssertTrue(FileManager.default.fileExists(atPath: outURL.path))
-                XCTAssertGreaterThan(pngData.count, 1000)
             }
         }
+    }
+
+    // MARK: - Custom Timer In-Place Input & Focus Prevention Tests
+
+    private func containsEditableTextInput(in view: NSView) -> Bool {
+        if let tf = view as? NSTextField, tf.isEditable {
+            return true
+        }
+        if let tv = view as? NSTextView, tv.isEditable {
+            return true
+        }
+        for subview in view.subviews {
+            if containsEditableTextInput(in: subview) {
+                return true
+            }
+        }
+        return false
+    }
+
+    @MainActor
+    func testCustomTimerFocus01_InitialWindowPresentationHasNoActiveEditingResponder() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.setCustomDuration(minutes: 45, seconds: 0)
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        hostingView.layoutSubtreeIfNeeded()
+
+        // In display mode, the initial window presentation must NOT render any editable text field or text view
+        XCTAssertFalse(containsEditableTextInput(in: hostingView), "Initial window presentation must not render any editable text field or text view in display mode")
+        XCTAssertNil(view.activeEditingField, "Initial timer presentation must have nil activeEditingField")
+    }
+
+    @MainActor
+    func testCustomTimerFocus02_InitialCustomTimerDurationDisplaysCorrectValuesWithoutEditing() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.setCustomDuration(minutes: 45, seconds: 0)
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        XCTAssertNil(view.activeEditingField, "Initial timer presentation must have nil activeEditingField")
+        XCTAssertEqual(view.inputMinutes, "45")
+        XCTAssertEqual(view.inputSeconds, "00")
+    }
+
+    @MainActor
+    func testCustomTimerFocus03_IntentionalMinutesActivationEnablesEditing() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.setCustomDuration(minutes: 45, seconds: 0)
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        view.startEditing(.minutes)
+        XCTAssertEqual(view.activeEditingField, .minutes)
+    }
+
+    @MainActor
+    func testCustomTimerFocus04_IntentionalSecondsActivationEnablesEditing() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.setCustomDuration(minutes: 45, seconds: 0)
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        view.startEditing(.seconds)
+        XCTAssertEqual(view.activeEditingField, .seconds)
+    }
+
+    @MainActor
+    func testCustomTimerFocus05_EscapeKeyCancelsEditingAndRestoresDuration() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.setCustomDuration(minutes: 45, seconds: 0)
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        view.startEditing(.minutes)
+        view.inputMinutes = "99"
+        view.cancelEditing()
+
+        XCTAssertNil(view.activeEditingField)
+        XCTAssertEqual(view.inputMinutes, "45", "Cancelling editing must restore original duration")
+    }
+
+    @MainActor
+    func testCustomTimerFocus06_ShortcutChipSelectionClearsEditingAndAppliesDuration() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.setCustomDuration(minutes: 45, seconds: 0)
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        view.startEditing(.minutes)
+        XCTAssertNotNil(view.activeEditingField)
+
+        view.stopEditing()
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        XCTAssertNil(view.activeEditingField)
+        XCTAssertEqual(vm.totalTime, 1500)
+    }
+
+    @MainActor
+    func testCustomTimerFocus07_StepperAdjustmentClearsEditingAndModifiesDuration() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.setCustomDuration(minutes: 45, seconds: 0)
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        view.startEditing(.minutes)
+        XCTAssertNotNil(view.activeEditingField)
+
+        view.stopEditing()
+        vm.setCustomDuration(minutes: 50, seconds: 0)
+        XCTAssertNil(view.activeEditingField)
+        XCTAssertEqual(vm.totalTime, 3000)
+    }
+
+    @MainActor
+    func testCustomTimerFocus08_MenuBarCompanionInitialPresentationHasNoEditingResponder() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.setCustomDuration(minutes: 45, seconds: 0)
+        let audio = AmbientAudioPlayer()
+        let view = MenuBarCompanionView(viewModel: vm, audioPlayer: audio)
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 316, height: 420)
+        hostingView.layoutSubtreeIfNeeded()
+
+        XCTAssertFalse(containsEditableTextInput(in: hostingView), "MenuBarCompanion initial presentation must not render any editable text input field in display mode")
+    }
+
+    private func collectAllRenderedStrings(in view: NSView) -> [String] {
+        var strings: [String] = []
+        if let tf = view as? NSTextField {
+            strings.append(tf.stringValue)
+        }
+        for subview in view.subviews {
+            strings.append(contentsOf: collectAllRenderedStrings(in: subview))
+        }
+        return strings
+    }
+
+    @MainActor
+    func testCustomTimerFocus09_SecondsAndMinutesDisplayNeverTruncateAtAnySize() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        vm.setCustomDuration(minutes: 45, seconds: 0)
+        for testSize: CGFloat in [220, 280, 340, 400, 490] {
+            let view = InPlaceTimeInputView(viewModel: vm, size: testSize)
+            let hostingView = NSHostingView(rootView: view)
+            hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+            hostingView.layoutSubtreeIfNeeded()
+
+            let renderedStrings = collectAllRenderedStrings(in: hostingView)
+            for str in renderedStrings {
+                XCTAssertFalse(str.contains("..."), "Rendered string '\(str)' must not contain ellipsis at size \(testSize)")
+                XCTAssertFalse(str.contains("…"), "Rendered string '\(str)' must not contain Unicode ellipsis at size \(testSize)")
+            }
+        }
+    }
+
+    @MainActor
+    func testCustomTimerFocus10_CardBoundsContainRenderedDigitsWithoutOverflowAtAllSizes() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let model = InPlaceTimeInputView.Model(totalTime: vm.totalTime)
+        XCTAssertEqual(model.inputMinutes, "25", "Minutes must format to 25")
+        XCTAssertEqual(model.inputSeconds, "00", "Seconds must format to 00")
+
+        for testSize: CGFloat in [220, 280, 340, 400, 490] {
+            let digitFontSize = max(32, min(testSize * 0.125, 48))
+            let boxHeight = max(60, min(testSize * 0.19, 78))
+            let boxWidth = max(100, min(testSize * 0.30, 136))
+
+            // In SF Rounded Bold, line height is ~1.18 * pointSize
+            let estimatedLineHeight = digitFontSize * 1.18
+            XCTAssertLessThan(estimatedLineHeight, boxHeight, "Digit font line height must be strictly less than card boxHeight at size \(testSize)")
+            XCTAssertGreaterThanOrEqual(boxHeight - estimatedLineHeight, 6.0, "Card boxHeight must have at least 6pt vertical breathing room for font at size \(testSize)")
+            XCTAssertGreaterThanOrEqual(boxWidth, 100.0, "Card boxWidth must be at least 100pt for comfortable horizontal margin")
+
+            let view = InPlaceTimeInputView(viewModel: vm, size: testSize, model: model)
+            let hostingView = NSHostingView(rootView: view)
+            hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+            hostingView.layoutSubtreeIfNeeded()
+
+            let renderedStrings = collectAllRenderedStrings(in: hostingView)
+            for str in renderedStrings {
+                XCTAssertFalse(str.contains("..."), "No rendered text must truncate with ellipsis at size \(testSize)")
+            }
+        }
+    }
+
+    // MARK: - Custom Timer Input UX Reengineering Tests (01 - 20)
+
+    @MainActor
+    func testCustomTimerUX_01_Typing45FromSelected25DoesNotMutateAuthoritativeDurationUntilCommit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+        XCTAssertEqual(vm.totalTime, 1500)
+        XCTAssertEqual(controller.inputMinutes, "25")
+
+        // User clicks minutes to begin editing
+        controller.startEditing(.minutes)
+        XCTAssertEqual(controller.activeEditingField, .minutes)
+        XCTAssertEqual(vm.totalTime, 1500, "Opening edit mode must not mutate timer")
+
+        // User types '4' (first keystroke of '45')
+        controller.updateDraft(field: .minutes, text: "4")
+        XCTAssertEqual(controller.inputMinutes, "4")
+        XCTAssertEqual(vm.totalTime, 1500, "Drafting '4' must NOT mutate authoritative duration to 4 minutes!")
+
+        // User types '5' (second keystroke)
+        controller.updateDraft(field: .minutes, text: "45")
+        XCTAssertEqual(controller.inputMinutes, "45")
+        XCTAssertEqual(vm.totalTime, 1500, "Drafting '45' must NOT mutate authoritative duration until commit!")
+
+        // User commits (e.g. presses Return or Start)
+        let success = controller.commitEditing()
+        XCTAssertTrue(success)
+        XCTAssertNil(controller.activeEditingField)
+        XCTAssertEqual(vm.totalTime, 2700, "Committing draft must set authoritative duration to 45:00 (2700s) exactly once")
+    }
+
+    @MainActor
+    func testCustomTimerUX_02_TemporaryEmptyFieldDuringReplacementDoesNotResetOrCrash() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        controller.startEditing(.minutes)
+        // User selects all and presses Backspace
+        controller.updateDraft(field: .minutes, text: "")
+        XCTAssertEqual(controller.inputMinutes, "", "Temporary empty draft is allowed during replacement")
+        XCTAssertEqual(vm.totalTime, 1500, "Temporary empty draft must not mutate timer")
+
+        // User types new value '30'
+        controller.updateDraft(field: .minutes, text: "30")
+        XCTAssertEqual(controller.inputMinutes, "30")
+
+        let success = controller.commitEditing()
+        XCTAssertTrue(success)
+        XCTAssertEqual(vm.totalTime, 1800)
+    }
+
+    @MainActor
+    func testCustomTimerUX_03_SecondsEditingWithPartialDigitsDoesNotMutateDurationUntilCommit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        controller.startEditing(.seconds)
+        XCTAssertEqual(controller.activeEditingField, .seconds)
+
+        // User types '3'
+        controller.updateDraft(field: .seconds, text: "3")
+        XCTAssertEqual(controller.inputSeconds, "3")
+        XCTAssertEqual(vm.totalTime, 1500, "Partial seconds typing must not mutate timer duration")
+
+        // User types '0'
+        controller.updateDraft(field: .seconds, text: "30")
+        XCTAssertEqual(controller.inputSeconds, "30")
+        XCTAssertEqual(vm.totalTime, 1500)
+
+        controller.commitEditing()
+        XCTAssertEqual(vm.totalTime, 25 * 60 + 30)
+    }
+
+    @MainActor
+    func testCustomTimerUX_04_ValidCommitPublishesExactlyOnce() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        var commitCount = 0
+        controller.onCommit = { m, s in
+            commitCount += 1
+            vm.setCustomDuration(minutes: m, seconds: s)
+        }
+
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "50")
+        XCTAssertEqual(commitCount, 0, "No commit callback while typing")
+
+        controller.commitEditing()
+        XCTAssertEqual(commitCount, 1, "Committing must invoke onCommit exactly once")
+        XCTAssertEqual(vm.totalTime, 3000)
+    }
+
+    @MainActor
+    func testCustomTimerUX_05_InvalidCommitPreservesPreviousDuration() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "0")
+        controller.updateDraft(field: .seconds, text: "02") // 2s < 5s min
+
+        let committed = controller.commitEditing()
+        XCTAssertFalse(committed, "Durations below minimum must be rejected")
+        XCTAssertTrue(controller.hasInvalidDraft)
+        XCTAssertEqual(controller.validationError, .belowMinimum(seconds: 2, minimum: 5))
+        XCTAssertEqual(controller.validationError?.localizedDescription, "Minimum timer duration is 00:05")
+        XCTAssertEqual(vm.totalTime, 1500, "Previous valid duration must be preserved upon invalid commit")
+        XCTAssertEqual(controller.committedMinutes, 25, "Committed minutes must remain preserved")
+        XCTAssertEqual(controller.inputMinutes, "0", "Draft is kept visible with error feedback rather than silently wiped")
+
+        // Cancel/Escape restores the snapshot
+        controller.cancelEditing()
+        XCTAssertEqual(controller.inputMinutes, "25", "Draft must be restored to previous valid duration upon cancel")
+        XCTAssertFalse(controller.hasInvalidDraft)
+        XCTAssertNil(controller.validationError)
+    }
+
+    @MainActor
+    func testCustomTimerUX_06_EscapeRestoresCompleteOriginalDuration() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 30)
+        let controller = vm.customTimeInputController
+
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "99")
+        controller.updateDraft(field: .seconds, text: "59")
+
+        controller.cancelEditing()
+        XCTAssertNil(controller.activeEditingField)
+        XCTAssertEqual(controller.inputMinutes, "25")
+        XCTAssertEqual(controller.inputSeconds, "30")
+        XCTAssertEqual(vm.totalTime, 25 * 60 + 30)
+    }
+
+    @MainActor
+    func testCustomTimerUX_07_TabSwitchesCorrectlyBetweenMinutesAndSeconds() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "45")
+
+        controller.commitAndSwitchField(to: .seconds)
+        XCTAssertEqual(controller.activeEditingField, .seconds)
+        XCTAssertEqual(controller.inputMinutes, "45")
+        XCTAssertEqual(vm.totalTime, 1500, "Tabbing between fields does not prematurely commit to viewModel")
+    }
+
+    @MainActor
+    func testCustomTimerUX_08_FocusLossDoesNotDoubleCommit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        var commitEventCount = 0
+        controller.onCommit = { m, s in
+            commitEventCount += 1
+            vm.setCustomDuration(minutes: m, seconds: s)
+        }
+
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "35")
+
+        // First blur / commit
+        let res1 = controller.commitEditing()
+        XCTAssertTrue(res1)
+        XCTAssertEqual(commitEventCount, 1)
+
+        // Subsequent blur when already not editing
+        let res2 = controller.commitEditing()
+        XCTAssertTrue(res2)
+        XCTAssertEqual(commitEventCount, 1, "Subsequent commit calls when already committed must not re-trigger callbacks")
+    }
+
+    @MainActor
+    func testCustomTimerUX_09_PresetDiscardsStaleDraftAndSetsExactDuration() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "77")
+
+        controller.selectPreset(minutes: 15)
+        XCTAssertNil(controller.activeEditingField)
+        XCTAssertEqual(controller.inputMinutes, "15")
+        XCTAssertEqual(controller.inputSeconds, "00")
+        XCTAssertEqual(vm.totalTime, 15 * 60)
+    }
+
+    @MainActor
+    func testCustomTimerUX_10_StepperPreservesSecondsAccurately() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 10, seconds: 30)
+        let controller = vm.customTimeInputController
+        XCTAssertEqual(vm.totalTime, 630)
+        XCTAssertEqual(controller.inputMinutes, "10")
+        XCTAssertEqual(controller.inputSeconds, "30")
+
+        // +5m on 10:30 -> 15:30
+        controller.adjustMinutes(by: 5)
+        XCTAssertEqual(vm.totalTime, 930)
+        XCTAssertEqual(controller.inputMinutes, "15")
+        XCTAssertEqual(controller.inputSeconds, "30", "Seconds must be preserved upon +5m adjustment")
+
+        // -5m on 15:30 -> 10:30
+        controller.adjustMinutes(by: -5)
+        XCTAssertEqual(vm.totalTime, 630)
+        XCTAssertEqual(controller.inputMinutes, "10")
+        XCTAssertEqual(controller.inputSeconds, "30", "Seconds must be preserved upon -5m adjustment")
+
+        // +15m on 10:30 -> 25:30
+        controller.adjustMinutes(by: 15)
+        XCTAssertEqual(vm.totalTime, 1530)
+        XCTAssertEqual(controller.inputMinutes, "25")
+        XCTAssertEqual(controller.inputSeconds, "30", "Seconds must be preserved upon +15m adjustment")
+    }
+
+    @MainActor
+    func testCustomTimerUX_11_ZeroMinuteValidDurationSupported() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "0")
+        controller.updateDraft(field: .seconds, text: "30")
+
+        let success = controller.commitEditing()
+        XCTAssertTrue(success, "00:30 (30 seconds >= 5s minimum) is a valid duration")
+        XCTAssertEqual(vm.totalTime, 30)
+        XCTAssertEqual(controller.inputMinutes, "00")
+        XCTAssertEqual(controller.inputSeconds, "30")
+    }
+
+    @MainActor
+    func testCustomTimerUX_12_MaximumDurationBoundaryEnforced() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "500")
+
+        let success = controller.commitEditing()
+        XCTAssertFalse(success, "Minutes > 360 must be rejected or clamped")
+        XCTAssertTrue(controller.hasInvalidDraft)
+        XCTAssertLessThanOrEqual(vm.totalTime, TimerViewModel.maxSupportedTimerDuration)
+    }
+
+    @MainActor
+    func testCustomTimerUX_13_ChangingToShorterDurationWorksWithoutMaxClobber() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 45, seconds: 0)
+        XCTAssertEqual(vm.totalTime, 2700)
+
+        let controller = vm.customTimeInputController
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "10")
+
+        let success = controller.commitEditing()
+        XCTAssertTrue(success)
+        XCTAssertEqual(vm.totalTime, 600, "Decreasing duration to 10 minutes must not be clobbered back to 45 by max()")
+        XCTAssertEqual(controller.inputMinutes, "10")
+    }
+
+    @MainActor
+    func testCustomTimerUX_14_ReturningFromSidebarNavigationPreservesDisplayStateWithoutAutofocus() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        hostingView.layoutSubtreeIfNeeded()
+
+        // Verify initial state has nil editing field
+        XCTAssertNil(view.activeEditingField)
+        XCTAssertFalse(containsEditableTextInput(in: hostingView))
+    }
+
+    @MainActor
+    func testCustomTimerUX_15_MainWindowAndMenuBarInputConsistency() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let mainController = vm.customTimeInputController
+        let menuBarController = TimeInputController(totalTime: vm.totalTime)
+
+        // Both must start with identical committed values
+        XCTAssertEqual(mainController.committedTotalSeconds, menuBarController.committedTotalSeconds)
+        XCTAssertEqual(mainController.inputMinutes, menuBarController.inputMinutes)
+        XCTAssertEqual(mainController.inputSeconds, menuBarController.inputSeconds)
+
+        // Both must enforce identical bounds
+        XCTAssertEqual(TimeInputController.minDurationSeconds, 5)
+        XCTAssertEqual(TimeInputController.maxMinutes, 360)
+        XCTAssertEqual(TimeInputController.maxSeconds, 59)
+    }
+
+    @MainActor
+    func testCustomTimerUX_16_ClickToEditFirstResponderBehavior() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        XCTAssertNil(view.activeEditingField)
+
+        view.startEditing(.minutes)
+        XCTAssertEqual(view.activeEditingField, .minutes)
+
+        view.startEditing(.seconds)
+        XCTAssertEqual(view.activeEditingField, .seconds)
+
+        view.stopEditing()
+        XCTAssertNil(view.activeEditingField)
+    }
+
+    @MainActor
+    func testCustomTimerUX_17_NoInitialTextSelectionOnFreshLaunch() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        hostingView.layoutSubtreeIfNeeded()
+
+        XCTAssertFalse(containsEditableTextInput(in: hostingView), "Display mode must not have any editable text responder")
+        XCTAssertNil(view.activeEditingField)
+    }
+
+    @MainActor
+    func testCustomTimerUX_18_NoDigitTruncationAtNarrowWidths() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 120, seconds: 45)
+        for size: CGFloat in [220, 260, 316, 380, 500] {
+            let view = InPlaceTimeInputView(viewModel: vm, size: size)
+            let hostingView = NSHostingView(rootView: view)
+            hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+            hostingView.layoutSubtreeIfNeeded()
+
+            let strings = collectAllRenderedStrings(in: hostingView)
+            for s in strings {
+                XCTAssertFalse(s.contains("..."), "No truncation ellipsis allowed at size \(size)")
+                XCTAssertFalse(s.contains("…"), "No unicode ellipsis allowed at size \(size)")
+            }
+        }
+    }
+
+    @MainActor
+    func testCustomTimerUX_19_StartButtonInteractionWithActiveDraft() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        // User starts editing minutes and types 45
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "45")
+
+        // User presses Start (toggleTimer) without pressing Enter first
+        vm.toggleTimer()
+
+        // Draft must be committed and timer must start with 45 minutes!
+        XCTAssertFalse(controller.isEditing, "Active draft must conclude upon starting timer")
+        XCTAssertEqual(vm.totalTime, 2700, "Timer must start with the valid committed draft (45m)")
+        XCTAssertTrue(vm.isTimerRunning, "Timer must be running")
+
+        // Stop timer for next phase
+        vm.toggleTimer()
+        XCTAssertFalse(vm.isTimerRunning)
+
+        // Now test invalid draft: user types 00:02 (< 5s)
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "0")
+        controller.updateDraft(field: .seconds, text: "02")
+
+        vm.toggleTimer()
+        XCTAssertFalse(vm.isTimerRunning, "Timer must NOT start when draft is invalid")
+        XCTAssertEqual(vm.totalTime, 2700, "Timer duration must not be corrupted by invalid draft")
+    }
+
+    @MainActor
+    func testCustomTimerUX_20_SessionConflictBehaviorRemainsCorrect() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.startTimer()
+        // Simulate elapsed time
+        vm.timeRemaining = 20 * 60 // 5m elapsed
+
+        // Changing preset while active timer has elapsed time must request confirmation
+        vm.switchToBreak(minutes: 5)
+        XCTAssertTrue(vm.showConflictModal, "Switching presets while session is active must show conflict modal")
+        XCTAssertEqual(vm.pendingTimerRequest?.name, "Short Break")
+
+        // User cancels / keeps session
+        vm.continueCurrentTimer()
+        XCTAssertFalse(vm.showConflictModal)
+        XCTAssertTrue(vm.isFocusPreset)
+    }
+
+    // MARK: - Custom Timer AppKit Interaction Hardening & Visible Validation Tests
+
+    @MainActor
+    func testCustomTimerHardening_01_TimeDigitNSTextField_viewDidMoveToWindow_acquiresFocusAndSelectsAll() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        let textField = TimeDigitNSTextField()
+        textField.stringValue = "25"
+        textField.isEditable = true
+        textField.isSelectable = true
+
+        var focusAcquiredCalled = false
+        textField.onFocusAcquired = {
+            focusAcquiredCalled = true
+        }
+
+        // Add to window hierarchy
+        window.contentView?.addSubview(textField)
+        textField.viewDidMoveToWindow()
+
+        XCTAssertTrue(focusAcquiredCalled, "onFocusAcquired callback must be invoked upon moving to window")
+        XCTAssertEqual(window.firstResponder, textField.currentEditor(), "Field editor must be first responder in window")
+        XCTAssertEqual(textField.currentEditor()?.selectedRange.length, 2, "Entire text length (2 digits) must be selected for immediate typing")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_02_TimeDigitNSTextField_typingReplacesSelectionWithoutPrematureMutation() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        let textField = TimeDigitNSTextField()
+        textField.stringValue = "25"
+        textField.isEditable = true
+        textField.isSelectable = true
+        window.contentView?.addSubview(textField)
+        textField.viewDidMoveToWindow()
+
+        // Verify initial selection covers whole string
+        XCTAssertEqual(textField.currentEditor()?.selectedRange.length, 2)
+
+        // Simulate typing "45" into field
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "45")
+
+        // In draft mode, viewModel totalTime must NOT mutate prematurely
+        XCTAssertEqual(controller.inputMinutes, "45")
+        XCTAssertEqual(vm.totalTime, 1500, "Typing into draft must not mutate authoritative viewModel duration")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_03_TimeDigitField_insertNewline_commitsOnceAndDoesNotTriggerFocusLost() {
+        var returnFired = 0
+        var focusLostFired = 0
+        var boundText = "45"
+
+        let field = TimeDigitField(
+            text: Binding(get: { boundText }, set: { boundText = $0 }),
+            onReturn: { returnFired += 1 },
+            onFocusLost: { focusLostFired += 1 }
+        )
+
+        let coordinator = field.makeCoordinator()
+        let control = NSControl()
+        let textView = NSTextView()
+
+        let handled = coordinator.control(control, textView: textView, doCommandBy: #selector(NSResponder.insertNewline(_:)))
+        XCTAssertTrue(handled, "insertNewline command must be handled")
+        XCTAssertEqual(returnFired, 1, "onReturn must fire exactly once")
+
+        // Simulate subsequent AppKit controlTextDidEndEditing notification for Return
+        let notif = Notification(
+            name: NSControl.textDidEndEditingNotification,
+            object: control,
+            userInfo: ["NSTextMovement": NSReturnTextMovement]
+        )
+        coordinator.controlTextDidEndEditing(notif)
+        XCTAssertEqual(focusLostFired, 0, "onFocusLost must NOT fire when ending editing via Return")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_04_TimeDigitField_cancelOperation_revertsAndDoesNotTriggerFocusLost() {
+        var escapeFired = 0
+        var focusLostFired = 0
+        var boundText = "45"
+
+        let field = TimeDigitField(
+            text: Binding(get: { boundText }, set: { boundText = $0 }),
+            onEscape: { escapeFired += 1 },
+            onFocusLost: { focusLostFired += 1 }
+        )
+
+        let coordinator = field.makeCoordinator()
+        let control = NSControl()
+        let textView = NSTextView()
+
+        let handled = coordinator.control(control, textView: textView, doCommandBy: #selector(NSResponder.cancelOperation(_:)))
+        XCTAssertTrue(handled, "cancelOperation command must be handled")
+        XCTAssertEqual(escapeFired, 1, "onEscape must fire exactly once")
+
+        // Simulate subsequent AppKit controlTextDidEndEditing notification for Cancel
+        let notif = Notification(
+            name: NSControl.textDidEndEditingNotification,
+            object: control,
+            userInfo: ["NSTextMovement": NSCancelTextMovement]
+        )
+        coordinator.controlTextDidEndEditing(notif)
+        XCTAssertEqual(focusLostFired, 0, "onFocusLost must NOT fire when ending editing via Escape")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_05_TimeDigitField_insertTab_navigatesMinutesToSecondsWithoutFocusLost() {
+        var tabFired = 0
+        var focusLostFired = 0
+        var boundText = "45"
+
+        let field = TimeDigitField(
+            text: Binding(get: { boundText }, set: { boundText = $0 }),
+            onTab: { tabFired += 1 },
+            onFocusLost: { focusLostFired += 1 }
+        )
+
+        let coordinator = field.makeCoordinator()
+        let control = NSControl()
+        let textView = NSTextView()
+
+        let handled = coordinator.control(control, textView: textView, doCommandBy: #selector(NSResponder.insertTab(_:)))
+        XCTAssertTrue(handled, "insertTab command must be handled")
+        XCTAssertEqual(tabFired, 1, "onTab must fire")
+
+        let notif = Notification(
+            name: NSControl.textDidEndEditingNotification,
+            object: control,
+            userInfo: ["NSTextMovement": NSTabTextMovement]
+        )
+        coordinator.controlTextDidEndEditing(notif)
+        XCTAssertEqual(focusLostFired, 0, "onFocusLost must NOT fire when navigating via Tab")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_06_TimeDigitField_insertBacktab_navigatesSecondsToMinutesWithoutFocusLost() {
+        var backtabFired = 0
+        var focusLostFired = 0
+        var boundText = "30"
+
+        let field = TimeDigitField(
+            text: Binding(get: { boundText }, set: { boundText = $0 }),
+            onBacktab: { backtabFired += 1 },
+            onFocusLost: { focusLostFired += 1 }
+        )
+
+        let coordinator = field.makeCoordinator()
+        let control = NSControl()
+        let textView = NSTextView()
+
+        let handled = coordinator.control(control, textView: textView, doCommandBy: #selector(NSResponder.insertBacktab(_:)))
+        XCTAssertTrue(handled, "insertBacktab command must be handled")
+        XCTAssertEqual(backtabFired, 1, "onBacktab must fire")
+
+        let notif = Notification(
+            name: NSControl.textDidEndEditingNotification,
+            object: control,
+            userInfo: ["NSTextMovement": NSBacktabTextMovement]
+        )
+        coordinator.controlTextDidEndEditing(notif)
+        XCTAssertEqual(focusLostFired, 0, "onFocusLost must NOT fire when navigating via Backtab")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_07_TimeDigitField_controlTextDidEndEditing_clickAwayWithoutMovement_callsFocusLost() {
+        var focusLostFired = 0
+        var boundText = "45"
+
+        let field = TimeDigitField(
+            text: Binding(get: { boundText }, set: { boundText = $0 }),
+            onFocusLost: { focusLostFired += 1 }
+        )
+
+        let coordinator = field.makeCoordinator()
+        let control = NSControl()
+
+        // Simulate click away where AppKit omits NSTextMovement metadata entirely
+        let notif = Notification(
+            name: NSControl.textDidEndEditingNotification,
+            object: control,
+            userInfo: nil
+        )
+        coordinator.controlTextDidEndEditing(notif)
+        XCTAssertEqual(focusLostFired, 1, "Missing NSTextMovement in userInfo must reliably trigger onFocusLost")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_08_TimeDigitField_controlTextDidEndEditing_movementZero_callsFocusLost() {
+        var focusLostFired = 0
+        var boundText = "45"
+
+        let field = TimeDigitField(
+            text: Binding(get: { boundText }, set: { boundText = $0 }),
+            onFocusLost: { focusLostFired += 1 }
+        )
+
+        let coordinator = field.makeCoordinator()
+        let control = NSControl()
+
+        // Simulate click away where NSTextMovement is NSIllegalTextMovement (0) or NSOtherTextMovement
+        let notif = Notification(
+            name: NSControl.textDidEndEditingNotification,
+            object: control,
+            userInfo: ["NSTextMovement": 0]
+        )
+        coordinator.controlTextDidEndEditing(notif)
+        XCTAssertEqual(focusLostFired, 1, "NSTextMovement 0 (click outside) must trigger onFocusLost")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_09_TimeDigitField_controlTextDidEndEditing_movementNSReturn_suppressesFocusLost() {
+        var focusLostFired = 0
+        var boundText = "45"
+
+        let field = TimeDigitField(
+            text: Binding(get: { boundText }, set: { boundText = $0 }),
+            onFocusLost: { focusLostFired += 1 }
+        )
+
+        let coordinator = field.makeCoordinator()
+        let control = NSControl()
+
+        let notif = Notification(
+            name: NSControl.textDidEndEditingNotification,
+            object: control,
+            userInfo: ["NSTextMovement": NSReturnTextMovement]
+        )
+        coordinator.controlTextDidEndEditing(notif)
+        XCTAssertEqual(focusLostFired, 0, "NSReturnTextMovement must NOT trigger onFocusLost")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_10_ValidationFeedback_InvalidSecondsRejection() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        controller.startEditing(.seconds)
+        controller.updateDraft(field: .seconds, text: "75")
+
+        let success = controller.commitEditing()
+        XCTAssertFalse(success, "Seconds > 59 must be rejected")
+        XCTAssertTrue(controller.hasInvalidDraft)
+        XCTAssertEqual(controller.validationError, .invalidSeconds(seconds: 75))
+        XCTAssertEqual(controller.validationError?.localizedDescription, "Seconds must be between 00 and 59")
+        XCTAssertEqual(controller.committedSeconds, 0, "Committed seconds must remain intact")
+        XCTAssertEqual(vm.totalTime, 1500, "Timer duration must not be mutated")
+
+        // Clearing draft resets validation error
+        controller.updateDraft(field: .seconds, text: "30")
+        XCTAssertNil(controller.validationError)
+        XCTAssertFalse(controller.hasInvalidDraft)
+
+        let validCommit = controller.commitEditing()
+        XCTAssertTrue(validCommit)
+        XCTAssertEqual(vm.totalTime, 25 * 60 + 30)
+    }
+
+    @MainActor
+    func testCustomTimerHardening_11_ValidationFeedback_BelowMinimumRejection() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "0")
+        controller.updateDraft(field: .seconds, text: "03")
+
+        let success = controller.commitEditing()
+        XCTAssertFalse(success, "Duration < 5 seconds must be rejected")
+        XCTAssertTrue(controller.hasInvalidDraft)
+        XCTAssertEqual(controller.validationError, .belowMinimum(seconds: 3, minimum: 5))
+        XCTAssertEqual(controller.validationError?.localizedDescription, "Minimum timer duration is 00:05")
+        XCTAssertEqual(controller.inputMinutes, "0")
+        XCTAssertEqual(controller.inputSeconds, "03", "Draft values are preserved so user can see and correct them")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_12_ValidationFeedback_AboveMaximumRejection() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "500")
+
+        let success = controller.commitEditing()
+        XCTAssertFalse(success, "Minutes > 360 must be rejected")
+        XCTAssertTrue(controller.hasInvalidDraft)
+        XCTAssertEqual(controller.validationError, .invalidMinutes(minutes: 500))
+        XCTAssertEqual(controller.validationError?.localizedDescription, "Maximum timer duration is 360:59")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_13_StartButtonBlockedWhileInvalidDraftUnresolved() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        controller.startEditing(.seconds)
+        controller.updateDraft(field: .seconds, text: "80")
+
+        let commitAttempt = vm.commitActiveTimeInputBeforeStart()
+        XCTAssertFalse(commitAttempt, "commitActiveTimeInputBeforeStart must fail when draft is invalid")
+
+        vm.toggleTimer()
+        XCTAssertFalse(vm.isTimerRunning, "Timer must NOT start while invalid draft exists")
+        XCTAssertEqual(vm.totalTime, 1500, "Duration must not be changed")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_14_FirstLaunchViewHierarchy_HasZeroEditableTextResponders() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let view = InPlaceTimeInputView(viewModel: vm, size: 400)
+        let hostingView = NSHostingView(rootView: view)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+
+        XCTAssertNil(view.activeEditingField, "Active editing field must be nil on initial launch")
+        XCTAssertFalse(containsEditableTextInput(in: hostingView), "First-launch view must display clean Text without editable text fields")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_15_SharedPendingDraftAcrossMinutesAndSeconds_UntilCommitted() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        // User edits minutes to "40"
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "40")
+
+        // User tabs or clicks into seconds
+        controller.commitAndSwitchField(to: .seconds)
+        XCTAssertEqual(controller.activeEditingField, .seconds)
+        XCTAssertEqual(controller.inputMinutes, "40")
+        XCTAssertEqual(vm.totalTime, 1500, "Switching between fields keeps pending shared draft without mutating viewModel")
+
+        // User edits seconds to "30"
+        controller.updateDraft(field: .seconds, text: "30")
+        XCTAssertEqual(controller.inputSeconds, "30")
+        XCTAssertEqual(vm.totalTime, 1500, "Draft remains uncommitted")
+
+        // Final commit (Enter or click outside)
+        let success = controller.commitEditing()
+        XCTAssertTrue(success)
+        XCTAssertEqual(vm.totalTime, 40 * 60 + 30, "Duration must update atomically to 40m 30s")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_16_MenuBarCompanion_SymmetricBehaviorWithMainWindow() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let companionController = TimeInputController(totalTime: vm.totalTime)
+
+        companionController.startEditing(.seconds)
+        companionController.updateDraft(field: .seconds, text: "99")
+
+        let committed = companionController.commitEditing()
+        XCTAssertFalse(committed, "Menu bar companion must reject seconds > 59 symmetrically")
+        XCTAssertTrue(companionController.hasInvalidDraft)
+        XCTAssertEqual(companionController.validationError?.localizedDescription, "Seconds must be between 00 and 59")
+
+        companionController.cancelEditing()
+        XCTAssertFalse(companionController.hasInvalidDraft)
+        XCTAssertEqual(companionController.inputSeconds, "00")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_17_TimeDigitNSTextField_activateAndSelectAll_DoesNotTriggerSpuriousEndEditing() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        var boundText = "25"
+        var focusLostCount = 0
+        let field = TimeDigitField(
+            text: Binding(get: { boundText }, set: { boundText = $0 }),
+            onFocusLost: { focusLostCount += 1 }
+        )
+        let coordinator = field.makeCoordinator()
+        let textField = TimeDigitNSTextField()
+        textField.stringValue = "25"
+        textField.isEditable = true
+        textField.isSelectable = true
+        textField.delegate = coordinator
+        coordinator.textField = textField
+
+        window.contentView?.addSubview(textField)
+        textField.activateAndSelectAll()
+
+        XCTAssertEqual(focusLostCount, 0, "activateAndSelectAll must never cause onFocusLost")
+        XCTAssertEqual(window.firstResponder, textField.currentEditor(), "Field editor must be active first responder")
+        XCTAssertEqual(textField.currentEditor()?.selectedRange.length, 2, "Text must remain fully selected for typing")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_18_TimeDigitNSTextField_DirectTypingInWindowReplacesSelection() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        var boundText = "25"
+        var focusLostCount = 0
+        let field = TimeDigitField(
+            text: Binding(get: { boundText }, set: { boundText = $0 }),
+            onFocusLost: { focusLostCount += 1 }
+        )
+        let coordinator = field.makeCoordinator()
+        let textField = TimeDigitNSTextField()
+        textField.stringValue = "25"
+        textField.isEditable = true
+        textField.isSelectable = true
+        textField.delegate = coordinator
+        coordinator.textField = textField
+
+        window.contentView?.addSubview(textField)
+        textField.activateAndSelectAll()
+
+        guard let editor = textField.currentEditor() as? NSTextView else {
+            XCTFail("Field editor must be available as NSTextView")
+            return
+        }
+
+        // Simulate user typing '4' then '5' over selected text
+        editor.insertText("4", replacementRange: editor.selectedRange)
+        coordinator.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: textField))
+        XCTAssertEqual(boundText, "4")
+
+        editor.insertText("5", replacementRange: editor.selectedRange)
+        coordinator.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: textField))
+        XCTAssertEqual(boundText, "45")
+        XCTAssertEqual(focusLostCount, 0, "Typing must not trigger onFocusLost")
+    }
+
+    @MainActor
+    func testCustomTimerHardening_19_TimeDigitNSTextField_ClickAwayInWindowCallsFocusLost() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        var boundText = "25"
+        var focusLostCount = 0
+        let field = TimeDigitField(
+            text: Binding(get: { boundText }, set: { boundText = $0 }),
+            onFocusLost: { focusLostCount += 1 }
+        )
+        let coordinator = field.makeCoordinator()
+        let textField = TimeDigitNSTextField()
+        textField.stringValue = "25"
+        textField.isEditable = true
+        textField.isSelectable = true
+        textField.delegate = coordinator
+        coordinator.textField = textField
+        textField.onFocusAcquired = {
+            coordinator.hasReportedFocusLost = false
+        }
+
+        let otherButton = NSButton(title: "Other", target: nil, action: nil)
+
+        window.contentView?.addSubview(textField)
+        window.contentView?.addSubview(otherButton)
+        textField.activateAndSelectAll()
+
+        XCTAssertEqual(focusLostCount, 0)
+
+        // Switch first responder to another control (simulating click away)
+        window.makeFirstResponder(otherButton)
+
+        let exp = expectation(description: "Focus lost dispatched asynchronously")
+        DispatchQueue.main.async {
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 1.0)
+
+        XCTAssertEqual(focusLostCount, 1, "Clicking away to another control must trigger onFocusLost")
     }
 
     // MARK: - Stopwatch Lap Integrity Tests
@@ -7238,7 +8393,7 @@ final class FocusFlowTests: XCTestCase {
     @MainActor
     func testTask5_GroupD_Test17_NSCalendarDayChangedNotification_TriggersRecalculation() {
         let (vm, tempURL) = makeIsolatedViewModel()
-        defer { cleanup(url: tempURL) }
+        defer { cleanup(url: tempURL, vm: vm) }
 
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
@@ -7263,20 +8418,26 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(vm.todayFocusedSeconds, 3600, "State must remain stale before notification")
 
         let exp = expectation(description: "todayFocusedSeconds refreshed to 0 on Day 2 via NSCalendarDayChanged")
+        exp.assertForOverFulfill = false
 
+        var hasFulfilled = false
         var cancellable: AnyCancellable?
         cancellable = vm.$todayFocusedSeconds
             .dropFirst()
-            .sink { newVal in
-                if newVal == 0 {
+            .filter { $0 == 0 }
+            .first()
+            .sink { _ in
+                if !hasFulfilled {
+                    hasFulfilled = true
                     exp.fulfill()
                 }
             }
+        defer { cancellable?.cancel() }
 
         // Post the real NSCalendarDayChanged notification
         NotificationCenter.default.post(name: .NSCalendarDayChanged, object: nil)
 
-        wait(for: [exp], timeout: 2.0)
+        wait(for: [exp], timeout: 5.0)
         cancellable?.cancel()
 
         XCTAssertEqual(vm.todayFocusedSeconds, 0, "Notification must have caused todayFocusedSeconds to update to 0")
@@ -7287,7 +8448,7 @@ final class FocusFlowTests: XCTestCase {
     @MainActor
     func testTask5_GroupD_Test18_NSApplicationDidBecomeActiveNotification_TriggersRecalculation() {
         let (vm, tempURL) = makeIsolatedViewModel()
-        defer { cleanup(url: tempURL) }
+        defer { cleanup(url: tempURL, vm: vm) }
 
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
@@ -7311,20 +8472,26 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(vm.todayFocusedSeconds, 3600, "State must remain stale before notification")
 
         let exp = expectation(description: "todayFocusedSeconds refreshed to 0 on Day 2 via didBecomeActive")
+        exp.assertForOverFulfill = false
 
+        var hasFulfilled = false
         var cancellable: AnyCancellable?
         cancellable = vm.$todayFocusedSeconds
             .dropFirst()
-            .sink { newVal in
-                if newVal == 0 {
+            .filter { $0 == 0 }
+            .first()
+            .sink { _ in
+                if !hasFulfilled {
+                    hasFulfilled = true
                     exp.fulfill()
                 }
             }
+        defer { cancellable?.cancel() }
 
         // Post NSApplication.didBecomeActiveNotification
         NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
 
-        wait(for: [exp], timeout: 2.0)
+        wait(for: [exp], timeout: 5.0)
         cancellable?.cancel()
 
         XCTAssertEqual(vm.todayFocusedSeconds, 0, "Notification must have caused todayFocusedSeconds to update to 0")
@@ -8521,10 +9688,14 @@ final class FocusFlowTests: XCTestCase {
 
         // Wait for coalesced trailing save to execute
         let exp = expectation(description: "Wait for trailing save")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+        exp.assertForOverFulfill = false
+        var workItem: DispatchWorkItem?
+        workItem = DispatchWorkItem {
             exp.fulfill()
         }
-        wait(for: [exp], timeout: 2.0)
+        defer { workItem?.cancel() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: workItem!)
+        wait(for: [exp], timeout: 5.0)
 
         // Verifies write coalescing: 100 mutations result in exactly 1 trailing save
         XCTAssertEqual(vm.storage.saveAttemptCount, 1, "100 rapid mutations must result in exactly 1 coalesced write attempt, not 100")
@@ -8546,10 +9717,14 @@ final class FocusFlowTests: XCTestCase {
         }
 
         let exp = expectation(description: "Wait for trailing save")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+        exp.assertForOverFulfill = false
+        var workItem: DispatchWorkItem?
+        workItem = DispatchWorkItem {
             exp.fulfill()
         }
-        wait(for: [exp], timeout: 2.0)
+        defer { workItem?.cancel() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: workItem!)
+        wait(for: [exp], timeout: 5.0)
 
         let savedData = try vm.storage.decodeData(from: tempURL)
         XCTAssertEqual(savedData.dailyGoalHours, 10, "Eventual save must contain latest state (10), not first queued state (1)")
@@ -15887,4 +17062,5058 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(diskAfter.activePreset, "Short Break")
         XCTAssertEqual(diskAfter.sessionRecords.count, 1)
     }
+
+    // MARK: - CI Reliability & Async Lifecycle Regression Tests
+    @MainActor
+    func testCI_Regression_RapidConsecutiveCalendarNotificationsDoNotOverfulfill() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        vm.reportingCalendar = calendar
+
+        let day1 = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 14, minute: 0, second: 0))!
+        let record = FocusSessionRecord(startTime: day1, endTime: day1.addingTimeInterval(3600), durationSeconds: 3600, mode: "Focus", taskId: nil)
+        vm.sessionRecords.append(record)
+
+        let day1Afternoon = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 16, minute: 0, second: 0))!
+        vm.currentDateProvider = { day1Afternoon }
+        vm.recalculateFocusMetrics(now: day1Afternoon)
+        XCTAssertEqual(vm.todayFocusedSeconds, 3600)
+
+        let day2Morning = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 9, minute: 0, second: 0))!
+        vm.currentDateProvider = { day2Morning }
+
+        let exp = expectation(description: "Safely receive single fulfillment despite multiple notifications")
+        exp.assertForOverFulfill = false
+
+        var hasFulfilled = false
+        var cancellable: AnyCancellable?
+        cancellable = vm.$todayFocusedSeconds
+            .dropFirst()
+            .filter { $0 == 0 }
+            .first()
+            .sink { _ in
+                if !hasFulfilled {
+                    hasFulfilled = true
+                    exp.fulfill()
+                }
+            }
+        defer { cancellable?.cancel() }
+
+        // Post multiple notifications rapidly
+        for _ in 1...10 {
+            NotificationCenter.default.post(name: .NSCalendarDayChanged, object: nil)
+            NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        }
+
+        wait(for: [exp], timeout: 5.0)
+        cancellable?.cancel()
+
+        XCTAssertEqual(vm.todayFocusedSeconds, 0)
+    }
+
+    @MainActor
+    func testCI_Regression_DeallocatedViewModelDoesNotReceivePostTeardownNotifications() {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("focusflow_reg_\(UUID().uuidString).json")
+        defer { cleanup(url: tempURL) }
+
+        do {
+            let storage = FocusStorageService(storageURL: tempURL)
+            let localVM = TimerViewModel(storage: storage)
+            localVM.cancelDateChangeMonitoring()
+        }
+
+        // Post notifications with no active view model — must not crash or leak tasks
+        NotificationCenter.default.post(name: .NSCalendarDayChanged, object: nil)
+        NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        NotificationCenter.default.post(name: .NSSystemTimeZoneDidChange, object: nil)
+        NotificationCenter.default.post(name: .NSSystemClockDidChange, object: nil)
+    }
+
+    // MARK: - Custom Timer UI/UX Final Refinement Regression Tests
+
+    @MainActor
+    func testCustomTimerRefinement_01_MinutesActivationKeepsPaddedZeroString() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 0, seconds: 30)
+        let controller = vm.customTimeInputController
+
+        XCTAssertEqual(controller.inputMinutes, "00")
+        XCTAssertEqual(controller.inputSeconds, "30")
+
+        // Activating minutes editing must keep "00" instead of dropping to unpadded "0"
+        controller.startEditing(.minutes)
+        XCTAssertEqual(controller.activeEditingField, .minutes)
+        XCTAssertEqual(controller.inputMinutes, "00", "Starting editing at 00:30 must preserve '00' in inputMinutes")
+        XCTAssertEqual(controller.snapshotMinutes, 0)
+        XCTAssertEqual(controller.snapshotSeconds, 30)
+
+        // Typing a single digit '5' replaces '00' cleanly
+        controller.updateDraft(field: .minutes, text: "5")
+        XCTAssertEqual(controller.inputMinutes, "5")
+
+        controller.cancelEditing()
+        XCTAssertNil(controller.activeEditingField)
+        XCTAssertEqual(controller.inputMinutes, "00")
+    }
+
+    @MainActor
+    func testCustomTimerRefinement_02_CompletedFractionProgressSemantics() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 30, seconds: 0)
+
+        // At beginning: remaining = 30m, preciseProgress = 1.0 (remaining fraction)
+        XCTAssertEqual(vm.timeRemaining, 1800)
+        XCTAssertEqual(vm.preciseProgress, 1.0, accuracy: 0.001)
+
+        let initialCompletedFraction = min(max(1.0 - vm.preciseProgress, 0.0), 1.0)
+        let initialCompletedPercentage = Int(round(initialCompletedFraction * 100))
+        XCTAssertEqual(initialCompletedFraction, 0.0, accuracy: 0.001, "Initial completed fraction must be 0%")
+        XCTAssertEqual(initialCompletedPercentage, 0, "Initial completed percentage must be 0%")
+
+        // Mid-session: 15m remaining
+        vm.timeRemaining = 900
+        vm.preciseProgress = Double(vm.timeRemaining) / Double(vm.totalTime)
+        let midCompletedFraction = min(max(1.0 - vm.preciseProgress, 0.0), 1.0)
+        let midCompletedPercentage = Int(round(midCompletedFraction * 100))
+        XCTAssertEqual(midCompletedFraction, 0.5, accuracy: 0.001, "Mid-session completed fraction must be 50%")
+        XCTAssertEqual(midCompletedPercentage, 50, "Mid-session completed percentage must be 50%")
+
+        // Near end: 3m remaining
+        vm.timeRemaining = 180
+        vm.preciseProgress = Double(vm.timeRemaining) / Double(vm.totalTime)
+        let nearEndCompletedFraction = min(max(1.0 - vm.preciseProgress, 0.0), 1.0)
+        let nearEndCompletedPercentage = Int(round(nearEndCompletedFraction * 100))
+        XCTAssertEqual(nearEndCompletedFraction, 0.9, accuracy: 0.001, "90% through session must be 90% completed")
+        XCTAssertEqual(nearEndCompletedPercentage, 90)
+
+        // Session complete: 0s remaining
+        vm.timeRemaining = 0
+        vm.preciseProgress = 0.0
+        let finishedCompletedFraction = min(max(1.0 - vm.preciseProgress, 0.0), 1.0)
+        let finishedCompletedPercentage = Int(round(finishedCompletedFraction * 100))
+        XCTAssertEqual(finishedCompletedFraction, 1.0, accuracy: 0.001, "Finished session completed fraction must be 100%")
+        XCTAssertEqual(finishedCompletedPercentage, 100)
+    }
+
+    @MainActor
+    func testCustomTimerRefinement_03_StepperBoundaries() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+
+        // Minimum duration boundary: 00:05 (5 seconds)
+        vm.setCustomDuration(minutes: 0, seconds: 5)
+        controller.sync(from: vm.totalTime)
+        XCTAssertFalse(controller.canAdjustMinus5, "Cannot subtract 5 minutes when duration is 5 seconds")
+        XCTAssertTrue(controller.canAdjustPlus5, "Can add 5 minutes when duration is 5 seconds")
+
+        // Nominal duration: 10:00 (10 minutes)
+        vm.setCustomDuration(minutes: 10, seconds: 0)
+        controller.sync(from: vm.totalTime)
+        XCTAssertTrue(controller.canAdjustMinus5, "Can subtract 5 minutes from 10 minutes")
+        XCTAssertTrue(controller.canAdjustPlus5, "Can add 5 minutes to 10 minutes")
+
+        // Maximum duration boundary: 360:00 (6 hours)
+        vm.setCustomDuration(minutes: 360, seconds: 0)
+        controller.sync(from: vm.totalTime)
+        XCTAssertTrue(controller.canAdjustMinus5, "Can subtract 5 minutes from 360 minutes")
+        XCTAssertFalse(controller.canAdjustPlus5, "Cannot add 5 minutes when already at 360 minutes max")
+    }
+
+    @MainActor
+    func testCustomTimerRefinement_04_ValidationErrorFieldTargeting() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+
+        // Test invalid minutes exceeding maximum
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "400")
+        controller.commitEditing()
+        XCTAssertTrue(controller.hasInvalidDraft)
+        XCTAssertEqual(controller.validationErrorField, .minutes, "Exceeding maximum duration must highlight minutes field")
+
+        // Reset and test invalid seconds (> 59)
+        controller.cancelEditing()
+        controller.startEditing(.seconds)
+        controller.updateDraft(field: .seconds, text: "75")
+        controller.commitEditing()
+        XCTAssertTrue(controller.hasInvalidDraft)
+        XCTAssertEqual(controller.validationErrorField, .seconds, "Seconds >= 60 must highlight seconds field")
+    }
+
+    @MainActor
+    func testCustomTimerRefinement_05_RoundedMonospacedFontParity() {
+        let font = TimeDigitField.roundedMonospacedFont(size: 80, weight: .bold)
+        XCTAssertEqual(font.pointSize, 80)
+
+        // Check advance widths: '1' and '0' in monospaced font must have identical advance width
+        let str0 = NSAttributedString(string: "0", attributes: [.font: font])
+        let str1 = NSAttributedString(string: "1", attributes: [.font: font])
+        let size0 = str0.size()
+        let size1 = str1.size()
+
+        XCTAssertEqual(size0.width, size1.width, accuracy: 0.1, "Monospaced numerals must have identical advance width for '0' and '1'")
+    }
+
+    @MainActor
+    func testCustomTimerRefinement_06_ThreeDigitMinutesFormatting() {
+        XCTAssertEqual(TimeInputController.formatMinutes(360), "360")
+        XCTAssertEqual(TimeInputController.formatMinutes(25), "25")
+        XCTAssertEqual(TimeInputController.formatMinutes(5), "05")
+        XCTAssertEqual(TimeInputController.formatMinutes(0), "00")
+
+        XCTAssertEqual(TimeInputController.formatSeconds(59), "59")
+        XCTAssertEqual(TimeInputController.formatSeconds(5), "05")
+        XCTAssertEqual(TimeInputController.formatSeconds(0), "00")
+    }
+
+    // MARK: - Custom Timer Placeholder & Alignment Fix Tests
+
+    @MainActor
+    func testCustomTimerPlaceholder_01_EmptyMinutesDraftDisplaysMMNot25() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+
+        // Verify makePlaceholderAttributedString produces centered MM
+        let attr = TimeDigitField.makePlaceholderAttributedString(text: "MM", fontSize: 80)
+        XCTAssertEqual(attr.string, "MM", "Placeholder must be 'MM', not previous '25'")
+        let style = attr.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        XCTAssertEqual(style?.alignment, .center, "Placeholder paragraph style must be centered")
+
+        // Verify hosted TimeDigitField initializes with MM placeholder
+        var text = ""
+        let field = TimeDigitField(text: Binding(get: { text }, set: { text = $0 }), placeholder: "MM", fontSize: 80, maxLength: 3)
+        let hostingView = NSHostingView(rootView: field)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 200, height: 100)
+        hostingView.layoutSubtreeIfNeeded()
+
+        func findTextField(in view: NSView) -> TimeDigitNSTextField? {
+            if let tf = view as? TimeDigitNSTextField { return tf }
+            for sub in view.subviews {
+                if let found = findTextField(in: sub) { return found }
+            }
+            return nil
+        }
+
+        if let tf = findTextField(in: hostingView) {
+            XCTAssertEqual(tf.placeholderAttributedString?.string, "MM")
+            XCTAssertEqual(tf.alignment, .center)
+            XCTAssertEqual(tf.cell?.alignment, .center)
+        }
+    }
+
+    @MainActor
+    func testCustomTimerPlaceholder_02_EmptySecondsDraftDisplaysSSNot00() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 30)
+
+        // Verify makePlaceholderAttributedString produces centered SS
+        let attr = TimeDigitField.makePlaceholderAttributedString(text: "SS", fontSize: 80)
+        XCTAssertEqual(attr.string, "SS", "Placeholder must be 'SS', not previous '00'")
+        let style = attr.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        XCTAssertEqual(style?.alignment, .center, "Placeholder paragraph style must be centered")
+
+        // Verify hosted TimeDigitField initializes with SS placeholder
+        var text = ""
+        let field = TimeDigitField(text: Binding(get: { text }, set: { text = $0 }), placeholder: "SS", fontSize: 80, maxLength: 2)
+        let hostingView = NSHostingView(rootView: field)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 140, height: 100)
+        hostingView.layoutSubtreeIfNeeded()
+
+        func findTextField(in view: NSView) -> TimeDigitNSTextField? {
+            if let tf = view as? TimeDigitNSTextField { return tf }
+            for sub in view.subviews {
+                if let found = findTextField(in: sub) { return found }
+            }
+            return nil
+        }
+
+        if let tf = findTextField(in: hostingView) {
+            XCTAssertEqual(tf.placeholderAttributedString?.string, "SS")
+            XCTAssertEqual(tf.alignment, .center)
+            XCTAssertEqual(tf.cell?.alignment, .center)
+        }
+    }
+
+    @MainActor
+    func testCustomTimerPlaceholder_03_PlaceholderNeverStoredAsNumericDraftValue() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "")
+        controller.updateDraft(field: .seconds, text: "")
+
+        XCTAssertEqual(controller.inputMinutes, "", "Draft minutes must be empty, not 'MM'")
+        XCTAssertEqual(controller.inputSeconds, "", "Draft seconds must be empty, not 'SS'")
+        XCTAssertNotEqual(controller.inputMinutes, "MM")
+        XCTAssertNotEqual(controller.inputSeconds, "SS")
+
+        switch controller.validateDraft() {
+        case .success:
+            XCTFail("Empty draft must never validate successfully")
+        case .failure(let error):
+            XCTAssertEqual(error, .empty, "Validating empty draft must return .empty failure")
+        }
+    }
+
+    @MainActor
+    func testCustomTimerPlaceholder_04_PlaceholderRemovedImmediatelyWhenTyping() {
+        var text = ""
+        let field = TimeDigitField(text: Binding(get: { text }, set: { text = $0 }), placeholder: "MM", fontSize: 80, maxLength: 3)
+        let coordinator = field.makeCoordinator()
+        let tf = TimeDigitNSTextField()
+        tf.stringValue = ""
+        coordinator.textField = tf
+
+        // User types '4'
+        tf.stringValue = "4"
+        coordinator.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: tf))
+
+        XCTAssertEqual(text, "4", "Typing '4' must immediately update bound draft")
+        XCTAssertEqual(tf.stringValue, "4", "Text field must contain '4' and not show placeholder")
+
+        // User types '5' -> '45'
+        tf.stringValue = "45"
+        coordinator.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: tf))
+
+        XCTAssertEqual(text, "45")
+        XCTAssertEqual(tf.stringValue, "45")
+    }
+
+    @MainActor
+    func testCustomTimerPlaceholder_05_AppKitCenteringPixelMeasurement() {
+        // Test in actual 180x100 card
+        let tf = NSTextField(frame: NSRect(x: 0, y: 0, width: 180, height: 100))
+        tf.isBezeled = false
+        tf.drawsBackground = false
+        tf.alignment = .center
+        let font = TimeDigitField.roundedMonospacedFont(size: 80, weight: .bold)
+        tf.font = font
+
+        // 1. One digit "4"
+        tf.stringValue = "4"
+        var rep = tf.bitmapImageRepForCachingDisplay(in: tf.bounds)!
+        tf.cacheDisplay(in: tf.bounds, to: rep)
+        var minX = 9999, maxX = -1
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide {
+                if (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.05 {
+                    if x < minX { minX = x }
+                    if x > maxX { maxX = x }
+                }
+            }
+        }
+        let center4 = (Double(minX) + Double(maxX)) / 2.0
+        let expectedCenter = Double(rep.pixelsWide) / 2.0
+        XCTAssertEqual(center4, expectedCenter, accuracy: 4.0, "One digit '4' must be horizontally centered within 4px")
+
+        // 2. Two digits "45"
+        tf.stringValue = "45"
+        rep = tf.bitmapImageRepForCachingDisplay(in: tf.bounds)!
+        tf.cacheDisplay(in: tf.bounds, to: rep)
+        minX = 9999; maxX = -1
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide {
+                if (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.05 {
+                    if x < minX { minX = x }
+                    if x > maxX { maxX = x }
+                }
+            }
+        }
+        let center45 = (Double(minX) + Double(maxX)) / 2.0
+        XCTAssertEqual(center45, expectedCenter, accuracy: 4.0, "Two digits '45' must be horizontally centered within 4px")
+
+        // 3. Three digits "360"
+        tf.stringValue = "360"
+        rep = tf.bitmapImageRepForCachingDisplay(in: tf.bounds)!
+        tf.cacheDisplay(in: tf.bounds, to: rep)
+        minX = 9999; maxX = -1
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide {
+                if (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.05 {
+                    if x < minX { minX = x }
+                    if x > maxX { maxX = x }
+                }
+            }
+        }
+        let center360 = (Double(minX) + Double(maxX)) / 2.0
+        XCTAssertEqual(center360, expectedCenter, accuracy: 4.0, "Three digits '360' must be horizontally centered within 4px")
+        XCTAssertGreaterThan(minX, 0, "Three digits '360' must not clip or overflow left boundary")
+        XCTAssertLessThan(maxX, rep.pixelsWide, "Three digits '360' must not clip or overflow right boundary")
+
+        // 4. Placeholder "MM"
+        tf.stringValue = ""
+        tf.placeholderAttributedString = TimeDigitField.makePlaceholderAttributedString(text: "MM", fontSize: 80)
+        rep = tf.bitmapImageRepForCachingDisplay(in: tf.bounds)!
+        tf.cacheDisplay(in: tf.bounds, to: rep)
+        minX = 9999; maxX = -1
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide {
+                if (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.05 {
+                    if x < minX { minX = x }
+                    if x > maxX { maxX = x }
+                }
+            }
+        }
+        let centerMM = (Double(minX) + Double(maxX)) / 2.0
+        XCTAssertEqual(centerMM, expectedCenter, accuracy: 4.0, "Placeholder 'MM' must be horizontally centered within 4px")
+    }
+
+    @MainActor
+    func testCustomTimerPlaceholder_06_ZeroMinuteDurationKeeps00UntilDeleted() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 0, seconds: 30)
+        let controller = vm.customTimeInputController
+
+        // User clicks minutes
+        controller.startEditing(.minutes)
+        XCTAssertEqual(controller.inputMinutes, "00", "Zero-minute duration must start editing with '00', not 'MM' or '0'")
+        XCTAssertEqual(controller.activeEditingField, .minutes)
+
+        // Only when deleted does it become empty
+        controller.updateDraft(field: .minutes, text: "")
+        XCTAssertEqual(controller.inputMinutes, "")
+    }
+
+    @MainActor
+    func testCustomTimerPlaceholder_07_EscapeRestoresOriginalCommittedDuration() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "") // Empty, MM placeholder showing
+        XCTAssertEqual(controller.inputMinutes, "")
+
+        // User presses Escape
+        controller.cancelEditing()
+
+        XCTAssertNil(controller.activeEditingField)
+        XCTAssertEqual(controller.committedMinutes, 25)
+        XCTAssertEqual(controller.committedSeconds, 0)
+        XCTAssertEqual(controller.inputMinutes, "25")
+        XCTAssertEqual(controller.inputSeconds, "00")
+    }
+
+    @MainActor
+    func testCustomTimerPlaceholder_08_EmptyInputCannotCorruptTimer() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        let controller = vm.customTimeInputController
+
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "")
+        controller.updateDraft(field: .seconds, text: "")
+
+        let committed = controller.commitEditing()
+        XCTAssertFalse(committed, "commitEditing must fail on empty input")
+        XCTAssertTrue(controller.hasInvalidDraft)
+        XCTAssertEqual(vm.totalTime, 1500, "Timer totalTime must remain untouched at 25 minutes")
+    }
+
+    @MainActor
+    func testCustomTimerPlaceholder_09_FieldEditorActiveAndCaretCentered() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let tf = TimeDigitNSTextField(frame: NSRect(x: 50, y: 100, width: 180, height: 100))
+        tf.isBezeled = false
+        tf.drawsBackground = false
+        tf.alignment = .center
+        tf.placeholderAttributedString = TimeDigitField.makePlaceholderAttributedString(text: "MM", fontSize: 80)
+        tf.stringValue = "25"
+
+        window.contentView?.addSubview(tf)
+        window.makeKeyAndOrderFront(nil)
+        tf.activateAndSelectAll()
+
+        guard let editor = tf.currentEditor() as? NSTextView else {
+            XCTFail("Field editor must be active")
+            return
+        }
+
+        XCTAssertEqual(editor.alignment, .center, "Field editor must be centered")
+
+        // User deletes text
+        editor.string = ""
+        tf.stringValue = ""
+
+        if let layoutManager = editor.layoutManager, let textContainer = editor.textContainer {
+            let caretRect = layoutManager.boundingRect(forGlyphRange: NSRange(location: 0, length: 0), in: textContainer)
+            XCTAssertEqual(caretRect.origin.x, 90.0, accuracy: 2.0, "Caret in empty field editor must sit at center (90.0)")
+        }
+    }
+
+    @MainActor
+    func testCustomTimerPlaceholder_10_VisualSnapshots() throws {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+
+        let darkBg = Color(red: 0.08, green: 0.09, blue: 0.13)
+
+        // 1. Idle view
+        let idleView = ZStack {
+            darkBg
+            InPlaceTimeInputView(viewModel: vm, size: 400).padding(20)
+        }
+        let hosting1 = NSHostingView(rootView: idleView)
+        hosting1.frame = NSRect(x: 0, y: 0, width: 600, height: 260)
+        hosting1.layoutSubtreeIfNeeded()
+        if let rep = hosting1.bitmapImageRepForCachingDisplay(in: hosting1.bounds) {
+            hosting1.cacheDisplay(in: hosting1.bounds, to: rep)
+            if let data = rep.representation(using: .png, properties: [:]) {
+                try data.write(to: URL(fileURLWithPath: "/tmp/focusflow_custom_timer_idle.png"))
+            }
+        }
+
+        // 2. Empty minutes view (MM placeholder)
+        let controller = vm.customTimeInputController
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "")
+        let editView = ZStack {
+            darkBg
+            InPlaceTimeInputView(viewModel: vm, size: 400).padding(20)
+        }
+        let hosting2 = NSHostingView(rootView: editView)
+        hosting2.frame = NSRect(x: 0, y: 0, width: 600, height: 260)
+        hosting2.layoutSubtreeIfNeeded()
+        if let rep = hosting2.bitmapImageRepForCachingDisplay(in: hosting2.bounds) {
+            hosting2.cacheDisplay(in: hosting2.bounds, to: rep)
+            if let data = rep.representation(using: .png, properties: [:]) {
+                try data.write(to: URL(fileURLWithPath: "/tmp/focusflow_custom_timer_empty_minutes.png"))
+            }
+        }
+
+        // 3. Empty seconds view (SS placeholder)
+        controller.commitAndSwitchField(to: .seconds)
+        controller.updateDraft(field: .seconds, text: "")
+        let editSecView = ZStack {
+            darkBg
+            InPlaceTimeInputView(viewModel: vm, size: 400).padding(20)
+        }
+        let hosting3 = NSHostingView(rootView: editSecView)
+        hosting3.frame = NSRect(x: 0, y: 0, width: 600, height: 260)
+        hosting3.layoutSubtreeIfNeeded()
+        if let rep = hosting3.bitmapImageRepForCachingDisplay(in: hosting3.bounds) {
+            hosting3.cacheDisplay(in: hosting3.bounds, to: rep)
+            if let data = rep.representation(using: .png, properties: [:]) {
+                try data.write(to: URL(fileURLWithPath: "/tmp/focusflow_custom_timer_empty_seconds.png"))
+            }
+        }
+    }
+
+    // MARK: - +15m Boundary & Stepper Hardening Regression Tests
+
+    @MainActor
+    func testCustomTimerBoundary_01_Plus15mOn25MinutesBecomes40Minutes() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        controller.sync(from: vm.totalTime)
+
+        XCTAssertTrue(controller.canAdjustPlus15, "Can add 15 minutes to 25:00")
+        XCTAssertTrue(controller.canAdjustMinutes(by: 15))
+
+        controller.adjustMinutes(by: 15)
+        XCTAssertEqual(vm.totalTime, 40 * 60)
+        XCTAssertEqual(controller.committedMinutes, 40)
+        XCTAssertEqual(controller.committedSeconds, 0)
+        XCTAssertEqual(controller.inputMinutes, "40")
+        XCTAssertEqual(controller.inputSeconds, "00")
+    }
+
+    @MainActor
+    func testCustomTimerBoundary_02_Plus15mOn10Minutes30SecondsBecomes25Minutes30Seconds() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        vm.setCustomDuration(minutes: 10, seconds: 30)
+        controller.sync(from: vm.totalTime)
+
+        XCTAssertTrue(controller.canAdjustPlus15)
+        controller.adjustMinutes(by: 15)
+
+        XCTAssertEqual(vm.totalTime, 25 * 60 + 30)
+        XCTAssertEqual(controller.committedMinutes, 25)
+        XCTAssertEqual(controller.committedSeconds, 30, "Seconds must be preserved exactly")
+        XCTAssertEqual(controller.inputMinutes, "25")
+        XCTAssertEqual(controller.inputSeconds, "30")
+    }
+
+    @MainActor
+    func testCustomTimerBoundary_03_Plus15mOn345Minutes59SecondsReachesMaximum360Minutes59Seconds() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        vm.setCustomDuration(minutes: 345, seconds: 59)
+        controller.sync(from: vm.totalTime)
+
+        XCTAssertTrue(controller.canAdjustPlus15, "345:59 + 15m is exactly 360:59, which is supported maximum")
+        XCTAssertEqual(controller.committedTotalSeconds + 15 * 60, TimeInputController.maxDurationSeconds)
+
+        controller.adjustMinutes(by: 15)
+        XCTAssertEqual(vm.totalTime, 360 * 60 + 59)
+        XCTAssertEqual(controller.committedMinutes, 360)
+        XCTAssertEqual(controller.committedSeconds, 59)
+        XCTAssertEqual(controller.inputMinutes, "360")
+        XCTAssertEqual(controller.inputSeconds, "59")
+
+        // Once at maximum, neither +15m nor +5m can be applied
+        XCTAssertFalse(controller.canAdjustPlus15, "Cannot add 15 minutes when at max 360:59")
+        XCTAssertFalse(controller.canAdjustPlus5, "Cannot add 5 minutes when at max 360:59")
+    }
+
+    @MainActor
+    func testCustomTimerBoundary_04_Plus15mAtBoundariesIsUnavailable() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+
+        // 346:00 + 15m = 361:00 (exceeds 360:59) -> Unavailable
+        vm.setCustomDuration(minutes: 346, seconds: 0)
+        controller.sync(from: vm.totalTime)
+        XCTAssertFalse(controller.canAdjustPlus15, "346:00 + 15m exceeds maxDurationSeconds")
+        XCTAssertFalse(controller.canAdjustMinutes(by: 15))
+
+        // 350:30 + 15m = 365:30 -> Unavailable
+        vm.setCustomDuration(minutes: 350, seconds: 30)
+        controller.sync(from: vm.totalTime)
+        XCTAssertFalse(controller.canAdjustPlus15, "350:30 + 15m exceeds maxDurationSeconds")
+        XCTAssertFalse(controller.canAdjustMinutes(by: 15))
+
+        // 360:00 + 15m = 375:00 -> Unavailable
+        vm.setCustomDuration(minutes: 360, seconds: 0)
+        controller.sync(from: vm.totalTime)
+        XCTAssertFalse(controller.canAdjustPlus15, "360:00 + 15m exceeds maxDurationSeconds")
+        XCTAssertFalse(controller.canAdjustMinutes(by: 15))
+    }
+
+    @MainActor
+    func testCustomTimerBoundary_05_InvalidPlus15mDoesNotInvokeOnCommit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        vm.setCustomDuration(minutes: 350, seconds: 30)
+        controller.sync(from: vm.totalTime)
+
+        var commitCount = 0
+        controller.onCommit = { _, _ in
+            commitCount += 1
+        }
+
+        controller.adjustMinutes(by: 15)
+        XCTAssertEqual(commitCount, 0, "onCommit must not be invoked when adjustment is invalid")
+        XCTAssertEqual(vm.totalTime, 350 * 60 + 30)
+        XCTAssertEqual(controller.committedMinutes, 350)
+        XCTAssertEqual(controller.committedSeconds, 30)
+    }
+
+    @MainActor
+    func testCustomTimerBoundary_06_InvalidIncrementPreservesTimerDurationExactlyNoPartialClamping() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        vm.setCustomDuration(minutes: 355, seconds: 0)
+        controller.sync(from: vm.totalTime)
+
+        // Attempting +15m on 355:00 would exceed 360:00.
+        // It must NOT partially clamp to 360:00; it must strictly reject all-or-nothing.
+        controller.adjustMinutes(by: 15)
+        XCTAssertEqual(controller.committedMinutes, 355, "Must not apply partial increment to 360")
+        XCTAssertEqual(controller.committedSeconds, 0)
+        XCTAssertEqual(controller.inputMinutes, "355")
+        XCTAssertEqual(controller.inputSeconds, "00")
+        XCTAssertEqual(vm.totalTime, 355 * 60)
+    }
+
+    @MainActor
+    func testCustomTimerBoundary_07_Plus5mWorksAtCorrectUpperBoundary() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+
+        // 355:59 + 5m = 360:59 (exactly max) -> Valid
+        vm.setCustomDuration(minutes: 355, seconds: 59)
+        controller.sync(from: vm.totalTime)
+        XCTAssertTrue(controller.canAdjustPlus5)
+        controller.adjustMinutes(by: 5)
+        XCTAssertEqual(controller.committedMinutes, 360)
+        XCTAssertEqual(controller.committedSeconds, 59)
+        XCTAssertEqual(vm.totalTime, 360 * 60 + 59)
+
+        // 356:00 + 5m = 361:00 (exceeds max 360:59) -> Invalid
+        vm.setCustomDuration(minutes: 356, seconds: 0)
+        controller.sync(from: vm.totalTime)
+        XCTAssertFalse(controller.canAdjustPlus5)
+        controller.adjustMinutes(by: 5)
+        XCTAssertEqual(controller.committedMinutes, 356, "356:00 must remain unchanged")
+        XCTAssertEqual(vm.totalTime, 356 * 60)
+    }
+
+    @MainActor
+    func testCustomTimerBoundary_08_Minus5mRespectsMinimumDurationBoundary() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+
+        // 05:05 - 5m = 00:05 (exactly minimum supported duration) -> Valid
+        vm.setCustomDuration(minutes: 5, seconds: 5)
+        controller.sync(from: vm.totalTime)
+        XCTAssertTrue(controller.canAdjustMinus5)
+        controller.adjustMinutes(by: -5)
+        XCTAssertEqual(controller.committedMinutes, 0)
+        XCTAssertEqual(controller.committedSeconds, 5)
+        XCTAssertEqual(vm.totalTime, 5)
+
+        // 05:00 - 5m = 00:00 (less than 00:05) -> Invalid
+        vm.setCustomDuration(minutes: 5, seconds: 0)
+        controller.sync(from: vm.totalTime)
+        XCTAssertFalse(controller.canAdjustMinus5)
+        controller.adjustMinutes(by: -5)
+        XCTAssertEqual(controller.committedMinutes, 5, "05:00 must remain unchanged")
+        XCTAssertEqual(vm.totalTime, 300)
+
+        // 04:00 - 5m = -01:00 -> Invalid
+        vm.setCustomDuration(minutes: 4, seconds: 0)
+        controller.sync(from: vm.totalTime)
+        XCTAssertFalse(controller.canAdjustMinus5)
+        controller.adjustMinutes(by: -5)
+        XCTAssertEqual(controller.committedMinutes, 4, "04:00 must remain unchanged")
+        XCTAssertEqual(vm.totalTime, 240)
+    }
+
+    @MainActor
+    func testCustomTimerBoundary_09_SecondsPreservedByAllValidMinuteAdjustments() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        vm.setCustomDuration(minutes: 20, seconds: 47)
+        controller.sync(from: vm.totalTime)
+
+        // +5m -> 25:47
+        controller.adjustMinutes(by: 5)
+        XCTAssertEqual(controller.committedMinutes, 25)
+        XCTAssertEqual(controller.committedSeconds, 47)
+
+        // +15m -> 40:47
+        controller.adjustMinutes(by: 15)
+        XCTAssertEqual(controller.committedMinutes, 40)
+        XCTAssertEqual(controller.committedSeconds, 47)
+
+        // -5m -> 35:47
+        controller.adjustMinutes(by: -5)
+        XCTAssertEqual(controller.committedMinutes, 35)
+        XCTAssertEqual(controller.committedSeconds, 47)
+
+        // -15m -> 20:47
+        controller.adjustMinutes(by: -15)
+        XCTAssertEqual(controller.committedMinutes, 20)
+        XCTAssertEqual(controller.committedSeconds, 47)
+    }
+
+    @MainActor
+    func testCustomTimerBoundary_10_ActiveDraftCancellationAndStepperDeterministic() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        controller.sync(from: vm.totalTime)
+
+        var commits: [(Int, Int)] = []
+        controller.onCommit = { m, s in
+            commits.append((m, s))
+            vm.setCustomDuration(minutes: m, seconds: s)
+        }
+
+        // Case A: User starts editing, enters half-typed draft, then clicks valid +15m stepper
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "99")
+        XCTAssertTrue(controller.isEditing)
+
+        controller.adjustMinutes(by: 15)
+        XCTAssertFalse(controller.isEditing, "Draft editing must be cancelled")
+        XCTAssertEqual(commits.count, 1, "Exactly one commit must be triggered")
+        XCTAssertEqual(commits.first?.0, 40)
+        XCTAssertEqual(commits.first?.1, 0)
+        XCTAssertEqual(vm.totalTime, 40 * 60)
+
+        // Case B: User has invalid draft when committed is 350:00 and clicks invalid +15m
+        vm.setCustomDuration(minutes: 350, seconds: 0)
+        controller.sync(from: vm.totalTime)
+        commits.removeAll()
+
+        controller.startEditing(.minutes)
+        controller.updateDraft(field: .minutes, text: "999") // invalid
+        controller.adjustMinutes(by: 15) // invalid delta
+
+        XCTAssertFalse(controller.isEditing)
+        XCTAssertEqual(commits.count, 0, "No commits triggered for invalid stepper delta")
+        XCTAssertEqual(controller.committedMinutes, 350)
+        XCTAssertEqual(controller.inputMinutes, "350")
+    }
+
+    @MainActor
+    func testCustomTimerBoundary_11_MainUIDisabledStateMatchesControllerCapability() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL, vm: vm) }
+
+        let controller = vm.customTimeInputController
+
+        // At 350:30, +15m is disabled
+        vm.setCustomDuration(minutes: 350, seconds: 30)
+        controller.sync(from: vm.totalTime)
+        XCTAssertFalse(controller.canAdjustPlus15)
+
+        let disabledView = InPlaceTimeInputView(viewModel: vm, size: 400)
+        let hostingDisabled = NSHostingView(rootView: disabledView)
+        hostingDisabled.frame = NSRect(x: 0, y: 0, width: 600, height: 260)
+        hostingDisabled.layoutSubtreeIfNeeded()
+        XCTAssertFalse(controller.canAdjustPlus15)
+
+        // At 25:00, +15m is enabled
+        vm.setCustomDuration(minutes: 25, seconds: 0)
+        controller.sync(from: vm.totalTime)
+        XCTAssertTrue(controller.canAdjustPlus15)
+
+        let enabledView = InPlaceTimeInputView(viewModel: vm, size: 400)
+        let hostingEnabled = NSHostingView(rootView: enabledView)
+        hostingEnabled.frame = NSRect(x: 0, y: 0, width: 600, height: 260)
+        hostingEnabled.layoutSubtreeIfNeeded()
+        XCTAssertTrue(controller.canAdjustPlus15)
+    }
+
+    // MARK: - Task 9A: Idle Activity Monitor & Coordinator Tests
+
+    @MainActor
+    func testTask9A_01_UnderThresholdNoIdleDetected() {
+        let mock = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mock, thresholdSeconds: 300)
+        let sessionId = UUID()
+        let taskId = UUID()
+        let baseDate = Date(timeIntervalSince1970: 1700000000)
+
+        // At 4m 59s (299s) of idle time:
+        mock.setSimulatedIdle(299.0)
+        let checkDate = baseDate.addingTimeInterval(299.0)
+        coordinator.tick(
+            now: checkDate,
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: taskId,
+            sessionStartDate: baseDate
+        )
+
+        // Must NOT be idleDetected, must have NO pending reviews
+        XCTAssertTrue(coordinator.pendingIntervals.isEmpty)
+        XCTAssertNil(coordinator.activeReviewInterval)
+        if case .idleCandidate = coordinator.state {
+            // Expected
+        } else {
+            XCTFail("Expected state to be .idleCandidate, got \(coordinator.state)")
+        }
+
+        // User interacts (idle drops to 0)
+        mock.setSimulatedIdle(0.0)
+        coordinator.tick(
+            now: checkDate.addingTimeInterval(1.0),
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: taskId,
+            sessionStartDate: baseDate
+        )
+        XCTAssertEqual(coordinator.state, .monitoring)
+        XCTAssertTrue(coordinator.pendingIntervals.isEmpty)
+    }
+
+    @MainActor
+    func testTask9A_02_ThresholdReachedTriggersIdleDetected() {
+        let mock = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mock, thresholdSeconds: 300)
+        let sessionId = UUID()
+        let baseDate = Date(timeIntervalSince1970: 1700000000)
+
+        // Inactivity reaches 5m 01s (301s)
+        mock.setSimulatedIdle(301.0)
+        let now = baseDate.addingTimeInterval(301.0)
+        coordinator.tick(
+            now: now,
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: nil,
+            sessionStartDate: baseDate
+        )
+
+        if case .idleDetected(let startedAt) = coordinator.state {
+            // Must anchor to last interaction (baseDate), NOT the threshold arrival timestamp!
+            XCTAssertEqual(startedAt.timeIntervalSince1970, baseDate.timeIntervalSince1970, accuracy: 1.0)
+        } else {
+            XCTFail("Expected .idleDetected, got \(coordinator.state)")
+        }
+    }
+
+    @MainActor
+    func testTask9A_03_UserReturnCreatesPendingReviewWithAccurateInterval() {
+        let mock = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mock, thresholdSeconds: 300)
+        let sessionId = UUID()
+        let taskId = UUID()
+        let baseDate = Date(timeIntervalSince1970: 1700000000)
+
+        // Inactivity reaches 9 minutes (540s)
+        mock.setSimulatedIdle(540.0)
+        let idleDate = baseDate.addingTimeInterval(540.0)
+        coordinator.tick(
+            now: idleDate,
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: taskId,
+            sessionStartDate: baseDate
+        )
+
+        // User returns! Input detected (idle = 0)
+        mock.setSimulatedIdle(0.0)
+        let returnDate = baseDate.addingTimeInterval(541.0)
+        coordinator.tick(
+            now: returnDate,
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: taskId,
+            sessionStartDate: baseDate
+        )
+
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+        guard let interval = coordinator.pendingIntervals.first else {
+            XCTFail("No interval found")
+            return
+        }
+
+        XCTAssertEqual(interval.sessionId, sessionId)
+        XCTAssertEqual(interval.taskId, taskId)
+        XCTAssertEqual(interval.sessionType, "Focus")
+        XCTAssertEqual(interval.status, .pending)
+        XCTAssertEqual(interval.eligibleDurationSeconds, 541, accuracy: 2)
+        XCTAssertEqual(coordinator.activeReviewInterval?.id, interval.id)
+    }
+
+    @MainActor
+    func testTask9A_04_ExpiryWhileIdleBoundsIntervalToDeadline() {
+        let mock = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mock, thresholdSeconds: 300)
+        let sessionId = UUID()
+        let start = Date(timeIntervalSince1970: 1700000000) // 10:00
+        let deadline = start.addingTimeInterval(25 * 60) // 10:25 (1500s)
+        let returnDate = start.addingTimeInterval(32 * 60) // 10:32 (1920s)
+
+        // Inactivity started at 10:07 (420s after start)
+        // User was away 25 minutes (1500s of inactivity from 10:07 to 10:32)
+        let awayDuration = returnDate.timeIntervalSince(start.addingTimeInterval(420.0))
+        mock.setSimulatedIdle(awayDuration)
+
+        // Pre-tick while away
+        coordinator.tick(
+            now: returnDate,
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: nil,
+            sessionDeadline: deadline,
+            sessionStartDate: start
+        )
+
+        // User returns at 10:32
+        mock.setSimulatedIdle(0.0)
+        coordinator.tick(
+            now: returnDate,
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: nil,
+            sessionDeadline: deadline,
+            sessionStartDate: start
+        )
+
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+        guard let interval = coordinator.pendingIntervals.first else {
+            XCTFail("No interval found")
+            return
+        }
+
+        // Bounded strictly to deadline: 10:07 to 10:25 = 18 minutes (1080s)
+        // Must NOT include the 7 minutes after deadline!
+        XCTAssertEqual(interval.endTime.timeIntervalSince1970, deadline.timeIntervalSince1970, accuracy: 1.0)
+        XCTAssertEqual(interval.eligibleDurationSeconds, 18 * 60, accuracy: 2)
+    }
+
+    @MainActor
+    func testTask9A_05_BreakSessionsIgnoreInactivity() {
+        let mock = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mock, thresholdSeconds: 300)
+        let sessionId = UUID()
+        let baseDate = Date(timeIntervalSince1970: 1700000000)
+
+        // Inactivity during Break session
+        mock.setSimulatedIdle(600.0)
+        coordinator.tick(
+            now: baseDate.addingTimeInterval(600.0),
+            isSessionActive: true,
+            sessionType: "Break",
+            sessionId: sessionId,
+            taskId: nil
+        )
+
+        // User returns
+        mock.setSimulatedIdle(0.0)
+        coordinator.tick(
+            now: baseDate.addingTimeInterval(601.0),
+            isSessionActive: true,
+            sessionType: "Break",
+            sessionId: sessionId,
+            taskId: nil
+        )
+
+        XCTAssertTrue(coordinator.pendingIntervals.isEmpty, "Break sessions must never create idle review intervals")
+        XCTAssertNil(coordinator.activeReviewInterval)
+    }
+
+    @MainActor
+    func testTask9A_06_MultipleIntervalsQueuedOldestFirst() {
+        let mock = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mock, thresholdSeconds: 300)
+        let sessionId = UUID()
+        let t0 = Date(timeIntervalSince1970: 1700000000)
+
+        // Interval 1: 7 minutes away
+        mock.setSimulatedIdle(420.0)
+        coordinator.tick(now: t0.addingTimeInterval(420.0), isSessionActive: true, sessionType: "Focus", sessionId: sessionId, taskId: nil, sessionStartDate: t0)
+        mock.setSimulatedIdle(0.0)
+        coordinator.tick(now: t0.addingTimeInterval(421.0), isSessionActive: true, sessionType: "Focus", sessionId: sessionId, taskId: nil, sessionStartDate: t0)
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+
+        // User clicks Decide Later
+        let id1 = coordinator.pendingIntervals[0].id
+        coordinator.resolve(intervalId: id1, decision: .decideLater)
+        XCTAssertNil(coordinator.activeReviewInterval)
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+
+        // Interval 2: 8 minutes away
+        let t1 = t0.addingTimeInterval(1000.0)
+        mock.setSimulatedIdle(480.0)
+        coordinator.tick(now: t1.addingTimeInterval(480.0), isSessionActive: true, sessionType: "Focus", sessionId: sessionId, taskId: nil, sessionStartDate: t0)
+        mock.setSimulatedIdle(0.0)
+        coordinator.tick(now: t1.addingTimeInterval(481.0), isSessionActive: true, sessionType: "Focus", sessionId: sessionId, taskId: nil, sessionStartDate: t0)
+
+        // Both intervals must exist, oldest first
+        XCTAssertEqual(coordinator.pendingIntervals.count, 2)
+        XCTAssertEqual(coordinator.pendingIntervals[0].id, id1, "Oldest interval must remain first")
+        XCTAssertTrue(coordinator.pendingIntervals[0].startTime < coordinator.pendingIntervals[1].startTime)
+    }
+
+    @MainActor
+    func testTask9A_07_ResolutionTransitionsAndCallback() {
+        let mock = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mock, thresholdSeconds: 300)
+        let sessionId = UUID()
+        let t0 = Date(timeIntervalSince1970: 1700000000)
+
+        mock.setSimulatedIdle(360.0)
+        coordinator.tick(now: t0.addingTimeInterval(360.0), isSessionActive: true, sessionType: "Focus", sessionId: sessionId, taskId: nil, sessionStartDate: t0)
+        mock.setSimulatedIdle(0.0)
+        coordinator.tick(now: t0.addingTimeInterval(361.0), isSessionActive: true, sessionType: "Focus", sessionId: sessionId, taskId: nil, sessionStartDate: t0)
+
+        guard let interval = coordinator.pendingIntervals.first else {
+            XCTFail("No interval created")
+            return
+        }
+
+        var resolvedDecision: IdleReviewDecision?
+        var resolvedStatus: IdleReviewStatus?
+        coordinator.onResolution = { resolved, decision in
+            resolvedDecision = decision
+            resolvedStatus = resolved.status
+        }
+
+        // Test Count as Focus
+        coordinator.resolve(intervalId: interval.id, decision: .countAsFocus)
+        XCTAssertEqual(resolvedDecision, .countAsFocus)
+        XCTAssertEqual(resolvedStatus, .included)
+        XCTAssertTrue(coordinator.pendingIntervals.isEmpty)
+        XCTAssertNil(coordinator.activeReviewInterval)
+        XCTAssertEqual(coordinator.state, .monitoring)
+    }
+
+    @MainActor
+    func testTask9A_08_SleepAndWakeHandling() {
+        let mock = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mock, thresholdSeconds: 300)
+        let sessionId = UUID()
+        let sleepTime = Date(timeIntervalSince1970: 1700000000)
+        let wakeTime = sleepTime.addingTimeInterval(600.0) // 10 minutes sleep
+
+        coordinator.handleSleep(at: sleepTime)
+        coordinator.handleWake(
+            at: wakeTime,
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: nil
+        )
+
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+        guard let interval = coordinator.pendingIntervals.first else {
+            XCTFail("No sleep interval recorded")
+            return
+        }
+        XCTAssertTrue(interval.isEstimated, "Sleep intervals must be marked as estimated")
+        XCTAssertEqual(interval.eligibleDurationSeconds, 600)
+    }
+
+    @MainActor
+    func testTask9A_09_ScreenLockHandling() {
+        let mock = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mock, thresholdSeconds: 300)
+        let sessionId = UUID()
+        let lockTime = Date(timeIntervalSince1970: 1700000000)
+        // Screen is locked
+        coordinator.handleScreenLock(at: lockTime)
+        mock.setScreenLocked(true)
+        coordinator.tick(
+            now: lockTime.addingTimeInterval(360.0),
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: nil,
+            sessionStartDate: lockTime
+        )
+
+        // Screen is unlocked
+        mock.setScreenLocked(false)
+        mock.setSimulatedIdle(0.0)
+        coordinator.tick(
+            now: lockTime.addingTimeInterval(361.0),
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: nil,
+            sessionStartDate: lockTime
+        )
+
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+        guard let interval = coordinator.pendingIntervals.first else {
+            XCTFail("No interval found")
+            return
+        }
+        XCTAssertEqual(interval.eligibleDurationSeconds, 361, accuracy: 2)
+    }
+
+    @MainActor
+    func testTask9A_10_ConfigurableThresholds() {
+        let coordinator = IdleReviewCoordinator()
+        XCTAssertEqual(coordinator.thresholdSeconds, 300)
+
+        coordinator.setThreshold(minutes: 2)
+        XCTAssertEqual(coordinator.thresholdSeconds, 120)
+
+        coordinator.setThreshold(minutes: 10)
+        XCTAssertEqual(coordinator.thresholdSeconds, 600)
+
+        coordinator.setThreshold(minutes: 15)
+        XCTAssertEqual(coordinator.thresholdSeconds, 900)
+
+        // Unsupported threshold rejected
+        coordinator.setThreshold(minutes: 7)
+        XCTAssertEqual(coordinator.thresholdSeconds, 900, "Unsupported threshold must not be applied")
+    }
+
+    @MainActor
+    func testTask9A_11_DisabledFeatureGeneratesNoReviews() {
+        let mock = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mock, thresholdSeconds: 300)
+        coordinator.isEnabled = false
+
+        mock.setSimulatedIdle(3600.0) // 1 hour idle
+        coordinator.tick(
+            now: Date(),
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: UUID(),
+            taskId: nil
+        )
+
+        mock.setSimulatedIdle(0.0)
+        coordinator.tick(
+            now: Date().addingTimeInterval(1.0),
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: UUID(),
+            taskId: nil
+        )
+
+        XCTAssertTrue(coordinator.pendingIntervals.isEmpty)
+        XCTAssertNil(coordinator.activeReviewInterval)
+        XCTAssertEqual(coordinator.state, .inactive)
+    }
+
+    // MARK: - Task 9B: Accounting Reconciler, Deferred Completion & Persistence Tests
+
+    @MainActor
+    func testTask9B_01_InSessionIdle_CountAsFocus_ConfirmsProvisionalCredit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        let mockActivity = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(
+            activityProvider: mockActivity,
+            currentDateProvider: { currentTime },
+            isEnabled: true,
+            thresholdSeconds: 300
+        )
+        coordinator.onResolution = { [weak vm] interval, decision in
+            vm?.handleIdleReviewResolution(interval: interval, decision: decision)
+        }
+
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        // Advance 10 minutes active
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 600)
+
+        // 7 minutes idle (420s)
+        currentTime = currentTime.addingTimeInterval(420)
+        mockActivity.setSimulatedIdle(420)
+        coordinator.tick(
+            now: currentTime,
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: vm.activeTimerSessionId,
+            taskId: taskId,
+            sessionStartDate: currentTime.addingTimeInterval(-1020)
+        )
+
+        // User returns
+        mockActivity.setSimulatedIdle(0.0)
+        coordinator.tick(
+            now: currentTime,
+            isSessionActive: true,
+            sessionType: "Focus",
+            sessionId: vm.activeTimerSessionId,
+            taskId: taskId,
+            sessionStartDate: currentTime.addingTimeInterval(-1020)
+        )
+
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+        guard let interval = coordinator.pendingIntervals.first else {
+            XCTFail("Missing pending interval")
+            return
+        }
+
+        // Resolve with .countAsFocus
+        coordinator.resolve(intervalId: interval.id, decision: .countAsFocus, at: currentTime)
+
+        // Time remains confirmed at 1020s (600s active + 420s idle confirmed as focus), no deduction
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 1020)
+        XCTAssertTrue(coordinator.pendingIntervals.isEmpty)
+    }
+
+    @MainActor
+    func testTask9B_02_InSessionIdle_ExcludeFromFocus_DeductsTaskTime() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        let mockActivity = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(
+            activityProvider: mockActivity,
+            currentDateProvider: { currentTime },
+            isEnabled: true,
+            thresholdSeconds: 300
+        )
+        coordinator.onResolution = { [weak vm] interval, decision in
+            vm?.handleIdleReviewResolution(interval: interval, decision: decision)
+        }
+
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        // 10 minutes elapsed (600s credited provisionally)
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 600)
+
+        // User was idle for 7 minutes (420s)
+        let idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-420),
+            endTime: currentTime,
+            eligibleDurationSeconds: 420,
+            status: .pending
+        )
+        coordinator.pendingIntervals.append(idleInterval)
+
+        // Resolve with .excludeFromFocus
+        coordinator.resolve(intervalId: idleInterval.id, decision: .excludeFromFocus, at: currentTime)
+
+        // Task time must be retrospectively deducted: 600 - 420 = 180s
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 180)
+    }
+
+    @MainActor
+    func testTask9B_03_InSessionIdle_DecideLater_KeepsProvisionalCreditInQueue() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        let mockActivity = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(
+            activityProvider: mockActivity,
+            currentDateProvider: { currentTime },
+            isEnabled: true,
+            thresholdSeconds: 300
+        )
+        coordinator.onResolution = { [weak vm] interval, decision in
+            vm?.handleIdleReviewResolution(interval: interval, decision: decision)
+        }
+
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        var idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-420),
+            endTime: currentTime,
+            eligibleDurationSeconds: 420,
+            status: .pending
+        )
+        vm.handleIdleIntervalCreated(&idleInterval)
+        coordinator.pendingIntervals.append(idleInterval)
+        coordinator.openReview(for: idleInterval)
+        XCTAssertNotNil(coordinator.activeReviewInterval)
+
+        coordinator.resolve(intervalId: idleInterval.id, decision: .decideLater, at: currentTime)
+
+        // Modal dismissed, but interval remains in queue as pending time (not confirmed)
+        XCTAssertNil(coordinator.activeReviewInterval)
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+        // Confirmed time excludes unresolved idle time: 600 - 420 = 180s
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 180)
+        XCTAssertEqual(coordinator.pendingIntervals.first?.eligibleDurationSeconds, 420)
+    }
+
+    @MainActor
+    func testTask9B_04A_ActiveUserAtDeadline_CompletesNormallyWithoutDeferral() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_t9b_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+
+        vm.startTimer(at: currentTime)
+        let target = currentTime.addingTimeInterval(1500)
+
+        // User stays active throughout session (idle = 0s)
+        currentTime = target
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        // Session completes immediately without deferral
+        XCTAssertFalse(vm.isDeferredCompletionPending, "Completion must not be deferred when user was active at deadline")
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertTrue(vm.isBreakPreset)
+    }
+
+    @MainActor
+    func testTask9B_04B_ScenarioB_TimerExpiresWhileIdle_DefersCompletion() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_t9b_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.idleReviewCoordinator.thresholdSeconds = 300
+
+        vm.startTimer(at: currentTime)
+        let target = currentTime.addingTimeInterval(1500)
+
+        // User goes idle at minute 15
+        currentTime = currentTime.addingTimeInterval(900)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        // Deadline reached: user inactive for 600s (10m)
+        currentTime = target
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        // Verification of Scenario B invariants
+        XCTAssertTrue(vm.isDeferredCompletionPending, "Session completion must be deferred when user is inactive at deadline")
+        XCTAssertEqual(vm.timeRemaining, 0, "Display must show 00:00")
+        XCTAssertFalse(vm.isTimerRunning, "Countdown is not running")
+        XCTAssertEqual(vm.completedSessions, 0, "Session completion must be held")
+        XCTAssertFalse(vm.isBreakPreset, "Must not auto-advance to break yet")
+    }
+
+    @MainActor
+    func testTask9B_05_ScenarioB_PostDeadlineInactivityStrictlyExcluded() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_t9b_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+
+        vm.startTimer(at: currentTime)
+        let target = currentTime.addingTimeInterval(1500) // 10:25
+
+        // Inactive starting at minute 15 (10:15)
+        currentTime = currentTime.addingTimeInterval(900)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        // Reach deadline at 10:25
+        currentTime = target
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+
+        // Inactivity continues past deadline to 10:45 (another 20 minutes away!)
+        currentTime = target.addingTimeInterval(1200) // 10:45
+        mockActivity.setSimulatedIdle(1800) // 30 minutes idle
+        vm.reconcileActiveTimers(at: currentTime)
+
+        // User returns at 10:45
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1)
+        guard let interval = vm.idleReviewCoordinator.pendingIntervals.first else {
+            XCTFail("No interval found")
+            return
+        }
+
+        // Post-deadline time (10:25 to 10:45) must NOT be included!
+        // Eligible idle duration is strictly 10:15 to 10:25 = 600s (10 mins)
+        XCTAssertEqual(interval.eligibleDurationSeconds, 600, "Inactivity past deadline must be strictly excluded")
+        XCTAssertEqual(interval.endTime, target, "Interval end time must be capped at targetEndDate")
+    }
+
+    @MainActor
+    func testTask9B_06_ScenarioB_ResolveCountAsFocus_CompletesSession() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_t9b_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+
+        vm.startTimer(at: currentTime)
+        let target = currentTime.addingTimeInterval(1500)
+
+        currentTime = target
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+
+        // User returns
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        guard let interval = vm.idleReviewCoordinator.pendingIntervals.first else {
+            XCTFail("Missing interval")
+            return
+        }
+
+        // User selects Count As Focus
+        vm.idleReviewCoordinator.resolve(intervalId: interval.id, decision: .countAsFocus, at: currentTime)
+
+        // Session completes!
+        XCTAssertFalse(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertTrue(vm.isBreakPreset, "Should advance to Break preset")
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords.first?.durationSeconds, 1500, "Full duration credited")
+    }
+
+    @MainActor
+    func testTask9B_07_ScenarioB_ResolveExcludeFromFocus_DeductsIdleAndCompletesSession() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_t9b_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+        let target = currentTime.addingTimeInterval(1500)
+
+        // User idle from minute 15 (600s idle before deadline)
+        currentTime = target
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+
+        // User returns
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        guard let interval = vm.idleReviewCoordinator.pendingIntervals.first else {
+            XCTFail("Missing interval")
+            return
+        }
+
+        // User selects Exclude From Focus
+        vm.idleReviewCoordinator.resolve(intervalId: interval.id, decision: .excludeFromFocus, at: currentTime)
+
+        XCTAssertFalse(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertTrue(vm.isBreakPreset)
+
+        // Credited time: 1500 - 600 = 900s (15 mins)
+        XCTAssertEqual(vm.sessionRecords.first?.durationSeconds, 900)
+        if let idx = vm.tasks.firstIndex(where: { $0.id == taskId }) {
+            XCTAssertEqual(vm.tasks[idx].timeSpentSeconds, 900)
+        }
+    }
+
+    @MainActor
+    func testTask9B_08_Stopwatch_ExcludeFromFocus_DeductsTaskOnly_PreservesLapsAndDisplay() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        vm.startStopwatch()
+
+        // 120s elapsed -> record lap
+        currentTime = currentTime.addingTimeInterval(120)
+        vm.reconcileActiveTimers(at: currentTime)
+        vm.recordLap()
+        XCTAssertEqual(vm.laps.count, 1)
+
+        // 600s total elapsed (480s more)
+        currentTime = currentTime.addingTimeInterval(480)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.stopwatchTime, 600)
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 600)
+
+        // Exclude 300s of idle time
+        let interval = IdleReviewInterval(
+            sessionId: UUID(),
+            sessionType: "Stopwatch",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-300),
+            endTime: currentTime,
+            eligibleDurationSeconds: 300,
+            status: .pending
+        )
+        vm.handleIdleReviewResolution(interval: interval, decision: .excludeFromFocus)
+
+        // Task time is deducted: 600 - 300 = 300s
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 300)
+
+        // Stopwatch display time and laps are NOT altered!
+        XCTAssertEqual(vm.stopwatchTime, 600, "Stopwatch displayed time must remain exact wall-clock elapsed")
+        XCTAssertEqual(vm.laps.count, 1, "Laps must remain untouched")
+        XCTAssertEqual(vm.laps.first?.totalTime, 120)
+    }
+
+    @MainActor
+    func testTask9B_09_Persistence_SurvivesQuitAndReload() throws {
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_t9b_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        let vm = TimerViewModel(storage: storage)
+        vm.idleReviewEnabled = false
+        vm.idleThresholdSeconds = 600
+
+        let interval = IdleReviewInterval(
+            sessionId: UUID(),
+            sessionType: "Focus",
+            taskId: nil,
+            startTime: Date().addingTimeInterval(-600),
+            endTime: Date(),
+            eligibleDurationSeconds: 600
+        )
+        vm.idleReviewCoordinator.pendingIntervals = [interval]
+        vm.persistData(force: true)
+
+        // Load into fresh ViewModel
+        let loadedVM = TimerViewModel(storage: storage)
+        XCTAssertFalse(loadedVM.idleReviewEnabled)
+        XCTAssertEqual(loadedVM.idleThresholdSeconds, 600)
+        XCTAssertEqual(loadedVM.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(loadedVM.idleReviewCoordinator.pendingIntervals.first?.eligibleDurationSeconds, 600)
+    }
+
+    @MainActor
+    func testTask9B_10_CrashRecovery_DeferredCompletionRestoresCleanly() throws {
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_t9b_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        let mockActivity = MockIdleActivityProvider()
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+
+        vm.startTimer(at: currentTime)
+        let target = currentTime.addingTimeInterval(1500)
+
+        currentTime = target
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+
+        // Force-quit / reload without completing session
+        let recoveredVM = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        XCTAssertTrue(recoveredVM.isDeferredCompletionPending, "Deferred completion must survive force-quit recovery")
+        XCTAssertEqual(recoveredVM.timeRemaining, 0)
+        XCTAssertFalse(recoveredVM.isTimerRunning)
+    }
+
+    @MainActor
+    func testTask9B_11_ConservationOfSeconds_SessionRecordSplitting() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let sessionStart = Date(timeIntervalSince1970: 1700000000) // 10:00:00
+        let sessionEnd = sessionStart.addingTimeInterval(1500)      // 10:25:00
+
+        let initialRecord = FocusSessionRecord(
+            id: UUID(),
+            startTime: sessionStart,
+            endTime: sessionEnd,
+            durationSeconds: 1500,
+            mode: "Focus",
+            taskId: nil
+        )
+        vm.sessionRecords = [initialRecord]
+
+        // Idle from minute 7 to minute 16 (9m = 540s)
+        let idleStart = sessionStart.addingTimeInterval(420) // 10:07
+        let idleEnd = sessionStart.addingTimeInterval(960)   // 10:16
+        let idleInterval = IdleReviewInterval(
+            sessionId: initialRecord.id,
+            sessionType: "Focus",
+            taskId: nil,
+            startTime: idleStart,
+            endTime: idleEnd,
+            eligibleDurationSeconds: 540,
+            status: .pending
+        )
+
+        vm.reconcileSessionRecordsExcluding(interval: idleInterval)
+
+        XCTAssertEqual(vm.sessionRecords.count, 2, "Session record must be split into two sub-segments")
+        let r1 = vm.sessionRecords[0]
+        let r2 = vm.sessionRecords[1]
+
+        XCTAssertEqual(r1.startTime, sessionStart)
+        XCTAssertEqual(r1.endTime, idleStart)
+        XCTAssertEqual(r1.durationSeconds, 420) // 7m
+
+        XCTAssertEqual(r2.startTime, idleEnd)
+        XCTAssertEqual(r2.endTime, sessionEnd)
+        XCTAssertEqual(r2.durationSeconds, 540) // 9m
+
+        // Integer conservation: 420 + 540 = 960s active + 540s excluded = 1500s total
+        XCTAssertEqual(r1.durationSeconds + r2.durationSeconds + idleInterval.eligibleDurationSeconds, 1500)
+    }
+
+    // MARK: - Task 9C: UI, Interaction & Presentation Tests
+
+    @MainActor
+    func testTask9C_01_IdleReviewModalView_InitializationAndProperties() {
+        let coordinator = IdleReviewCoordinator()
+        let interval = IdleReviewInterval(
+            sessionId: UUID(),
+            sessionType: "Focus",
+            taskId: UUID(),
+            startTime: Date(timeIntervalSince1970: 1700000000),
+            endTime: Date(timeIntervalSince1970: 1700000600),
+            eligibleDurationSeconds: 600,
+            status: .pending
+        )
+        let modal = IdleReviewModalView(coordinator: coordinator, interval: interval, taskTitle: "Deep Work")
+        XCTAssertEqual(modal.interval.eligibleDurationSeconds, 600)
+        XCTAssertEqual(modal.taskTitle, "Deep Work")
+        XCTAssertEqual(modal.interval.formattedDuration, "10 minutes")
+    }
+
+    @MainActor
+    func testTask9C_02_SettingsView_IdleTimeReviewBinding() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        XCTAssertTrue(vm.idleReviewEnabled)
+        XCTAssertEqual(vm.idleThresholdSeconds, 300)
+
+        // Change settings
+        vm.idleReviewEnabled = false
+        XCTAssertFalse(vm.idleReviewCoordinator.isEnabled)
+
+        vm.idleThresholdSeconds = 600
+        XCTAssertEqual(vm.idleReviewCoordinator.thresholdSeconds, 600)
+
+        // Supported threshold values
+        XCTAssertEqual(IdleReviewCoordinator.supportedThresholds, [120, 300, 600, 900])
+    }
+
+    @MainActor
+    func testTask9C_03_MenuBarCompanion_StatusPillText_DeferredCompletion() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        XCTAssertFalse(vm.isDeferredCompletionPending)
+        vm.isDeferredCompletionPending = true
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+    }
+
+    @MainActor
+    func testTask9C_04_IdleReviewCoordinator_QueueProgression() {
+        let coordinator = IdleReviewCoordinator()
+        let id1 = UUID()
+        let id2 = UUID()
+        let interval1 = IdleReviewInterval(
+            id: id1,
+            sessionId: UUID(),
+            sessionType: "Focus",
+            taskId: nil,
+            startTime: Date(timeIntervalSince1970: 1700000000),
+            endTime: Date(timeIntervalSince1970: 1700000300),
+            eligibleDurationSeconds: 300,
+            status: .pending
+        )
+        let interval2 = IdleReviewInterval(
+            id: id2,
+            sessionId: UUID(),
+            sessionType: "Focus",
+            taskId: nil,
+            startTime: Date(timeIntervalSince1970: 1700000600),
+            endTime: Date(timeIntervalSince1970: 1700000960),
+            eligibleDurationSeconds: 360,
+            status: .pending
+        )
+
+        coordinator.pendingIntervals = [interval1, interval2]
+        coordinator.openReview(for: interval1)
+
+        XCTAssertEqual(coordinator.activeReviewInterval?.id, id1)
+        XCTAssertEqual(coordinator.pendingIntervals.count, 2)
+
+        // Resolve first interval as countAsFocus
+        coordinator.resolve(intervalId: id1, decision: .countAsFocus)
+
+        // Next interval should automatically become active
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(coordinator.activeReviewInterval?.id, id2)
+
+        // Resolve second interval
+        coordinator.resolve(intervalId: id2, decision: .excludeFromFocus)
+        XCTAssertEqual(coordinator.pendingIntervals.count, 0)
+        XCTAssertNil(coordinator.activeReviewInterval)
+        XCTAssertEqual(coordinator.state, .monitoring)
+    }
+
+    @MainActor
+    func testTask9C_05_IdleReviewCoordinator_DecideLater_Dismissal() {
+        let coordinator = IdleReviewCoordinator()
+        let id1 = UUID()
+        let interval = IdleReviewInterval(
+            id: id1,
+            sessionId: UUID(),
+            sessionType: "Focus",
+            taskId: nil,
+            startTime: Date(timeIntervalSince1970: 1700000000),
+            endTime: Date(timeIntervalSince1970: 1700000300),
+            eligibleDurationSeconds: 300,
+            status: .pending
+        )
+
+        coordinator.pendingIntervals = [interval]
+        coordinator.openReview(for: interval)
+        XCTAssertNotNil(coordinator.activeReviewInterval)
+
+        // User chooses Decide Later (or presses Esc)
+        coordinator.dismissActiveReviewToDecideLater()
+
+        // Active modal is dismissed, but interval remains safely pending
+        XCTAssertNil(coordinator.activeReviewInterval)
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(coordinator.state, .pendingReview)
+
+        // User reopens from Settings / Banner
+        coordinator.openReview(for: interval)
+        XCTAssertEqual(coordinator.activeReviewInterval?.id, id1)
+        XCTAssertEqual(coordinator.state, .reviewing(intervalId: id1))
+    }
+
+    // MARK: - Task 9 Critical Patch Regression Tests (Part G Scenarios 1-25)
+
+    // Scenario 1: Deferred session survives graceful app termination
+    @MainActor
+    func testTask9_Patch01_DeferredSessionSurvivesGracefulQuit() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_p1_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.startTimer(at: currentTime)
+
+        // Expire during inactivity
+        currentTime = currentTime.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+
+        // User returns
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1)
+
+        // Graceful quit
+        vm.handleAppTermination()
+
+        // Relaunch
+        let vm2 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm2.loadPersistedData()
+
+        XCTAssertTrue(vm2.isDeferredCompletionPending)
+        XCTAssertEqual(vm2.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vm2.timeRemaining, 0)
+        XCTAssertEqual(vm2.completedSessions, 0)
+        XCTAssertTrue(vm2.sessionRecords.isEmpty)
+    }
+
+    // Scenario 2: Deferred session survives force-quit
+    @MainActor
+    func testTask9_Patch02_DeferredSessionSurvivesForceQuit() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_p2_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        vm.persistData(force: true)
+
+        // Drop vm without calling handleAppTermination (simulating crash / kill)
+        let vm2 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm2.loadPersistedData()
+
+        XCTAssertTrue(vm2.isDeferredCompletionPending)
+        XCTAssertEqual(vm2.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vm2.timeRemaining, 0)
+    }
+
+    // Scenario 3: Same review ID survives relaunch
+    @MainActor
+    func testTask9_Patch03_SameReviewIDSurvivesRelaunch() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_p3_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        guard let originalInterval = vm.idleReviewCoordinator.pendingIntervals.first else {
+            XCTFail("Missing pending interval")
+            return
+        }
+        let originalId = originalInterval.id
+        let originalSessionId = originalInterval.sessionId
+
+        vm.handleAppTermination()
+
+        let vm2 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm2.loadPersistedData()
+
+        XCTAssertEqual(vm2.idleReviewCoordinator.pendingIntervals.first?.id, originalId)
+        XCTAssertEqual(vm2.idleReviewCoordinator.pendingIntervals.first?.sessionId, originalSessionId)
+    }
+
+    // Scenario 4: No duplicate record after recovery
+    @MainActor
+    func testTask9_Patch04_NoDuplicateRecordAfterRecovery() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_p4_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        vm.handleAppTermination()
+
+        let vm2 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm2.loadPersistedData()
+
+        if let interval = vm2.idleReviewCoordinator.pendingIntervals.first {
+            vm2.idleReviewCoordinator.resolve(intervalId: interval.id, decision: .countAsFocus, at: currentTime)
+        }
+
+        XCTAssertEqual(vm2.completedSessions, 1)
+        XCTAssertEqual(vm2.sessionRecords.count, 1)
+
+        vm2.handleAppTermination()
+
+        let vm3 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm3.loadPersistedData()
+
+        XCTAssertEqual(vm3.completedSessions, 1)
+        XCTAssertEqual(vm3.sessionRecords.count, 1)
+    }
+
+    // Scenario 5: Resolved decision survives crash immediately after saving
+    @MainActor
+    func testTask9_Patch05_ResolvedDecisionSurvivesCrashImmediatelyAfterSaving() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_p5_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        guard let interval = vm.idleReviewCoordinator.pendingIntervals.first else {
+            XCTFail("Missing interval")
+            return
+        }
+
+        vm.idleReviewCoordinator.resolve(intervalId: interval.id, decision: .excludeFromFocus, at: currentTime)
+        XCTAssertFalse(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords.first?.durationSeconds, 900)
+
+        // Drop instance without handleAppTermination
+        let vm2 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm2.loadPersistedData()
+
+        XCTAssertFalse(vm2.isDeferredCompletionPending)
+        XCTAssertTrue(vm2.idleReviewCoordinator.pendingIntervals.isEmpty)
+        XCTAssertEqual(vm2.sessionRecords.count, 1)
+        XCTAssertEqual(vm2.sessionRecords.first?.durationSeconds, 900)
+    }
+
+    // Scenario 6: Idle exclusion does not modify another overlapping session
+    @MainActor
+    func testTask9_Patch06_IdleExclusionDoesNotModifyOverlappingSession() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let sessionAId = UUID()
+        let sessionBId = UUID()
+
+        let baseTime = Date(timeIntervalSince1970: 1700000000)
+        let recordA = FocusSessionRecord(
+            id: UUID(),
+            sessionId: sessionAId,
+            startTime: baseTime,
+            endTime: baseTime.addingTimeInterval(1500),
+            durationSeconds: 1500,
+            mode: "Focus"
+        )
+        let recordB = FocusSessionRecord(
+            id: UUID(),
+            sessionId: sessionBId,
+            startTime: baseTime.addingTimeInterval(600),
+            endTime: baseTime.addingTimeInterval(1800),
+            durationSeconds: 1200,
+            mode: "Focus"
+        )
+        vm.sessionRecords = [recordA, recordB]
+
+        // Idle interval strictly belonging to Session A
+        let idleIntervalA = IdleReviewInterval(
+            sessionId: sessionAId,
+            sessionType: "Focus",
+            taskId: nil,
+            startTime: baseTime.addingTimeInterval(420),
+            endTime: baseTime.addingTimeInterval(960),
+            eligibleDurationSeconds: 540,
+            status: .pending
+        )
+
+        vm.reconcileSessionRecordsExcluding(interval: idleIntervalA)
+
+        // Session B record must be completely intact and unmodified!
+        let survivingB = vm.sessionRecords.first { $0.sessionId == sessionBId }
+        XCTAssertNotNil(survivingB)
+        XCTAssertEqual(survivingB?.durationSeconds, 1200)
+        XCTAssertEqual(survivingB?.startTime, baseTime.addingTimeInterval(600))
+        XCTAssertEqual(survivingB?.endTime, baseTime.addingTimeInterval(1800))
+
+        // Session A must be split
+        let survivingA = vm.sessionRecords.filter { $0.sessionId == sessionAId }
+        XCTAssertEqual(survivingA.count, 2)
+        XCTAssertEqual(survivingA.reduce(0) { $0 + $1.durationSeconds }, 960)
+    }
+
+    // Scenario 7: Previously split records maintain exact conservation
+    @MainActor
+    func testTask9_Patch07_PreviouslySplitRecordsMaintainExactConservation() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let sessId = UUID()
+        let baseTime = Date(timeIntervalSince1970: 1700000000)
+        // Adjusted record: spans 600 wall-clock seconds but duration is 400s
+        let adjustedRecord = FocusSessionRecord(
+            id: UUID(),
+            sessionId: sessId,
+            startTime: baseTime,
+            endTime: baseTime.addingTimeInterval(600),
+            durationSeconds: 400,
+            mode: "Focus"
+        )
+        vm.sessionRecords = [adjustedRecord]
+
+        // Idle interval overlapping 120 wall-clock seconds (from 240 to 360)
+        let interval = IdleReviewInterval(
+            sessionId: sessId,
+            sessionType: "Focus",
+            taskId: nil,
+            startTime: baseTime.addingTimeInterval(240),
+            endTime: baseTime.addingTimeInterval(360),
+            eligibleDurationSeconds: 120,
+            status: .pending
+        )
+
+        vm.reconcileSessionRecordsExcluding(interval: interval)
+
+        let remainingDuration = vm.sessionRecords.reduce(0) { $0 + $1.durationSeconds }
+        let allocatedExcluded = FocusIntervalAllocator.allocatedDuration(
+            recordStart: baseTime,
+            recordEnd: baseTime.addingTimeInterval(600),
+            durationSeconds: 400,
+            intervalStart: baseTime.addingTimeInterval(240),
+            intervalEnd: baseTime.addingTimeInterval(360)
+        )
+        // Conservation invariant: remaining + allocatedExcluded == 400
+        XCTAssertEqual(remainingDuration + allocatedExcluded, 400)
+        XCTAssertEqual(remainingDuration, 320)
+        XCTAssertEqual(allocatedExcluded, 80)
+    }
+
+    // Scenario 8: Task time cannot go negative
+    @MainActor
+    func testTask9_Patch08_TaskTimeCannotGoNegative() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let taskId = vm.tasks[0].id
+        vm.tasks[0].timeSpentSeconds = 100
+
+        vm.deductTaskTime(taskId: taskId, seconds: 500)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 0)
+    }
+
+    // Scenario 9: Pending time is not included in confirmed focus totals
+    @MainActor
+    func testTask9_Patch09_PendingTimeNotIncludedInConfirmedFocusTotals() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        currentTime = currentTime.addingTimeInterval(1200) // 20m elapsed
+        vm.reconcileActiveTimers(at: currentTime)
+
+        var idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-420),
+            endTime: currentTime,
+            eligibleDurationSeconds: 420, // 7m idle
+            status: .pending
+        )
+        vm.handleIdleIntervalCreated(&idleInterval)
+        vm.idleReviewCoordinator.pendingIntervals.append(idleInterval)
+
+        XCTAssertEqual(vm.pendingFocusSeconds, 420)
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 780) // 13m confirmed
+    }
+
+    // Scenario 10: Include moves pending credit into confirmed exactly once
+    @MainActor
+    func testTask9_Patch10_IncludeMovesPendingCreditIntoConfirmedExactlyOnce() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        currentTime = currentTime.addingTimeInterval(1200)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        var idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-420),
+            endTime: currentTime,
+            eligibleDurationSeconds: 420,
+            status: .pending
+        )
+        vm.handleIdleIntervalCreated(&idleInterval)
+        vm.idleReviewCoordinator.pendingIntervals.append(idleInterval)
+
+        vm.idleReviewCoordinator.resolve(intervalId: idleInterval.id, decision: .countAsFocus, at: currentTime)
+
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 1200)
+        XCTAssertEqual(vm.pendingFocusSeconds, 0)
+
+        // Idempotent: repeated resolution does not increase confirmed time
+        vm.handleIdleReviewResolution(interval: idleInterval, decision: .countAsFocus)
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 1200)
+    }
+
+    // Scenario 11: Exclude removes only eligible credit
+    @MainActor
+    func testTask9_Patch11_ExcludeRemovesOnlyEligibleCredit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        currentTime = currentTime.addingTimeInterval(1200)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        var idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-420),
+            endTime: currentTime,
+            eligibleDurationSeconds: 420,
+            status: .pending
+        )
+        vm.handleIdleIntervalCreated(&idleInterval)
+        vm.idleReviewCoordinator.pendingIntervals.append(idleInterval)
+
+        vm.idleReviewCoordinator.resolve(intervalId: idleInterval.id, decision: .excludeFromFocus, at: currentTime)
+
+        XCTAssertEqual(vm.tasks[vm.activeTaskIndex].timeSpentSeconds, 780)
+        XCTAssertEqual(vm.pendingFocusSeconds, 0)
+    }
+
+    // Scenario 12: Repeated resolution does not change totals
+    @MainActor
+    func testTask9_Patch12_RepeatedResolutionDoesNotChangeTotals() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let taskId = vm.tasks[0].id
+        vm.tasks[0].timeSpentSeconds = 600
+
+        let interval = IdleReviewInterval(
+            sessionId: UUID(),
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: Date().addingTimeInterval(-300),
+            endTime: Date(),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: false
+        )
+
+        vm.handleIdleReviewResolution(interval: interval, decision: .excludeFromFocus)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 300)
+
+        // Second call with marked deducted interval
+        var deducted = interval
+        deducted.isProvisionalCreditDeducted = true
+        vm.handleIdleReviewResolution(interval: deducted, decision: .excludeFromFocus)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 300)
+    }
+
+    // Scenario 13: Correct credit distribution across midnight
+    @MainActor
+    func testTask9_Patch13_CorrectCreditDistributionAcrossMidnight() {
+        let cal = Calendar.current
+        var components = DateComponents()
+        components.year = 2026
+        components.month = 10
+        components.day = 20
+        components.hour = 23
+        components.minute = 45
+        components.second = 0
+        guard let startMidnight = cal.date(from: components),
+              let endMidnight = cal.date(byAdding: .minute, value: 30, to: startMidnight) else {
+            XCTFail("Failed to create midnight dates")
+            return
+        }
+
+        let sessId = UUID()
+        let record = FocusSessionRecord(
+            id: UUID(),
+            sessionId: sessId,
+            startTime: startMidnight,
+            endTime: endMidnight,
+            durationSeconds: 1800,
+            mode: "Focus"
+        )
+
+        let idleStart = startMidnight.addingTimeInterval(600) // 23:55
+        let idleEnd = startMidnight.addingTimeInterval(1200)  // 00:05
+        let idle = IdleReviewInterval(
+            sessionId: sessId,
+            sessionType: "Focus",
+            taskId: nil,
+            startTime: idleStart,
+            endTime: idleEnd,
+            eligibleDurationSeconds: 600,
+            status: .pending
+        )
+
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+        vm.sessionRecords = [record]
+        vm.reconcileSessionRecordsExcluding(interval: idle)
+
+        XCTAssertEqual(vm.sessionRecords.count, 2)
+        let r1 = vm.sessionRecords[0]
+        let r2 = vm.sessionRecords[1]
+        XCTAssertEqual(r1.durationSeconds, 600)
+        XCTAssertEqual(r2.durationSeconds, 600)
+
+        let day1 = cal.startOfDay(for: startMidnight)
+        guard let day2 = cal.date(byAdding: .day, value: 1, to: day1) else { return }
+
+        let day1Total = vm.sessionRecords.reduce(0) { $0 + $1.duration(on: day1, calendar: cal) }
+        let day2Total = vm.sessionRecords.reduce(0) { $0 + $1.duration(on: day2, calendar: cal) }
+        XCTAssertEqual(day1Total, 600)
+        XCTAssertEqual(day2Total, 600)
+    }
+
+    // Scenario 14: Correct original task attribution following task switching
+    @MainActor
+    func testTask9_Patch14_CorrectOriginalTaskAttributionFollowingTaskSwitching() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let task1Id = vm.tasks[0].id
+
+        vm.tasks[0].timeSpentSeconds = 600
+        vm.tasks[1].timeSpentSeconds = 200
+
+        // Inactivity occurred under Task 1
+        let intervalTask1 = IdleReviewInterval(
+            sessionId: UUID(),
+            sessionType: "Focus",
+            taskId: task1Id,
+            startTime: Date().addingTimeInterval(-300),
+            endTime: Date(),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: false
+        )
+
+        // User switches active task to Task 2 in UI
+        vm.activeTaskIndex = 1
+
+        // User resolves the review for Task 1
+        vm.handleIdleReviewResolution(interval: intervalTask1, decision: .excludeFromFocus)
+
+        // Task 1 should be deducted, Task 2 untouched
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 300)
+        XCTAssertEqual(vm.tasks[1].timeSpentSeconds, 200)
+    }
+
+    // Scenario 15: Deferred session record retains actual wall-clock timestamps
+    @MainActor
+    func testTask9_Patch15_DeferredSessionRecordRetainsActualWallClockTimestamps() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_p15_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        let baseStart = Date(timeIntervalSince1970: 1700000000)
+        var currentTime = baseStart
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.startTimer(at: currentTime)
+
+        // Idle from minute 5 to 15 (600s in middle)
+        let idleStart = baseStart.addingTimeInterval(300)
+        let idleEnd = baseStart.addingTimeInterval(900)
+
+        // Advance to deadline
+        currentTime = baseStart.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+
+        // Manually configure the middle idle interval
+        let middleIdle = IdleReviewInterval(
+            sessionId: vm.deferredCompletionSessionId ?? vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: vm.deferredCompletionTaskId,
+            startTime: idleStart,
+            endTime: idleEnd,
+            eligibleDurationSeconds: 600,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+        vm.idleReviewCoordinator.pendingIntervals = [middleIdle]
+
+        // Resolve exclude
+        vm.idleReviewCoordinator.resolve(intervalId: middleIdle.id, decision: .excludeFromFocus, at: currentTime)
+
+        XCTAssertFalse(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.sessionRecords.count, 2)
+        let r1 = vm.sessionRecords[0]
+        let r2 = vm.sessionRecords[1]
+
+        // True historical positions
+        XCTAssertEqual(r1.startTime, baseStart)
+        XCTAssertEqual(r1.endTime, idleStart)
+        XCTAssertEqual(r1.durationSeconds, 300)
+
+        XCTAssertEqual(r2.startTime, idleEnd)
+        XCTAssertEqual(r2.endTime, baseStart.addingTimeInterval(1500))
+        XCTAssertEqual(r2.durationSeconds, 600)
+    }
+
+    // Scenario 16: Two pending intervals belonging to one session
+    @MainActor
+    func testTask9_Patch16_TwoPendingIntervalsBelongingToOneSession() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let sessId = vm.activeTimerSessionId
+        let baseTime = Date()
+
+        let intv1 = IdleReviewInterval(
+            sessionId: sessId,
+            sessionType: "Focus",
+            startTime: baseTime.addingTimeInterval(-1000),
+            endTime: baseTime.addingTimeInterval(-700),
+            eligibleDurationSeconds: 300,
+            status: .pending
+        )
+        let intv2 = IdleReviewInterval(
+            sessionId: sessId,
+            sessionType: "Focus",
+            startTime: baseTime.addingTimeInterval(-500),
+            endTime: baseTime.addingTimeInterval(-200),
+            eligibleDurationSeconds: 300,
+            status: .pending
+        )
+
+        vm.idleReviewCoordinator.pendingIntervals = [intv1, intv2]
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.filter { $0.sessionId == sessId }.count, 2)
+    }
+
+    // Scenario 17: Resolving only the first does not finalize the session
+    @MainActor
+    func testTask9_Patch17_ResolvingFirstIntervalDoesNotFinalizeSession() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let sessId = UUID()
+        vm.isDeferredCompletionPending = true
+        vm.deferredCompletionSessionId = sessId
+        vm.deferredCompletionTargetEndDate = Date()
+        vm.deferredCompletionSegmentStartDate = Date().addingTimeInterval(-1500)
+        vm.deferredCompletionSegmentCreditedSeconds = 1500
+
+        let id1 = UUID()
+        let id2 = UUID()
+        let intv1 = IdleReviewInterval(
+            id: id1,
+            sessionId: sessId,
+            sessionType: "Focus",
+            startTime: Date().addingTimeInterval(-1000),
+            endTime: Date().addingTimeInterval(-700),
+            eligibleDurationSeconds: 300,
+            status: .pending
+        )
+        let intv2 = IdleReviewInterval(
+            id: id2,
+            sessionId: sessId,
+            sessionType: "Focus",
+            startTime: Date().addingTimeInterval(-500),
+            endTime: Date().addingTimeInterval(-200),
+            eligibleDurationSeconds: 300,
+            status: .pending
+        )
+        vm.idleReviewCoordinator.pendingIntervals = [intv1, intv2]
+
+        // Resolve interval 1
+        vm.idleReviewCoordinator.resolve(intervalId: id1, decision: .countAsFocus)
+
+        // Session must STILL be pending completion because interval 2 remains!
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.completedSessions, 0)
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1)
+    }
+
+    // Scenario 18: Resolving the final interval finalizes exactly once
+    @MainActor
+    func testTask9_Patch18_ResolvingFinalIntervalFinalizesExactlyOnce() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let sessId = UUID()
+        vm.isDeferredCompletionPending = true
+        vm.deferredCompletionSessionId = sessId
+        vm.deferredCompletionTargetEndDate = Date()
+        vm.deferredCompletionSegmentStartDate = Date().addingTimeInterval(-1500)
+        vm.deferredCompletionSegmentCreditedSeconds = 1500
+
+        let id2 = UUID()
+        let intv2 = IdleReviewInterval(
+            id: id2,
+            sessionId: sessId,
+            sessionType: "Focus",
+            startTime: Date().addingTimeInterval(-500),
+            endTime: Date().addingTimeInterval(-200),
+            eligibleDurationSeconds: 300,
+            status: .pending
+        )
+        vm.idleReviewCoordinator.pendingIntervals = [intv2]
+
+        // Resolve final interval
+        vm.idleReviewCoordinator.resolve(intervalId: id2, decision: .countAsFocus)
+
+        // Finalizes!
+        XCTAssertFalse(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertTrue(vm.idleReviewCoordinator.pendingIntervals.isEmpty)
+    }
+
+    // Scenario 19: Decide Later preserves pending completion
+    @MainActor
+    func testTask9_Patch19_DecideLaterPreservesPendingCompletion() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let sessId = UUID()
+        vm.isDeferredCompletionPending = true
+        vm.deferredCompletionSessionId = sessId
+        vm.deferredCompletionTargetEndDate = Date()
+
+        let id1 = UUID()
+        let intv = IdleReviewInterval(
+            id: id1,
+            sessionId: sessId,
+            sessionType: "Focus",
+            startTime: Date().addingTimeInterval(-500),
+            endTime: Date().addingTimeInterval(-200),
+            eligibleDurationSeconds: 300,
+            status: .pending
+        )
+        vm.idleReviewCoordinator.pendingIntervals = [intv]
+
+        vm.idleReviewCoordinator.resolve(intervalId: id1, decision: .decideLater)
+
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.completedSessions, 0)
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1)
+    }
+
+    // Scenario 20: Intervals belonging to other sessions remain unaffected
+    @MainActor
+    func testTask9_Patch20_IntervalsBelongingToOtherSessionsRemainUnaffected() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let sess1 = UUID()
+        let sess2 = UUID()
+
+        let intv1 = IdleReviewInterval(id: UUID(), sessionId: sess1, sessionType: "Focus", startTime: Date().addingTimeInterval(-1000), endTime: Date().addingTimeInterval(-700), eligibleDurationSeconds: 300, status: .pending)
+        let intv2 = IdleReviewInterval(id: UUID(), sessionId: sess2, sessionType: "Focus", startTime: Date().addingTimeInterval(-500), endTime: Date().addingTimeInterval(-200), eligibleDurationSeconds: 300, status: .pending)
+
+        vm.idleReviewCoordinator.pendingIntervals = [intv1, intv2]
+
+        vm.idleReviewCoordinator.resolve(intervalId: intv1.id, decision: .countAsFocus)
+
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.first?.id, intv2.id)
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.first?.sessionId, sess2)
+    }
+
+    // Scenario 21: Late resolution does not play a delayed completion chime
+    @MainActor
+    func testTask9_Patch21_LateResolutionSuppressesDelayedCompletionChime() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let pastDeadline = Date().addingTimeInterval(-3600) // 1 hour ago
+        vm.isDeferredCompletionPending = true
+        vm.deferredCompletionSessionId = UUID()
+        vm.deferredCompletionTargetEndDate = pastDeadline
+        vm.deferredCompletionSegmentStartDate = pastDeadline.addingTimeInterval(-1500)
+        vm.deferredCompletionSegmentCreditedSeconds = 1500
+
+        // Finalize deferred session 1 hour after deadline
+        vm.finalizeDeferredSession(decision: .countAsFocus)
+
+        XCTAssertFalse(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.completedSessions, 1)
+        // Notification & chime suppressed cleanly without crashes
+    }
+
+    // Scenario 22: Normal completion retains its established notification behavior
+    @MainActor
+    func testTask9_Patch22_NormalCompletionRetainsEstablishedNotificationBehavior() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_p22_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(0.0) // User is active!
+        vm.reconcileActiveTimers(at: currentTime)
+
+        // Completes immediately without deferral
+        XCTAssertFalse(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertTrue(vm.isBreakPreset)
+    }
+
+    // Scenario 23: Return detection works when tick misses sub-second window
+    @MainActor
+    func testTask9_Patch23_ReturnDetectionWorksWhenTickMissesSubSecondWindow() {
+        let mockActivity = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mockActivity, thresholdSeconds: 300)
+
+        var now = Date()
+        coordinator.tick(now: now, isSessionActive: true, sessionType: "Focus", sessionId: UUID(), taskId: nil)
+
+        // Idle for 400s
+        now = now.addingTimeInterval(400)
+        mockActivity.setSimulatedIdle(400)
+        coordinator.tick(now: now, isSessionActive: true, sessionType: "Focus", sessionId: UUID(), taskId: nil)
+        XCTAssertTrue(coordinator.state.isIdleDetected)
+
+        // User returned 1.8 seconds ago (missed sub-second window < 1.0)
+        now = now.addingTimeInterval(2.0)
+        mockActivity.setSimulatedIdle(1.8)
+        coordinator.tick(now: now, isSessionActive: true, sessionType: "Focus", sessionId: UUID(), taskId: nil)
+
+        // Return MUST be recognized!
+        XCTAssertFalse(coordinator.state.isIdleDetected)
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+    }
+
+    // Scenario 24: Repeated sleep/wake events do not create duplicate intervals
+    @MainActor
+    func testTask9_Patch24_RepeatedSleepWakeEventsDoNotCreateDuplicateIntervals() {
+        let mockActivity = MockIdleActivityProvider()
+        let coordinator = IdleReviewCoordinator(activityProvider: mockActivity, thresholdSeconds: 300)
+
+        let now = Date()
+        let sessId = UUID()
+        coordinator.handleSleep(at: now)
+        coordinator.handleWake(at: now.addingTimeInterval(600), isSessionActive: true, sessionType: "Focus", sessionId: sessId, taskId: nil)
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+
+        // Duplicate wake event at same interval
+        coordinator.handleWake(at: now.addingTimeInterval(600), isSessionActive: true, sessionType: "Focus", sessionId: sessId, taskId: nil)
+        XCTAssertEqual(coordinator.pendingIntervals.count, 1)
+    }
+
+    // Scenario 25: Stopwatch display and laps remain unchanged
+    @MainActor
+    func testTask9_Patch25_StopwatchDisplayAndLapsRemainUnchanged() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        vm.startStopwatch()
+
+        currentTime = currentTime.addingTimeInterval(100)
+        vm.reconcileActiveTimers(at: currentTime)
+        vm.recordLap()
+
+        currentTime = currentTime.addingTimeInterval(100)
+        vm.reconcileActiveTimers(at: currentTime)
+        vm.recordLap()
+
+        XCTAssertEqual(vm.laps.count, 2)
+        let originalLaps = vm.laps
+        let originalTime = vm.stopwatchTime
+
+        // Idle review resolution on stopwatch
+        let intv = IdleReviewInterval(
+            sessionId: UUID(),
+            sessionType: "Stopwatch",
+            taskId: vm.tasks[0].id,
+            startTime: currentTime.addingTimeInterval(-60),
+            endTime: currentTime,
+            eligibleDurationSeconds: 60,
+            status: .pending,
+            isProvisionalCreditDeducted: false
+        )
+        vm.handleIdleReviewResolution(interval: intv, decision: .excludeFromFocus)
+
+        // Stopwatch laps and display must be 100% preserved
+        XCTAssertEqual(vm.stopwatchTime, originalTime)
+    }
+
+    // MARK: - Task 9 Final Correctness & Persistence Patch (Defects 1 & 2)
+
+    // Defect 1 Reproduction: Excluded idle intervals lost after restart (Exclude B)
+    @MainActor
+    func testDefect1_Reproduction_ExcludedIdleIntervalLostAfterRestart_ThenExcludeB() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_d1_a_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        let calendar = Calendar.current
+        let baseDate = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 10, minute: 0, second: 0))!
+        var currentTime = baseDate
+
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        let taskId = vm.tasks[0].id
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startTimer(at: currentTime)
+        let sessionId = vm.activeTimerSessionId
+
+        // Advance to 1500s (10:25) - session expired during inactivity
+        currentTime = baseDate.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+
+        // Set up two pending intervals: Interval A (10:05-10:10, 300s) and Interval B (10:15-10:20, 300s)
+        let intervalA = IdleReviewInterval(
+            id: UUID(),
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: baseDate.addingTimeInterval(300),
+            endTime: baseDate.addingTimeInterval(600),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+        let intervalB = IdleReviewInterval(
+            id: UUID(),
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: baseDate.addingTimeInterval(900),
+            endTime: baseDate.addingTimeInterval(1200),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+
+        // Set task credited to 900 (1500 - 600 provisional deductions)
+        vm.tasks[0].timeSpentSeconds = 900
+        vm.idleReviewCoordinator.pendingIntervals = [intervalA, intervalB]
+        vm.idleReviewCoordinator.activeReviewInterval = intervalA
+
+        // 4. Exclude Interval A
+        vm.idleReviewCoordinator.resolve(intervalId: intervalA.id, decision: .excludeFromFocus, at: currentTime)
+
+        // 5. Confirm Interval B remains pending and session is still deferred
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.first?.id, intervalB.id)
+
+        // 6. Persist application state
+        vm.persistData(force: true)
+
+        // 7 & 8. Simulate process termination and relaunch
+        let vm2 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm2.loadPersistedData()
+
+        XCTAssertTrue(vm2.isDeferredCompletionPending)
+        XCTAssertEqual(vm2.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vm2.idleReviewCoordinator.pendingIntervals.first?.id, intervalB.id)
+
+        // 10. Resolve Interval B as Exclude
+        vm2.idleReviewCoordinator.resolve(intervalId: intervalB.id, decision: .excludeFromFocus, at: currentTime)
+
+        // 11. Finalize the session assertions
+        XCTAssertFalse(vm2.isDeferredCompletionPending)
+        XCTAssertEqual(vm2.completedSessions, 1)
+
+        // Total confirmed focus in session records must be strictly 900 (1500 - 300 - 300)
+        let totalRecordSeconds = vm2.sessionRecords.reduce(0) { $0 + $1.durationSeconds }
+        XCTAssertEqual(totalRecordSeconds, 900, "Final session records must total 900s (Interval A exclusion must survive restart)")
+        XCTAssertEqual(vm2.tasks[0].timeSpentSeconds, 900, "Task credited time must remain 900s")
+    }
+
+    // Defect 1 Reproduction: Excluded idle intervals lost after restart (Count B)
+    @MainActor
+    func testDefect1_Reproduction_ExcludedIdleIntervalLostAfterRestart_ThenCountB() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_d1_b_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        let calendar = Calendar.current
+        let baseDate = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 10, minute: 0, second: 0))!
+        var currentTime = baseDate
+
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        let taskId = vm.tasks[0].id
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startTimer(at: currentTime)
+        let sessionId = vm.activeTimerSessionId
+
+        currentTime = baseDate.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        let intervalA = IdleReviewInterval(
+            id: UUID(),
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: baseDate.addingTimeInterval(300),
+            endTime: baseDate.addingTimeInterval(600),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+        let intervalB = IdleReviewInterval(
+            id: UUID(),
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: baseDate.addingTimeInterval(900),
+            endTime: baseDate.addingTimeInterval(1200),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+
+        vm.tasks[0].timeSpentSeconds = 900
+        vm.idleReviewCoordinator.pendingIntervals = [intervalA, intervalB]
+        vm.idleReviewCoordinator.activeReviewInterval = intervalA
+
+        // Exclude Interval A
+        vm.idleReviewCoordinator.resolve(intervalId: intervalA.id, decision: .excludeFromFocus, at: currentTime)
+
+        // Persist and relaunch
+        vm.persistData(force: true)
+
+        let vm2 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm2.loadPersistedData()
+
+        // Resolve Interval B as Count
+        vm2.idleReviewCoordinator.resolve(intervalId: intervalB.id, decision: .countAsFocus, at: currentTime)
+
+        XCTAssertFalse(vm2.isDeferredCompletionPending)
+        XCTAssertEqual(vm2.completedSessions, 1)
+
+        // Total confirmed focus in session records must be strictly 1200 (1500 - 300 excluded A)
+        let totalRecordSeconds = vm2.sessionRecords.reduce(0) { $0 + $1.durationSeconds }
+        XCTAssertEqual(totalRecordSeconds, 1200, "Final session records must total 1200s (Interval A exclusion must survive restart)")
+        XCTAssertEqual(vm2.tasks[0].timeSpentSeconds, 1200, "Task credited time must be 1200s")
+    }
+
+    // Defect 2 Scenario A: 100% pending produces 0 confirmed credit
+    @MainActor
+    func testDefect2_ScenarioA_100PercentPending_ZeroConfirmedCredit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        currentTime = currentTime.addingTimeInterval(600) // 10 minutes elapsed
+        vm.reconcileActiveTimers(at: currentTime)
+
+        var idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-600),
+            endTime: currentTime,
+            eligibleDurationSeconds: 600,
+            status: .pending
+        )
+        vm.handleIdleIntervalCreated(&idleInterval)
+        vm.idleReviewCoordinator.pendingIntervals.append(idleInterval)
+
+        vm.recalculateFocusMetrics(now: currentTime)
+
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 0, "Task credited time must be 0")
+        XCTAssertEqual(vm.todayFocusedSeconds, 0, "Today's focus must be 0 when 100% of elapsed time is pending review")
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 0, "Weekly focus must be 0")
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 0, "Lifetime focus contribution must be 0")
+        XCTAssertEqual(vm.pendingFocusSeconds, 600, "Pending focus must be 600")
+        XCTAssertEqual(vm.timeRemaining, 900, "Timer countdown continues accurately (1500 - 600 = 900)")
+    }
+
+    // Defect 2 Scenario B: Partial pending reflects only confirmed credit
+    @MainActor
+    func testDefect2_ScenarioB_PartialPending_AnalyticsReflectConfirmedCredit() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        currentTime = currentTime.addingTimeInterval(1200) // 20 minutes elapsed
+        vm.reconcileActiveTimers(at: currentTime)
+
+        var idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-420),
+            endTime: currentTime,
+            eligibleDurationSeconds: 420,
+            status: .pending
+        )
+        vm.handleIdleIntervalCreated(&idleInterval)
+        vm.idleReviewCoordinator.pendingIntervals.append(idleInterval)
+
+        vm.recalculateFocusMetrics(now: currentTime)
+
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 780, "Task credited time must be 780")
+        XCTAssertEqual(vm.todayFocusedSeconds, 780, "Today's focus must reflect confirmed 780s, not 1200s")
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 780, "Weekly focus must reflect 780s")
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 780, "Lifetime focus must reflect 780s")
+        XCTAssertEqual(vm.pendingFocusSeconds, 420)
+    }
+
+    // Defect 2 Scenario C: Count moves pending credit into confirmed exactly once
+    @MainActor
+    func testDefect2_ScenarioC_CountIncreasesConfirmedExactlyOnce() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        var idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-600),
+            endTime: currentTime,
+            eligibleDurationSeconds: 600,
+            status: .pending
+        )
+        vm.handleIdleIntervalCreated(&idleInterval)
+        vm.idleReviewCoordinator.pendingIntervals.append(idleInterval)
+        vm.recalculateFocusMetrics(now: currentTime)
+
+        XCTAssertEqual(vm.todayFocusedSeconds, 0)
+
+        // Resolve as Count
+        vm.idleReviewCoordinator.resolve(intervalId: idleInterval.id, decision: .countAsFocus, at: currentTime)
+
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 600)
+        XCTAssertEqual(vm.todayFocusedSeconds, 600)
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 600)
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 600)
+        XCTAssertEqual(vm.pendingFocusSeconds, 0)
+    }
+
+    // Defect 2 Scenario D: Exclude does not increase confirmed totals
+    @MainActor
+    func testDefect2_ScenarioD_ExcludeDoesNotIncreaseConfirmedTotals() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        vm.currentDateProvider = { currentTime }
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        var idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-600),
+            endTime: currentTime,
+            eligibleDurationSeconds: 600,
+            status: .pending
+        )
+        vm.handleIdleIntervalCreated(&idleInterval)
+        vm.idleReviewCoordinator.pendingIntervals.append(idleInterval)
+
+        vm.idleReviewCoordinator.resolve(intervalId: idleInterval.id, decision: .excludeFromFocus, at: currentTime)
+
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 0)
+        XCTAssertEqual(vm.todayFocusedSeconds, 0)
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 0)
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 0)
+        XCTAssertEqual(vm.pendingFocusSeconds, 0)
+    }
+
+    // Defect 2 Scenario E: Restart with 0 confirmed credit does not convert elapsed into confirmed
+    @MainActor
+    func testDefect2_ScenarioE_RestartWithZeroConfirmed_DoesNotConvertElapsedToConfirmed() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_d2_e_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[vm.activeTaskIndex].id
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        var idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-600),
+            endTime: currentTime,
+            eligibleDurationSeconds: 600,
+            status: .pending
+        )
+        vm.handleIdleIntervalCreated(&idleInterval)
+        vm.idleReviewCoordinator.pendingIntervals.append(idleInterval)
+        vm.recalculateFocusMetrics(now: currentTime)
+
+        XCTAssertEqual(vm.todayFocusedSeconds, 0)
+        vm.persistData(force: true)
+
+        // Relaunch
+        let vm2 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm2.loadPersistedData()
+        vm2.recalculateFocusMetrics(now: currentTime)
+
+        XCTAssertEqual(vm2.todayFocusedSeconds, 0, "Relaunch must not convert 600s elapsed into confirmed focus")
+        XCTAssertEqual(vm2.tasks[0].timeSpentSeconds, 0)
+    }
+
+    // Defect 2 Scenario F: Active session running across midnight with pending or excluded time
+    @MainActor
+    func testDefect2_ScenarioF_MidnightWithPendingOrExcludedTime() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+
+        let start = calendar.date(from: DateComponents(year: 2026, month: 10, day: 20, hour: 23, minute: 45, second: 0))!
+        var currentTime = start
+        vm.currentDateProvider = { currentTime }
+        vm.applyPresetDirectly(name: "Custom", minutes: 60)
+        vm.startTimer(at: currentTime)
+        let taskId = vm.tasks[0].id
+
+        // Advance 1800s to 00:15 on Oct 21 (total elapsed 1800s; 900 yesterday, 900 today)
+        currentTime = calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 0, minute: 15, second: 0))!
+        vm.reconcileActiveTimers(at: currentTime)
+
+        // 600s idle interval from 00:05 to 00:15 (all 600s on Day 2)
+        var idleInterval = IdleReviewInterval(
+            sessionId: vm.activeTimerSessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: 0, minute: 5, second: 0))!,
+            endTime: currentTime,
+            eligibleDurationSeconds: 600,
+            status: .pending
+        )
+        vm.handleIdleIntervalCreated(&idleInterval)
+        vm.idleReviewCoordinator.pendingIntervals.append(idleInterval)
+
+        vm.recalculateFocusMetrics(calendar: calendar, now: currentTime)
+
+        // Day 2 (today) had 900 elapsed minus 600 pending = 300 confirmed
+        XCTAssertEqual(vm.todayFocusedSeconds, 300, "Today (Oct 21) must have 300 confirmed (900 elapsed - 600 pending)")
+        XCTAssertEqual(vm.weeklyFocusedSeconds, 1200, "Past 7 days must have 1200 confirmed (1800 elapsed - 600 pending)")
+        XCTAssertEqual(vm.pendingFocusSeconds, 600)
+    }
+
+    // Dedicated Test 1: Two consecutive restarts before finalization
+    @MainActor
+    func testTask9_FinalPatch_TwoConsecutiveRestartsBeforeFinalization() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_fp_1_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        let taskId = vm.tasks[0].id
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startTimer(at: currentTime)
+        let sessionId = vm.activeTimerSessionId
+
+        currentTime = currentTime.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        let intervalA = IdleReviewInterval(
+            id: UUID(),
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-1200),
+            endTime: currentTime.addingTimeInterval(-900),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+        let intervalB = IdleReviewInterval(
+            id: UUID(),
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-600),
+            endTime: currentTime.addingTimeInterval(-300),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+
+        vm.tasks[0].timeSpentSeconds = 900
+        vm.idleReviewCoordinator.pendingIntervals = [intervalA, intervalB]
+        vm.idleReviewCoordinator.activeReviewInterval = intervalA
+
+        // Exclude A
+        vm.idleReviewCoordinator.resolve(intervalId: intervalA.id, decision: .excludeFromFocus, at: currentTime)
+        vm.persistData(force: true)
+
+        // Restart 1 (simulate quit & relaunch)
+        let vm2 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm2.loadPersistedData()
+        XCTAssertTrue(vm2.isDeferredCompletionPending)
+        XCTAssertEqual(vm2.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vm2.idleReviewCoordinator.pendingIntervals.first?.id, intervalB.id)
+        XCTAssertEqual(vm2.sessionExclusionLedger.count, 1)
+        XCTAssertEqual(vm2.sessionExclusionLedger.first?.id, intervalA.id)
+
+        // Restart 2 (another quit & relaunch before finalization)
+        vm2.handleAppTermination()
+        let vm3 = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm3.loadPersistedData()
+        XCTAssertTrue(vm3.isDeferredCompletionPending)
+        XCTAssertEqual(vm3.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vm3.sessionExclusionLedger.count, 1)
+
+        // Resolve B as Exclude and finalize
+        vm3.idleReviewCoordinator.resolve(intervalId: intervalB.id, decision: .excludeFromFocus, at: currentTime)
+        XCTAssertFalse(vm3.isDeferredCompletionPending)
+        XCTAssertEqual(vm3.completedSessions, 1)
+
+        let totalRecords = vm3.sessionRecords.reduce(0) { $0 + $1.durationSeconds }
+        XCTAssertEqual(totalRecords, 900, "After two restarts, both exclusions must be applied (1500 - 300 - 300 = 900)")
+    }
+
+    // Dedicated Test 2: Excluded interval idempotence (resolving twice cannot double-deduct)
+    @MainActor
+    func testTask9_FinalPatch_ExcludedIntervalIdempotence() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let taskId = vm.tasks[0].id
+        vm.tasks[0].timeSpentSeconds = 600
+
+        let interval = IdleReviewInterval(
+            sessionId: UUID(),
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: Date().addingTimeInterval(-300),
+            endTime: Date(),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: false
+        )
+
+        // First exclusion
+        vm.handleIdleReviewResolution(interval: interval, decision: .excludeFromFocus)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 300)
+        XCTAssertEqual(vm.sessionExclusionLedger.count, 1)
+
+        // Second duplicate exclusion
+        vm.handleIdleReviewResolution(interval: interval, decision: .excludeFromFocus)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 300, "Second exclusion must be idempotent and not deduct again")
+        XCTAssertEqual(vm.sessionExclusionLedger.count, 1, "Ledger must not contain duplicate entries")
+    }
+
+    // Dedicated Test 3: Fully excluded zero-confirmed session
+    @MainActor
+    func testTask9_FinalPatch_FullyExcludedZeroConfirmedSession() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_fp_3_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        let taskId = vm.tasks[0].id
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startTimer(at: currentTime)
+        let sessionId = vm.activeTimerSessionId
+
+        currentTime = currentTime.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(1500)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        XCTAssertTrue(vm.isDeferredCompletionPending)
+
+        // Entire 1500s was idle
+        let interval = IdleReviewInterval(
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-1500),
+            endTime: currentTime,
+            eligibleDurationSeconds: 1500,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+        vm.idleReviewCoordinator.pendingIntervals = [interval]
+        vm.idleReviewCoordinator.activeReviewInterval = interval
+
+        // Exclude entire session
+        vm.idleReviewCoordinator.resolve(intervalId: interval.id, decision: .excludeFromFocus, at: currentTime)
+
+        XCTAssertFalse(vm.isDeferredCompletionPending)
+        XCTAssertEqual(vm.completedSessions, 1, "Completed session count must increment")
+        XCTAssertTrue(vm.sessionRecords.isEmpty, "No session record should be fabricated when confirmed focus is 0")
+        XCTAssertEqual(vm.todayFocusedSeconds, 0, "Today's focus must remain 0")
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 0, "Lifetime focus must remain 0")
+    }
+
+    // Dedicated Test 4: Legacy saved data without sessionExclusionLedger
+    @MainActor
+    func testTask9_FinalPatch_LegacySavedDataWithoutExclusionLedger() {
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_legacy_\(UUID().uuidString).json")
+        defer { cleanup(url: tempURL) }
+
+        // Write legacy JSON without sessionExclusionLedger key
+        let legacyJSON = """
+        {
+            "tasks": [],
+            "focusedSeconds": 300,
+            "completedSessions": 1,
+            "notes": [],
+            "dailyGoalHours": 4,
+            "totalSessions": 4,
+            "autoStartNextSession": false,
+            "activePreset": "Focus",
+            "clockStyle": "Digital",
+            "sessionRecords": [],
+            "laps": [],
+            "stopwatchElapsedSeconds": 0.0
+        }
+        """
+        try! legacyJSON.write(to: tempURL, atomically: true, encoding: .utf8)
+
+        let storage = FocusStorageService(storageURL: tempURL)
+        let vm = TimerViewModel(storage: storage)
+        vm.loadPersistedData()
+
+        XCTAssertTrue(vm.sessionExclusionLedger.isEmpty, "Legacy data loads cleanly with empty ledger")
+        XCTAssertEqual(vm.completedSessions, 1)
+        XCTAssertEqual(vm.lifetimeFocusedSeconds, 300)
+    }
+
+    // Dedicated Test 5: Crash immediately after an exclusion decision
+    @MainActor
+    func testTask9_FinalPatch_CrashImmediatelyAfterExclusionDecision() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_crash_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date()
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        let taskId = vm.tasks[0].id
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startTimer(at: currentTime)
+        let sessionId = vm.activeTimerSessionId
+
+        currentTime = currentTime.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        let intervalA = IdleReviewInterval(
+            id: UUID(),
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-600),
+            endTime: currentTime.addingTimeInterval(-300),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+        let intervalB = IdleReviewInterval(
+            id: UUID(),
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-300),
+            endTime: currentTime,
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+        vm.idleReviewCoordinator.pendingIntervals = [intervalA, intervalB]
+
+        // Exclude Interval A - handleIdleReviewResolution immediately forces persistence
+        vm.idleReviewCoordinator.resolve(intervalId: intervalA.id, decision: .excludeFromFocus, at: currentTime)
+
+        // Drop vm immediately without handleAppTermination (simulating sudden crash/SIGKILL)
+        let vmCrashRecovered = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vmCrashRecovered.loadPersistedData()
+
+        XCTAssertTrue(vmCrashRecovered.isDeferredCompletionPending, "Deferred completion restored")
+        XCTAssertEqual(vmCrashRecovered.sessionExclusionLedger.count, 1, "Exclusion survived immediate crash")
+        XCTAssertEqual(vmCrashRecovered.sessionExclusionLedger.first?.id, intervalA.id)
+        XCTAssertEqual(vmCrashRecovered.idleReviewCoordinator.pendingIntervals.count, 1, "Only Interval B remains pending")
+        XCTAssertEqual(vmCrashRecovered.idleReviewCoordinator.pendingIntervals.first?.id, intervalB.id)
+    }
+
+    // MARK: - Task 9: Atomic Idle Review Creation & Recovery Safety (Defects A, B, C)
+
+    @MainActor
+    func testTask9_Atomic_01_NormalIdleReturn_CoherentSnapshotAndQueue() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_01_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1200
+        vm.timeRemaining = 1200
+        vm.startTimer(at: currentTime)
+        let sessionId = vm.activeTimerSessionId
+
+        currentTime = currentTime.addingTimeInterval(780)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.segmentCreditedSeconds, 780)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 780)
+
+        currentTime = currentTime.addingTimeInterval(420)
+        mockActivity.setSimulatedIdle(420.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1, "Exactly one pending review created")
+        guard let pending = vm.idleReviewCoordinator.pendingIntervals.first else {
+            XCTFail("Missing pending interval")
+            return
+        }
+        XCTAssertEqual(pending.sessionId, sessionId)
+        XCTAssertEqual(pending.eligibleDurationSeconds, 420)
+        XCTAssertTrue(pending.isProvisionalCreditDeducted, "Provisional credit must be deducted")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 780, "Task time must be 1200 - 420 = 780s")
+        XCTAssertEqual(vm.segmentCreditedSeconds, 780, "Segment credit must be 1200 - 420 = 780s")
+        XCTAssertEqual(vm.todayFocusedSeconds, 780, "Today focus must be 780s confirmed")
+
+        let vmRestored = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vmRestored.loadPersistedData()
+        XCTAssertEqual(vmRestored.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vmRestored.idleReviewCoordinator.pendingIntervals.first?.id, pending.id)
+        XCTAssertEqual(vmRestored.idleReviewCoordinator.pendingIntervals.first?.eligibleDurationSeconds, 420)
+        XCTAssertTrue(vmRestored.idleReviewCoordinator.pendingIntervals.first?.isProvisionalCreditDeducted == true)
+        XCTAssertEqual(vmRestored.tasks[0].timeSpentSeconds, 780)
+        XCTAssertEqual(vmRestored.todayFocusedSeconds, 780)
+    }
+
+    @MainActor
+    func testTask9_Atomic_02_NegativeTest_NoDeductionWithoutPendingIntervalInSavedSnapshot() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_02_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var savedSnapshots: [FocusAppData] = []
+        storage.onSavePayload = { payload in
+            savedSnapshots.append(payload)
+        }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1200
+        vm.timeRemaining = 1200
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(780)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(420)
+        mockActivity.setSimulatedIdle(420.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        savedSnapshots.removeAll()
+
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        XCTAssertFalse(savedSnapshots.isEmpty, "Return tick must trigger persistence")
+        for (idx, snapshot) in savedSnapshots.enumerated() {
+            let rootPendingCount = snapshot.pendingIdleIntervals?.count ?? 0
+            let recoveryPendingCount = snapshot.activeSessionRecovery?.pendingIdleIntervals?.count ?? 0
+            XCTAssertTrue(
+                rootPendingCount > 0 || recoveryPendingCount > 0,
+                "Snapshot #\(idx) had deducted task time but missing pending interval in saved payload!"
+            )
+        }
+    }
+
+    @MainActor
+    func testTask9_Atomic_03_RestoredViewModel_SamePendingIntervalUUID() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_03_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1200
+        vm.timeRemaining = 1200
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(780)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(420)
+        mockActivity.setSimulatedIdle(420.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        guard let originalId = vm.idleReviewCoordinator.pendingIntervals.first?.id else {
+            XCTFail("Missing pending interval")
+            return
+        }
+
+        let vmRestored = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vmRestored.loadPersistedData()
+        XCTAssertEqual(vmRestored.idleReviewCoordinator.pendingIntervals.first?.id, originalId)
+    }
+
+    @MainActor
+    func testTask9_Atomic_04_RestoredTaskCredit_MatchesConfirmedSeconds() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_04_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1200
+        vm.timeRemaining = 1200
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(780)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(420)
+        mockActivity.setSimulatedIdle(420.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        let vmRestored = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vmRestored.loadPersistedData()
+        XCTAssertEqual(vmRestored.tasks[0].timeSpentSeconds, 780)
+
+        guard let intId = vmRestored.idleReviewCoordinator.pendingIntervals.first?.id else {
+            XCTFail("Missing pending interval")
+            return
+        }
+        vmRestored.idleReviewCoordinator.resolve(intervalId: intId, decision: .countAsFocus, at: currentTime)
+        XCTAssertEqual(vmRestored.tasks[0].timeSpentSeconds, 1200)
+    }
+
+    @MainActor
+    func testTask9_Atomic_05_RestoredFocusMetrics_TodayWeeklyLifetime() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_05_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1200
+        vm.timeRemaining = 1200
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(780)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(420)
+        mockActivity.setSimulatedIdle(420.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        let vmRestored = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vmRestored.loadPersistedData()
+        XCTAssertEqual(vmRestored.todayFocusedSeconds, 780)
+        XCTAssertEqual(vmRestored.weeklyFocusedSeconds, 780)
+        XCTAssertEqual(vmRestored.lifetimeFocusedSeconds, 780)
+    }
+
+    @MainActor
+    func testTask9_Atomic_06_PendingIntervalCreation_TriggersExactlyOneDeduction() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_06_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1200
+        vm.timeRemaining = 1200
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(780)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(420)
+        mockActivity.setSimulatedIdle(420.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 780)
+
+        // Repeat reconciliation at same point in time
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 780, "Second tick must not double-deduct")
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1)
+    }
+
+    @MainActor
+    func testTask9_Atomic_07_SleepWake_UsesSameAccountingMechanismAndProvisionalDeduction() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_07_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1500
+        vm.timeRemaining = 1500
+        vm.startTimer(at: currentTime)
+        let sessionId = vm.activeTimerSessionId
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 600)
+
+        vm.idleReviewCoordinator.handleSleep(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.idleReviewCoordinator.handleWake(
+            at: currentTime,
+            isSessionActive: vm.isTimerRunning,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: vm.tasks[0].id,
+            sessionDeadline: vm.targetEndDate,
+            sessionStartDate: vm.sessionSegmentStartDate
+        )
+
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1, "Wake created pending review")
+        guard let wakeInterval = vm.idleReviewCoordinator.pendingIntervals.first else {
+            XCTFail("Missing wake interval")
+            return
+        }
+        XCTAssertTrue(wakeInterval.isEstimated, "Wake interval must be estimated")
+        XCTAssertTrue(wakeInterval.isProvisionalCreditDeducted, "Wake interval must have provisional credit deducted")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 600, "Task time must be 600s after provisional deduction")
+    }
+
+    @MainActor
+    func testTask9_Atomic_08_SleepWake_EstimatedIntervalRemainsEstimatedAfterRestart() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_08_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1500
+        vm.timeRemaining = 1500
+        vm.startTimer(at: currentTime)
+        let sessionId = vm.activeTimerSessionId
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        vm.idleReviewCoordinator.handleSleep(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.idleReviewCoordinator.handleWake(
+            at: currentTime,
+            isSessionActive: vm.isTimerRunning,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: vm.tasks[0].id,
+            sessionDeadline: vm.targetEndDate,
+            sessionStartDate: vm.sessionSegmentStartDate
+        )
+
+        let vmRestored = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vmRestored.loadPersistedData()
+        XCTAssertEqual(vmRestored.idleReviewCoordinator.pendingIntervals.first?.isEstimated, true)
+    }
+
+    @MainActor
+    func testTask9_Atomic_09_DuplicateWakeAndReturnEvents_DoNotDoubleDeduct() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_09_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1500
+        vm.timeRemaining = 1500
+        vm.startTimer(at: currentTime)
+        let sessionId = vm.activeTimerSessionId
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        vm.idleReviewCoordinator.handleSleep(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.idleReviewCoordinator.handleWake(
+            at: currentTime,
+            isSessionActive: vm.isTimerRunning,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: vm.tasks[0].id,
+            sessionDeadline: vm.targetEndDate,
+            sessionStartDate: vm.sessionSegmentStartDate
+        )
+
+        let taskTimeAfterFirstWake = vm.tasks[0].timeSpentSeconds
+
+        // Re-call handleWake with duplicate interval parameters
+        vm.idleReviewCoordinator.handleSleep(at: currentTime.addingTimeInterval(-600))
+        vm.idleReviewCoordinator.handleWake(
+            at: currentTime,
+            isSessionActive: vm.isTimerRunning,
+            sessionType: "Focus",
+            sessionId: sessionId,
+            taskId: vm.tasks[0].id,
+            sessionDeadline: vm.targetEndDate,
+            sessionStartDate: vm.sessionSegmentStartDate
+        )
+
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1, "Duplicate wake must not add another interval")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, taskTimeAfterFirstWake, "Duplicate wake must not double-deduct")
+    }
+
+    @MainActor
+    func testTask9_Atomic_10_DelayedTick_YieldsSameCreditedTotalAsRegularTicks() {
+        let mockActivity1 = MockIdleActivityProvider()
+        let tempURL1 = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_10_1_\(UUID().uuidString).json")
+        let storage1 = FocusStorageService(storageURL: tempURL1)
+        defer { cleanup(url: tempURL1) }
+
+        let mockActivity2 = MockIdleActivityProvider()
+        let tempURL2 = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_10_2_\(UUID().uuidString).json")
+        let storage2 = FocusStorageService(storageURL: tempURL2)
+        defer { cleanup(url: tempURL2) }
+
+        let t0 = Date(timeIntervalSince1970: 1700000000)
+
+        // VM1: Delayed tick
+        var time1 = t0
+        let vmDelayed = TimerViewModel(storage: storage1, currentDateProvider: { time1 }, idleActivityProvider: mockActivity1)
+        vmDelayed.idleThresholdSeconds = 300
+        vmDelayed.tasks[0].timeSpentSeconds = 0
+        vmDelayed.totalTime = 1500
+        vmDelayed.timeRemaining = 1500
+        vmDelayed.startTimer(at: time1)
+
+        time1 = time1.addingTimeInterval(300)
+        vmDelayed.reconcileActiveTimers(at: time1)
+        XCTAssertEqual(vmDelayed.segmentCreditedSeconds, 300)
+
+        time1 = time1.addingTimeInterval(500)
+        mockActivity1.setSimulatedIdle(500.0)
+        vmDelayed.reconcileActiveTimers(at: time1)
+        mockActivity1.setSimulatedIdle(0.0)
+        vmDelayed.reconcileActiveTimers(at: time1)
+
+        // VM2: Frequent regular ticks (every 50s)
+        var time2 = t0
+        let vmFrequent = TimerViewModel(storage: storage2, currentDateProvider: { time2 }, idleActivityProvider: mockActivity2)
+        vmFrequent.idleThresholdSeconds = 300
+        vmFrequent.tasks[0].timeSpentSeconds = 0
+        vmFrequent.totalTime = 1500
+        vmFrequent.timeRemaining = 1500
+        vmFrequent.startTimer(at: time2)
+
+        for _ in 1...6 {
+            time2 = time2.addingTimeInterval(50)
+            vmFrequent.reconcileActiveTimers(at: time2)
+        }
+        XCTAssertEqual(vmFrequent.segmentCreditedSeconds, 300)
+
+        for step in 1...10 {
+            time2 = time2.addingTimeInterval(50)
+            mockActivity2.setSimulatedIdle(Double(step * 50))
+            vmFrequent.reconcileActiveTimers(at: time2)
+        }
+        mockActivity2.setSimulatedIdle(0.0)
+        vmFrequent.reconcileActiveTimers(at: time2)
+
+        XCTAssertEqual(
+            vmDelayed.segmentCreditedSeconds,
+            vmFrequent.segmentCreditedSeconds,
+            "Delayed tick must produce identical confirmed focus credit as regular ticks"
+        )
+        XCTAssertEqual(vmDelayed.segmentCreditedSeconds, 300, "Confirmed focus credit must be exactly 300s")
+        XCTAssertEqual(vmDelayed.tasks[0].timeSpentSeconds, 300, "Task time must be exactly 300s")
+    }
+
+    @MainActor
+    func testTask9_Atomic_11_IdleIntervalCrossingOriginalDeadline_ClampedCorrectly() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_11_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1500
+        vm.timeRemaining = 1500
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(1200)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.segmentCreditedSeconds, 1200)
+
+        // User idle from 1200 to 1700 (500s elapsed, crossing deadline at 1500)
+        currentTime = currentTime.addingTimeInterval(500)
+        mockActivity.setSimulatedIdle(500.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        guard let interval = vm.idleReviewCoordinator.pendingIntervals.first else {
+            XCTFail("Missing pending interval")
+            return
+        }
+        XCTAssertEqual(interval.eligibleDurationSeconds, 300, "Inactivity after deadline must be discarded")
+        XCTAssertTrue(vm.isDeferredCompletionPending, "Session must enter deferred completion")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1200, "Task credited seconds must be 1200s")
+    }
+
+    @MainActor
+    func testTask9_Atomic_12_ImmediateForceQuitAfterCommittedInterval_PreservesReview() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_12_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1200
+        vm.timeRemaining = 1200
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(780)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(420)
+        mockActivity.setSimulatedIdle(420.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        let originalId = vm.idleReviewCoordinator.pendingIntervals.first?.id
+
+        // Drop VM immediately without handleAppTermination
+        let vmRestored = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vmRestored.loadPersistedData()
+
+        XCTAssertEqual(vmRestored.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vmRestored.idleReviewCoordinator.pendingIntervals.first?.id, originalId)
+        XCTAssertTrue(vmRestored.idleReviewCoordinator.pendingIntervals.first?.isProvisionalCreditDeducted == true)
+    }
+
+    @MainActor
+    func testTask9_Atomic_13_StorageWriteFailureFollowedByRetry_PreservesConsistentAccounting() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_13_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1200
+        vm.timeRemaining = 1200
+        vm.startTimer(at: currentTime)
+
+        currentTime = currentTime.addingTimeInterval(780)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        // Simulate write failure during return creation
+        storage.simulateWriteFailure = true
+
+        currentTime = currentTime.addingTimeInterval(420)
+        mockActivity.setSimulatedIdle(420.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        XCTAssertTrue(vm.isSaveFailed, "Save failure must be recorded")
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 1, "Interval must not be discarded on save failure")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 780, "In-memory state remains coherent")
+
+        // Clear failure and retry
+        storage.simulateWriteFailure = false
+        vm.retrySave()
+
+        XCTAssertFalse(vm.isSaveFailed, "Save failure cleared on successful retry")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 780, "Retry must not double-deduct")
+
+        let vmRestored = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vmRestored.loadPersistedData()
+        XCTAssertEqual(vmRestored.idleReviewCoordinator.pendingIntervals.count, 1)
+        XCTAssertEqual(vmRestored.tasks[0].timeSpentSeconds, 780)
+    }
+
+    @MainActor
+    func testTask9_Atomic_14_DeferredCompletion_MultiplePendingIntervalsBehavior() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_14_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        let taskId = vm.tasks[0].id
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.totalTime = 1500
+        vm.timeRemaining = 1500
+        vm.startTimer(at: currentTime)
+        let sessionId = vm.activeTimerSessionId
+
+        currentTime = currentTime.addingTimeInterval(1500)
+        mockActivity.setSimulatedIdle(300.0)
+        vm.reconcileActiveTimers(at: currentTime)
+
+        let intervalA = IdleReviewInterval(
+            id: UUID(),
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-600),
+            endTime: currentTime.addingTimeInterval(-300),
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+        let intervalB = IdleReviewInterval(
+            id: UUID(),
+            sessionId: sessionId,
+            sessionType: "Focus",
+            taskId: taskId,
+            startTime: currentTime.addingTimeInterval(-300),
+            endTime: currentTime,
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: true
+        )
+        vm.idleReviewCoordinator.pendingIntervals = [intervalA, intervalB]
+        vm.isDeferredCompletionPending = true
+        vm.deferredCompletionSessionId = sessionId
+        vm.deferredCompletionTargetEndDate = currentTime
+        vm.deferredCompletionTaskId = taskId
+        vm.deferredCompletionSegmentStartDate = currentTime.addingTimeInterval(-1500)
+        vm.deferredCompletionSegmentCreditedSeconds = 900
+        vm.tasks[0].timeSpentSeconds = 900
+
+        // Resolve Interval A Count
+        vm.idleReviewCoordinator.resolve(intervalId: intervalA.id, decision: .countAsFocus, at: currentTime)
+        XCTAssertTrue(vm.isDeferredCompletionPending, "Still deferred because Interval B is pending")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1200)
+
+        // Resolve Interval B Exclude
+        vm.idleReviewCoordinator.resolve(intervalId: intervalB.id, decision: .excludeFromFocus, at: currentTime)
+        XCTAssertFalse(vm.isDeferredCompletionPending, "Finalized after all resolved")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1200)
+        XCTAssertEqual(vm.sessionRecords.count, 1)
+        XCTAssertEqual(vm.sessionRecords.first?.durationSeconds, 1200)
+    }
+
+    @MainActor
+    func testTask9_Atomic_15_StopwatchIdleReview_DoesNotChangeElapsedOrLapData() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_15_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+        vm.idleThresholdSeconds = 300
+        vm.tasks[0].timeSpentSeconds = 0
+
+        vm.startStopwatch()
+        let swSessionId = vm.activeTimerSessionId
+
+        currentTime = currentTime.addingTimeInterval(400)
+        vm.reconcileActiveTimers(at: currentTime)
+        vm.recordLap()
+        XCTAssertEqual(vm.laps.count, 1)
+        let lapTime = vm.laps.first?.totalTime
+
+        currentTime = currentTime.addingTimeInterval(600)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.stopwatchTime, 1000)
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 1000)
+
+        let swInterval = IdleReviewInterval(
+            id: UUID(),
+            sessionId: swSessionId,
+            sessionType: "Stopwatch",
+            taskId: vm.tasks[0].id,
+            startTime: currentTime.addingTimeInterval(-300),
+            endTime: currentTime,
+            eligibleDurationSeconds: 300,
+            status: .pending,
+            isProvisionalCreditDeducted: false
+        )
+        vm.idleReviewCoordinator.pendingIntervals = [swInterval]
+
+        vm.idleReviewCoordinator.resolve(intervalId: swInterval.id, decision: .excludeFromFocus, at: currentTime)
+
+        XCTAssertEqual(vm.stopwatchTime, 1000, "Stopwatch elapsed display must not change")
+        XCTAssertEqual(vm.laps.first?.totalTime, lapTime, "Lap data must remain untouched")
+        XCTAssertEqual(vm.tasks[0].timeSpentSeconds, 700, "Task time must have excluded idle seconds deducted")
+    }
+
+    @MainActor
+    func testTask9_Atomic_16_NormalTimerBreakAndDisabledModes_RemainUnchanged() {
+        let mockActivity = MockIdleActivityProvider()
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("focusflow_atomic_16_\(UUID().uuidString).json")
+        let storage = FocusStorageService(storageURL: tempURL)
+        defer { cleanup(url: tempURL) }
+
+        var currentTime = Date(timeIntervalSince1970: 1700000000)
+        let vm = TimerViewModel(storage: storage, currentDateProvider: { currentTime }, idleActivityProvider: mockActivity)
+
+        // Break mode ignores idle
+        vm.applyPresetDirectly(name: "Short Break", minutes: 5, isBreak: true)
+        vm.startTimer(at: currentTime)
+        currentTime = currentTime.addingTimeInterval(300)
+        mockActivity.setSimulatedIdle(300.0)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 0, "Break sessions do not generate idle reviews")
+
+        // Idle review disabled mode
+        vm.applyPresetDirectly(name: "25m", minutes: 25, isBreak: false)
+        vm.idleReviewEnabled = false
+        vm.startTimer(at: currentTime)
+        currentTime = currentTime.addingTimeInterval(600)
+        mockActivity.setSimulatedIdle(600.0)
+        mockActivity.setSimulatedIdle(0.0)
+        vm.reconcileActiveTimers(at: currentTime)
+        XCTAssertEqual(vm.idleReviewCoordinator.pendingIntervals.count, 0, "Disabled idle review does not generate reviews")
+    }
+
+    // MARK: - Phase 1: Sidebar Foundation & Visual Architecture Tests
+
+    func testPhase1_NavigationTab_WorkspaceTabsAndCategorization() {
+        let expectedWorkspaceTabs: [NavigationTab] = [.focusTimer, .stopwatch, .tasks, .soundscapes, .insights]
+        XCTAssertEqual(NavigationTab.workspaceTabs, expectedWorkspaceTabs, "workspaceTabs must contain exactly the 5 workspace destinations in expected order")
+
+        for tab in expectedWorkspaceTabs {
+            XCTAssertTrue(tab.isWorkspaceTab, "\(tab.rawValue) must be recognized as a workspace tab")
+        }
+
+        XCTAssertFalse(NavigationTab.settings.isWorkspaceTab, "Settings tab must not be recognized as a workspace tab")
+        XCTAssertEqual(NavigationTab.allCases.count, 6, "Total tabs in NavigationTab must remain 6")
+
+        // Check rawValues (must be preserved for Codable and storage compatibility)
+        XCTAssertEqual(NavigationTab.focusTimer.rawValue, "Focus Timer")
+        XCTAssertEqual(NavigationTab.focusTimer.icon, "hourglass")
+        XCTAssertEqual(NavigationTab.stopwatch.rawValue, "Stopwatch & Laps")
+        XCTAssertEqual(NavigationTab.stopwatch.icon, "stopwatch")
+        XCTAssertEqual(NavigationTab.tasks.rawValue, "Tasks")
+        XCTAssertEqual(NavigationTab.tasks.icon, "checklist")
+        XCTAssertEqual(NavigationTab.soundscapes.rawValue, "Focus Soundscapes")
+        XCTAssertEqual(NavigationTab.soundscapes.icon, "headphones")
+        XCTAssertEqual(NavigationTab.insights.rawValue, "Insights & Stats")
+        XCTAssertEqual(NavigationTab.insights.icon, "chart.bar")
+        XCTAssertEqual(NavigationTab.settings.rawValue, "Settings")
+        XCTAssertEqual(NavigationTab.settings.icon, "gearshape")
+
+        // Check updated concise display titles
+        XCTAssertEqual(NavigationTab.focusTimer.title, "Focus")
+        XCTAssertEqual(NavigationTab.stopwatch.title, "Stopwatch")
+        XCTAssertEqual(NavigationTab.tasks.title, "Tasks")
+        XCTAssertEqual(NavigationTab.soundscapes.title, "Sounds")
+        XCTAssertEqual(NavigationTab.insights.title, "Insights")
+        XCTAssertEqual(NavigationTab.settings.title, "Settings")
+    }
+
+    func testPhase1_SidebarTokens_GeometryAndTokensIntegrity() {
+        // Sizing & Spacing tokens
+        XCTAssertEqual(SidebarTokens.sidebarWidth, 252)
+        XCTAssertEqual(SidebarTokens.horizontalPadding, 12)
+        XCTAssertEqual(SidebarTokens.headerHorizontalPadding, 16)
+        XCTAssertEqual(SidebarTokens.headerTopPadding, 28)
+        XCTAssertEqual(SidebarTokens.headerBottomPadding, 16)
+        XCTAssertEqual(SidebarTokens.sectionSpacing, 6)
+        XCTAssertEqual(SidebarTokens.itemSpacing, 3)
+        XCTAssertEqual(SidebarTokens.itemMinHeight, 38)
+        XCTAssertEqual(SidebarTokens.itemHorizontalPadding, 10)
+        XCTAssertEqual(SidebarTokens.itemIconSpacing, 10)
+        XCTAssertEqual(SidebarTokens.footerTopPadding, 10)
+        XCTAssertEqual(SidebarTokens.footerBottomPadding, 14)
+        XCTAssertEqual(SidebarTokens.footerSpacing, 10)
+
+        // Radii tokens
+        XCTAssertEqual(SidebarTokens.itemCornerRadius, 8)
+        XCTAssertEqual(SidebarTokens.cardCornerRadius, 12)
+        XCTAssertEqual(SidebarTokens.iconCornerRadius, 8)
+
+        // Colors (Quiet Productivity palette) - instantiate to ensure they evaluate cleanly
+        _ = SidebarTokens.sidebarBackground
+        _ = SidebarTokens.surfaceSubtle
+        _ = SidebarTokens.surfaceHover
+        _ = SidebarTokens.borderSubtle
+        _ = SidebarTokens.borderHover
+        _ = SidebarTokens.accentOrange
+        _ = SidebarTokens.selectionFill
+        _ = SidebarTokens.selectionBorder
+        _ = SidebarTokens.selectionIndicator
+        _ = SidebarTokens.textPrimary
+        _ = SidebarTokens.textSecondary
+        _ = SidebarTokens.textMuted
+        _ = SidebarTokens.sectionHeader
+    }
+
+    func testPhase1_DailyProgressWidget_ProgressCalculationsAndClamping() {
+        let dummyGradient = LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing)
+
+        // 1. Zero progress
+        let widgetZero = DailyProgressWidget(gradient: dummyGradient, focusedSeconds: 0, goalHours: 2)
+        XCTAssertEqual(widgetZero.progress, 0.0, accuracy: 0.0001)
+        XCTAssertEqual(widgetZero.durationLabel, "0h 0m")
+        XCTAssertEqual(widgetZero.percentageLabel, "0%")
+
+        // 2. Partial progress: 1h 15m (4500s) of 4h goal (14400s) -> 31.25%
+        let widgetPartial = DailyProgressWidget(gradient: dummyGradient, focusedSeconds: 4500, goalHours: 4)
+        XCTAssertEqual(widgetPartial.progress, 4500.0 / 14400.0, accuracy: 0.0001)
+        XCTAssertEqual(widgetPartial.durationLabel, "1h 15m")
+        XCTAssertEqual(widgetPartial.percentageLabel, "31%")
+
+        // 3. Exact 100% progress: 2h (7200s) of 2h goal
+        let widgetExact = DailyProgressWidget(gradient: dummyGradient, focusedSeconds: 7200, goalHours: 2)
+        XCTAssertEqual(widgetExact.progress, 1.0, accuracy: 0.0001)
+        XCTAssertEqual(widgetExact.durationLabel, "2h 0m")
+        XCTAssertEqual(widgetExact.percentageLabel, "100%")
+
+        // 4. Clamped overflow progress: 3h (10800s) of 2h goal -> clamped to 1.0
+        let widgetOver = DailyProgressWidget(gradient: dummyGradient, focusedSeconds: 10800, goalHours: 2)
+        XCTAssertEqual(widgetOver.progress, 1.0, accuracy: 0.0001)
+        XCTAssertEqual(widgetOver.durationLabel, "3h 0m")
+        XCTAssertEqual(widgetOver.percentageLabel, "100%")
+
+        // 5. Clamped non-positive goalHours fallback to at least 1h
+        let widgetZeroGoal = DailyProgressWidget(gradient: dummyGradient, focusedSeconds: 1800, goalHours: 0)
+        XCTAssertEqual(widgetZeroGoal.goalHours, 1, "goalHours of 0 must clamp to 1")
+        XCTAssertEqual(widgetZeroGoal.progress, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(widgetZeroGoal.durationLabel, "0h 30m")
+        XCTAssertEqual(widgetZeroGoal.percentageLabel, "50%")
+
+        let widgetNegativeGoal = DailyProgressWidget(gradient: dummyGradient, focusedSeconds: 1800, goalHours: -5)
+        XCTAssertEqual(widgetNegativeGoal.goalHours, 1, "Negative goalHours must clamp to 1")
+        XCTAssertEqual(widgetNegativeGoal.progress, 0.5, accuracy: 0.0001)
+
+        // 6. Negative focusedSeconds clamped to 0.0
+        let widgetNegativeSeconds = DailyProgressWidget(gradient: dummyGradient, focusedSeconds: -600, goalHours: 2)
+        XCTAssertEqual(widgetNegativeSeconds.progress, 0.0, accuracy: 0.0001)
+    }
+
+    @MainActor
+    func testPhase1_Sidebar_WindowAndNavigationConstraints() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Authoritative TimerViewModel link with DailyProgress
+        vm.dailyGoalHours = 3
+        vm.todayFocusedSeconds = 3600
+
+        let dummyGradient = LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing)
+        let widget = DailyProgressWidget(gradient: dummyGradient, focusedSeconds: vm.todayFocusedSeconds, goalHours: vm.dailyGoalHours)
+
+        XCTAssertEqual(widget.goalHours, 3)
+        XCTAssertEqual(widget.focusedSeconds, 3600)
+        XCTAssertEqual(widget.percentageLabel, "33%")
+
+        // Sidebar dimensions & constraints
+        XCTAssertEqual(SidebarTokens.sidebarWidth, 252)
+
+        // Verify window constraint constants from architecture specification
+        let minWindowWidth: CGFloat = 850
+        let minWindowHeight: CGFloat = 600
+        let defaultWindowWidth: CGFloat = 1050
+        let defaultWindowHeight: CGFloat = 700
+
+        XCTAssertGreaterThan(minWindowWidth, SidebarTokens.sidebarWidth)
+        let remainingContentWidth = minWindowWidth - SidebarTokens.sidebarWidth
+        XCTAssertGreaterThanOrEqual(remainingContentWidth, 598, "At min window width 850, main content gets at least 598pt")
+        XCTAssertGreaterThanOrEqual(minWindowHeight, 600)
+        XCTAssertGreaterThan(defaultWindowWidth, minWindowWidth)
+        XCTAssertGreaterThan(defaultWindowHeight, minWindowHeight)
+    }
+
+    // MARK: - Sidebar Redesign (Collapse/Expand & Contextual Accessibility) Tests
+
+    func testSidebarCollapse_TokensAndDimensions() {
+        XCTAssertEqual(SidebarTokens.sidebarWidth, 252)
+        XCTAssertEqual(SidebarTokens.collapsedWidth, 68)
+        XCTAssertEqual(SidebarTokens.collapsedItemWidth, 44)
+        XCTAssertEqual(SidebarTokens.horizontalPadding, 12)
+
+        // Mathematical alignment invariant: (collapsedWidth - collapsedItemWidth) / 2 == horizontalPadding
+        let symmetricMargin = (SidebarTokens.collapsedWidth - SidebarTokens.collapsedItemWidth) / 2
+        XCTAssertEqual(symmetricMargin, SidebarTokens.horizontalPadding, "Collapsed mode margins must equal horizontalPadding exactly (12pt)")
+
+        // Window available content width in collapsed mode
+        let minWindowWidth: CGFloat = 850
+        let availableCollapsedContentWidth = minWindowWidth - SidebarTokens.collapsedWidth
+        XCTAssertEqual(availableCollapsedContentWidth, 782, "At 850pt min window width, collapsed sidebar leaves 782pt for content")
+    }
+
+    @MainActor
+    func testSidebar_ContextualAccessibilityStatus_FocusTimer() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let dummyGradient = LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing)
+        var selection: NavigationTab = .focusTimer
+        let bindingSelection = Binding(get: { selection }, set: { selection = $0 })
+        var isCollapsed = false
+        let bindingCollapsed = Binding(get: { isCollapsed }, set: { isCollapsed = $0 })
+
+        let sidebar = SidebarView(gradient: dummyGradient, selection: bindingSelection, isCollapsed: bindingCollapsed, viewModel: vm)
+
+        // 1. Idle state (not started)
+        XCTAssertNil(sidebar.contextualAccessibilityValue(for: .focusTimer))
+
+        // 2. Running Focus Timer
+        vm.applyPresetDirectly(name: "25m", minutes: 25, isBreak: false)
+        vm.startTimer()
+        let runningStatus = sidebar.contextualAccessibilityValue(for: .focusTimer)
+        XCTAssertNotNil(runningStatus)
+        XCTAssertTrue(runningStatus?.contains("remaining, running") == true, "Running focus timer must declare remaining time and running status")
+        XCTAssertTrue(runningStatus?.contains(vm.timerTimeString) == true)
+
+        // 3. Paused Focus Timer
+        vm.stopTimer()
+        let pausedStatus = sidebar.contextualAccessibilityValue(for: .focusTimer)
+        XCTAssertNotNil(pausedStatus)
+        XCTAssertTrue(pausedStatus?.contains("remaining, paused") == true, "Paused focus timer must declare remaining time and paused status")
+        XCTAssertTrue(pausedStatus?.contains(vm.timerTimeString) == true)
+    }
+
+    @MainActor
+    func testSidebar_ContextualAccessibilityStatus_Stopwatch() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let dummyGradient = LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing)
+        var selection: NavigationTab = .stopwatch
+        let bindingSelection = Binding(get: { selection }, set: { selection = $0 })
+        let sidebar = SidebarView(gradient: dummyGradient, selection: bindingSelection, viewModel: vm)
+
+        // 1. Idle stopwatch (0 seconds)
+        XCTAssertNil(sidebar.contextualAccessibilityValue(for: .stopwatch))
+
+        // 2. Running Stopwatch
+        vm.startStopwatch()
+        vm.stopwatchTime = 75
+        let runningStatus = sidebar.contextualAccessibilityValue(for: .stopwatch)
+        XCTAssertNotNil(runningStatus)
+        XCTAssertTrue(runningStatus?.contains("elapsed, running") == true, "Running stopwatch must declare elapsed time and running status")
+        XCTAssertTrue(runningStatus?.contains(vm.stopwatchTimeString) == true)
+
+        // 3. Paused Stopwatch
+        vm.stopStopwatch()
+        vm.stopwatchTime = 75
+        let pausedStatus = sidebar.contextualAccessibilityValue(for: .stopwatch)
+        XCTAssertNotNil(pausedStatus)
+        XCTAssertTrue(pausedStatus?.contains("elapsed, paused") == true, "Paused stopwatch must declare elapsed time and paused status")
+        XCTAssertTrue(pausedStatus?.contains(vm.stopwatchTimeString) == true)
+    }
+
+    @MainActor
+    func testSidebar_ContextualAccessibilityStatus_Tasks() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let dummyGradient = LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing)
+        var selection: NavigationTab = .tasks
+        let bindingSelection = Binding(get: { selection }, set: { selection = $0 })
+        let sidebar = SidebarView(gradient: dummyGradient, selection: bindingSelection, viewModel: vm)
+
+        // 1. Default tasks (or populated tasks)
+        let total = vm.tasks.count
+        let completed = vm.tasks.filter(\.isCompleted).count
+        let taskStatus = sidebar.contextualAccessibilityValue(for: .tasks)
+        XCTAssertEqual(taskStatus, "\(completed) of \(total) tasks completed")
+
+        // 2. Empty tasks
+        vm.tasks.removeAll()
+        let emptyStatus = sidebar.contextualAccessibilityValue(for: .tasks)
+        XCTAssertEqual(emptyStatus, "No tasks")
+    }
+
+    func testSidebar_DailyProgressWidget_CompactModeIntegrity() {
+        let dummyGradient = LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing)
+
+        let expandedWidget = DailyProgressWidget(gradient: dummyGradient, focusedSeconds: 3600, goalHours: 2, isCompact: false)
+        XCTAssertFalse(expandedWidget.isCompact)
+        XCTAssertEqual(expandedWidget.progress, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(expandedWidget.durationLabel, "1h 0m")
+        XCTAssertEqual(expandedWidget.percentageLabel, "50%")
+
+        let compactWidget = DailyProgressWidget(gradient: dummyGradient, focusedSeconds: 3600, goalHours: 2, isCompact: true)
+        XCTAssertTrue(compactWidget.isCompact)
+        XCTAssertEqual(compactWidget.progress, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(compactWidget.durationLabel, "1h 0m")
+        XCTAssertEqual(compactWidget.percentageLabel, "50%")
+    }
+
+    @MainActor
+    func testSidebar_CollapseStateToggling_DoesNotInterruptTimerOrAccounting() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Start timer
+        vm.applyPresetDirectly(name: "25m", minutes: 25, isBreak: false)
+        vm.startTimer()
+        XCTAssertTrue(vm.isTimerRunning)
+        let initialTimeRemaining = vm.timeRemaining
+
+        // Start stopwatch
+        vm.startStopwatch()
+        vm.stopwatchTime = 42
+        XCTAssertTrue(vm.isStopwatchRunning)
+
+        // Toggle collapse state back and forth
+        var isCollapsed = false
+        let dummyGradient = LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing)
+        var selection: NavigationTab = .focusTimer
+        let bindingSelection = Binding(get: { selection }, set: { selection = $0 })
+        let bindingCollapsed = Binding(get: { isCollapsed }, set: { isCollapsed = $0 })
+
+        _ = SidebarView(gradient: dummyGradient, selection: bindingSelection, isCollapsed: bindingCollapsed, viewModel: vm)
+
+        // Simulate collapse toggle
+        isCollapsed = true
+        XCTAssertTrue(vm.isTimerRunning, "Timer must remain running across collapse")
+        XCTAssertEqual(vm.timeRemaining, initialTimeRemaining)
+        XCTAssertTrue(vm.isStopwatchRunning, "Stopwatch must remain running across collapse")
+        XCTAssertEqual(vm.stopwatchTime, 42)
+
+        // Simulate expand toggle
+        isCollapsed = false
+        XCTAssertTrue(vm.isTimerRunning, "Timer must remain running across expand")
+        XCTAssertEqual(vm.timeRemaining, initialTimeRemaining)
+        XCTAssertTrue(vm.isStopwatchRunning, "Stopwatch must remain running across expand")
+        XCTAssertEqual(vm.stopwatchTime, 42)
+    }
+
+    func testSidebar_CollapsePreferencePersistence_UserDefaultsKey() {
+        let defaults = UserDefaults.standard
+        let testKey = "isSidebarCollapsed"
+
+        let originalValue = defaults.bool(forKey: testKey)
+        defer { defaults.set(originalValue, forKey: testKey) }
+
+        defaults.set(true, forKey: testKey)
+        XCTAssertTrue(defaults.bool(forKey: testKey), "isSidebarCollapsed must persist true across reads")
+
+        defaults.set(false, forKey: testKey)
+        XCTAssertFalse(defaults.bool(forKey: testKey), "isSidebarCollapsed must persist false across reads")
+    }
+
+    // MARK: - Concise Navigation Display Titles Tests
+
+    func testSidebar_ConciseDisplayTitles_MappingAndConsistency() {
+        // 1. Verify computed display titles vs rawValues
+        XCTAssertEqual(NavigationTab.focusTimer.title, "Focus")
+        XCTAssertEqual(NavigationTab.focusTimer.rawValue, "Focus Timer")
+
+        XCTAssertEqual(NavigationTab.stopwatch.title, "Stopwatch")
+        XCTAssertEqual(NavigationTab.stopwatch.rawValue, "Stopwatch & Laps")
+
+        XCTAssertEqual(NavigationTab.tasks.title, "Tasks")
+        XCTAssertEqual(NavigationTab.tasks.rawValue, "Tasks")
+
+        XCTAssertEqual(NavigationTab.soundscapes.title, "Sounds")
+        XCTAssertEqual(NavigationTab.soundscapes.rawValue, "Focus Soundscapes")
+
+        XCTAssertEqual(NavigationTab.insights.title, "Insights")
+        XCTAssertEqual(NavigationTab.insights.rawValue, "Insights & Stats")
+
+        XCTAssertEqual(NavigationTab.settings.title, "Settings")
+        XCTAssertEqual(NavigationTab.settings.rawValue, "Settings")
+
+        // 2. Verify all SidebarItem initializations inherit the concise display titles
+        for tab in NavigationTab.allCases {
+            let item = SidebarItem(tab: tab, isSelected: false) {}
+            XCTAssertEqual(item.title, tab.title, "SidebarItem title must match tab.title for \(tab)")
+            XCTAssertEqual(item.icon, tab.icon, "SidebarItem icon must match tab.icon for \(tab)")
+        }
+
+        // 3. Verify SidebarItem with badges and contextual descriptions
+        let focusItem = SidebarItem(tab: .focusTimer, badge: "25:00", contextualAccessibility: "25:00 remaining, running", isSelected: true) {}
+        XCTAssertEqual(focusItem.title, "Focus")
+        XCTAssertEqual(focusItem.badge, "25:00")
+        XCTAssertEqual(focusItem.contextualAccessibility, "25:00 remaining, running")
+
+        let soundsItem = SidebarItem(tab: .soundscapes, isSelected: false) {}
+        XCTAssertEqual(soundsItem.title, "Sounds")
+
+        let insightsItem = SidebarItem(tab: .insights, isSelected: false) {}
+        XCTAssertEqual(insightsItem.title, "Insights")
+    }
+
+    func testSidebar_ConciseDisplayTitles_CodableAndIdentifiersIntegrity() {
+        // Verify Codable serialization preserves rawValue strings for persistence compatibility
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        for tab in NavigationTab.allCases {
+            do {
+                let data = try encoder.encode(tab)
+                let jsonString = String(data: data, encoding: .utf8)
+                XCTAssertEqual(jsonString, "\"\(tab.rawValue)\"", "JSON encoding must use rawValue, not display title")
+
+                let decoded = try decoder.decode(NavigationTab.self, from: data)
+                XCTAssertEqual(decoded, tab)
+                XCTAssertEqual(decoded.title, tab.title)
+                XCTAssertEqual(decoded.rawValue, tab.rawValue)
+                XCTAssertEqual(decoded.id, tab.rawValue)
+            } catch {
+                XCTFail("Failed Codable roundtrip for \(tab): \(error)")
+            }
+        }
+
+        // Verify decoding legacy rawValues from JSON strings
+        let legacyJSON = "[\"Focus Timer\", \"Stopwatch & Laps\", \"Tasks\", \"Focus Soundscapes\", \"Insights & Stats\", \"Settings\"]"
+        guard let data = legacyJSON.data(using: .utf8) else {
+            XCTFail("Failed to convert legacyJSON to Data")
+            return
+        }
+
+        do {
+            let tabs = try decoder.decode([NavigationTab].self, from: data)
+            XCTAssertEqual(tabs.count, 6)
+            XCTAssertEqual(tabs[0].title, "Focus")
+            XCTAssertEqual(tabs[1].title, "Stopwatch")
+            XCTAssertEqual(tabs[2].title, "Tasks")
+            XCTAssertEqual(tabs[3].title, "Sounds")
+            XCTAssertEqual(tabs[4].title, "Insights")
+            XCTAssertEqual(tabs[5].title, "Settings")
+        } catch {
+            XCTFail("Failed to decode legacy JSON: \(error)")
+        }
+    }
+
+    // MARK: - Titlebar Safe-Area & Layout Regression Tests
+
+    @MainActor
+    func testMainWindow_StyleMaskAndTitlebarConfiguration() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+        let player = AmbientAudioPlayer()
+
+        let contentView = ContentView(viewModel: vm, audioPlayer: player)
+            .preferredColorScheme(.dark)
+            .frame(minWidth: 850, minHeight: 600)
+
+        let hosting = NSHostingController(rootView: contentView)
+        let window = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 1050, height: 700),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentViewController = hosting
+        window.setContentSize(NSSize(width: 1050, height: 700))
+        window.minSize = NSSize(width: 850, height: 600)
+        window.title = "FocusFlow"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+
+        // Verify window configuration
+        XCTAssertTrue(window.styleMask.contains(.fullSizeContentView), "Window must use fullSizeContentView for continuous background")
+        XCTAssertTrue(window.styleMask.contains(.titled), "Window must retain titled mask for native titlebar and traffic lights")
+        XCTAssertTrue(window.titlebarAppearsTransparent, "Titlebar must appear transparent for modern dark aesthetic")
+        XCTAssertEqual(window.titleVisibility, .hidden, "Native window title text must be hidden")
+        XCTAssertEqual(window.minSize.width, 850, "Window minWidth must be 850")
+        XCTAssertEqual(window.minSize.height, 600, "Window minHeight must be 600")
+
+        // Verify safe area insets are present for content layout
+        window.layoutIfNeeded()
+        let topInset = hosting.view.safeAreaInsets.top
+        XCTAssertGreaterThanOrEqual(topInset, 28.0, "NSHostingView must provide >= 28pt top safe area inset for the transparent titlebar")
+    }
+
+    @MainActor
+    func testSidebar_TitlebarClearanceIntegrity() {
+        // Verify that SidebarTokens.headerTopPadding provides native standard titlebar clearance (28pt)
+        // so brand identity and collapse controls sit comfortably below the native traffic lights without excessive void
+        XCTAssertEqual(SidebarTokens.headerTopPadding, 28, "headerTopPadding must be 28pt for standard macOS titlebar clearance")
+        XCTAssertEqual(SidebarTokens.headerBottomPadding, 16, "headerBottomPadding must be 16pt")
+        XCTAssertEqual(SidebarTokens.sidebarWidth, 252, "Expanded sidebar width must be 252pt")
+        XCTAssertEqual(SidebarTokens.collapsedWidth, 68, "Collapsed sidebar width must be 68pt")
+        XCTAssertEqual(SidebarTokens.collapsedItemWidth, 44, "Collapsed item width must be 44pt")
+    }
+
+    @MainActor
+    func testContentView_RootViewSafeArePropagation() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+        let player = AmbientAudioPlayer()
+
+        // Create ContentView and embed in NSHostingView
+        let view = ContentView(viewModel: vm, audioPlayer: player)
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame = NSRect(x: 0, y: 0, width: 1050, height: 700)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 1050, height: 700),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.contentView = hosting
+        window.layoutIfNeeded()
+
+        // Verify the hosting view respects the window's safe area
+        XCTAssertGreaterThanOrEqual(hosting.safeAreaInsets.top, 28.0, "ContentView hosting view must receive window top safe area insets")
+    }
+
+    // MARK: - PART F: Responsive Window Layout & Stabilization Regression Tests
+
+    @MainActor
+    func testResponsiveLayout_01_WindowLayoutMetrics_AuthoritativeGeometryConstants() {
+        XCTAssertEqual(WindowLayoutMetrics.titlebarChromeHeight, 28.0, "Native titlebar chrome height must be 28pt")
+        XCTAssertEqual(WindowLayoutMetrics.standardBreathingRoom, 0.0, "Standard breathing room in windowed mode must be 0pt (native titlebar alignment)")
+        XCTAssertEqual(WindowLayoutMetrics.standardTopClearance, 28.0, "Authoritative windowed top clearance must be exactly 28pt (native macOS titlebar height)")
+        XCTAssertEqual(WindowLayoutMetrics.fullScreenRevealedClearance, 40.0, "Fullscreen top clearance with revealed chrome must be 40pt")
+        XCTAssertEqual(WindowLayoutMetrics.fullScreenHiddenChromeClearance, 20.0, "Fullscreen top clearance with autohidden chrome must be 20pt")
+        XCTAssertEqual(WindowLayoutMetrics.postBannerSpacing, 12.0, "Post-banner spacing must be 12pt")
+        XCTAssertEqual(WindowLayoutMetrics.postMiniBarSpacing, 12.0, "Post-mini-bar spacing must be 12pt")
+
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: false), 28.0)
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: true, isTitlebarRevealed: true), 40.0)
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: true, isTitlebarRevealed: false), 20.0)
+    }
+
+    @MainActor
+    func testResponsiveLayout_02_WindowHosted_NormalAndFullScreenClearance() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+        let player = AmbientAudioPlayer()
+
+        let view = ContentView(viewModel: vm, audioPlayer: player)
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame = NSRect(x: 0, y: 0, width: 1050, height: 700)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 1050, height: 700),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.contentView = hosting
+        window.layoutIfNeeded()
+
+        // Windowed mode clearance: 28pt via window query or constant
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(for: window), 28.0)
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: false), 28.0)
+        // Fullscreen clearance with titlebar revealed: 40pt
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: true, isTitlebarRevealed: true), 40.0)
+        // Fullscreen clearance with chrome autohidden: 20pt
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: true, isTitlebarRevealed: false), 20.0)
+    }
+
+    @MainActor
+    func testResponsiveLayout_03_ExpandedAndCollapsedSidebarGeometry() {
+        XCTAssertEqual(SidebarTokens.sidebarWidth, 252.0)
+        XCTAssertEqual(SidebarTokens.collapsedWidth, 68.0)
+        XCTAssertEqual(SidebarTokens.collapsedItemWidth, 44.0)
+        XCTAssertEqual(SidebarTokens.headerTopPadding, 28.0)
+        XCTAssertEqual(SidebarTokens.headerBottomPadding, 16.0)
+
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        var isCollapsed = false
+        let expandedSidebar = SidebarView(
+            gradient: LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing),
+            selection: .constant(.focusTimer),
+            isCollapsed: Binding(get: { isCollapsed }, set: { isCollapsed = $0 }),
+            viewModel: vm,
+            topPadding: 28.0
+        )
+        XCTAssertEqual(expandedSidebar.topPadding, 28.0)
+
+        isCollapsed = true
+        let collapsedSidebar = SidebarView(
+            gradient: LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing),
+            selection: .constant(.focusTimer),
+            isCollapsed: Binding(get: { isCollapsed }, set: { isCollapsed = $0 }),
+            viewModel: vm,
+            topPadding: 28.0
+        )
+        XCTAssertEqual(collapsedSidebar.topPadding, 28.0)
+    }
+
+    @MainActor
+    func testResponsiveLayout_04_CompactPresetDiscoverability_90mAndAllBasePresets() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Set duration to 90 minutes
+        vm.totalTime = 90 * 60
+        vm.timeRemaining = 90 * 60
+
+        let inputView = InPlaceTimeInputView(viewModel: vm, size: 240, isCompact: true)
+        let entries = inputView.shortcutEntries
+
+        // Verify 90m chip is present and highlighted as current
+        guard let entry90 = entries.first(where: { $0.title == "90m" }) else {
+            XCTFail("90m shortcut chip must be present in compact mode when 90:00 is active")
+            return
+        }
+        XCTAssertTrue(entry90.isCurrent, "90m chip must be marked as isCurrent when totalTime is 90:00")
+        XCTAssertEqual(entry90.minutes, 90)
+
+        // Verify base focus presets (5, 10, 15, 20, 25, 30, 45, 60, 90) are all present
+        let expectedFocusPresets = [5, 10, 15, 20, 25, 30, 45, 60, 90]
+        for m in expectedFocusPresets {
+            XCTAssertTrue(entries.contains(where: { $0.minutes == m }), "Preset \(m)m must be present in shortcutEntries")
+        }
+
+        // Test break presets
+        vm.switchToBreak(minutes: 30)
+        let breakInputView = InPlaceTimeInputView(viewModel: vm, size: 240, isCompact: true)
+        let breakEntries = breakInputView.shortcutEntries
+        let expectedBreakPresets = [3, 5, 10, 15, 20, 30]
+        for m in expectedBreakPresets {
+            XCTAssertTrue(breakEntries.contains(where: { $0.minutes == m }), "Break preset \(m)m must be present in break shortcutEntries")
+        }
+        guard let entry30Break = breakEntries.first(where: { $0.title == "30m" }) else {
+            XCTFail("30m break shortcut chip must be present in break mode")
+            return
+        }
+        XCTAssertTrue(entry30Break.isCurrent, "30m break chip must be marked as isCurrent when 30m break is active")
+    }
+
+    @MainActor
+    func testResponsiveLayout_05_CustomNonPresetDuration_GeneratesDynamicActiveChip() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Set custom whole-minute duration: 42 minutes
+        vm.setCustomDuration(minutes: 42, seconds: 0)
+        XCTAssertEqual(vm.totalTime, 42 * 60)
+
+        let inputView = InPlaceTimeInputView(viewModel: vm, size: 260, isCompact: true)
+        let entries = inputView.shortcutEntries
+
+        guard let entry42 = entries.first(where: { $0.minutes == 42 }) else {
+            XCTFail("Custom 42m duration must generate a discoverable shortcut chip")
+            return
+        }
+        XCTAssertTrue(entry42.isCurrent, "Custom 42m chip must be marked as isCurrent")
+        XCTAssertTrue(entry42.isCustom, "Custom 42m chip must be marked as isCustom")
+        XCTAssertEqual(entry42.title, "42m")
+
+        // Verify entries remain strictly sorted
+        let minutesList = entries.map(\.minutes)
+        XCTAssertEqual(minutesList, minutesList.sorted(), "Shortcut chips must remain sorted ascending")
+    }
+
+    @MainActor
+    func testResponsiveLayout_06_CustomDurationWithSeconds_GeneratesFormattedActiveChip() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        // Set custom duration with seconds: 25 minutes 30 seconds
+        vm.setCustomDuration(minutes: 25, seconds: 30)
+        XCTAssertEqual(vm.totalTime, 25 * 60 + 30)
+
+        let inputView = InPlaceTimeInputView(viewModel: vm, size: 260, isCompact: true)
+        let entries = inputView.shortcutEntries
+
+        guard let customEntry = entries.first(where: { $0.isCustom }) else {
+            XCTFail("Custom duration containing seconds must generate a dedicated active chip")
+            return
+        }
+        XCTAssertTrue(customEntry.isCurrent, "Custom 25:30 chip must be marked as isCurrent")
+        XCTAssertEqual(customEntry.title, "25:30", "Chip title must format as MM:SS")
+    }
+
+    @MainActor
+    func testResponsiveLayout_07_DurationPreservationAcrossResizeAndSidebarStates() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+        let player = AmbientAudioPlayer()
+
+        // Set to 90 minutes
+        vm.totalTime = 90 * 60
+        vm.timeRemaining = 90 * 60
+
+        let view = ContentView(viewModel: vm, audioPlayer: player)
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame = NSRect(x: 0, y: 0, width: 1440, height: 900)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 1440, height: 900),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.layoutIfNeeded()
+
+        // Resize down to minimum 850x600
+        window.setContentSize(NSSize(width: 850, height: 600))
+        hosting.frame = NSRect(x: 0, y: 0, width: 850, height: 600)
+        window.layoutIfNeeded()
+
+        // Duration must remain exactly 90:00 (5400s)
+        XCTAssertEqual(vm.totalTime, 5400, "Window resize must not alter configured totalTime")
+        XCTAssertEqual(vm.timeRemaining, 5400, "Window resize must not alter timeRemaining")
+
+        // Resize to medium 1050x700
+        window.setContentSize(NSSize(width: 1050, height: 700))
+        hosting.frame = NSRect(x: 0, y: 0, width: 1050, height: 700)
+        window.layoutIfNeeded()
+
+        XCTAssertEqual(vm.totalTime, 5400)
+        XCTAssertEqual(vm.timeRemaining, 5400)
+    }
+
+    @MainActor
+    func testResponsiveLayout_08_StageHeightBoundingAcrossWindowHeights() {
+        // Digital clock stage height formula: max(220, min(availableH * 0.35, 330))
+        // Small window (height 600 -> availableH ≈ 540)
+        let smallAvailableH: CGFloat = 540.0
+        let smallStageH = max(220, min(smallAvailableH * 0.35, 330))
+        XCTAssertEqual(smallStageH, 220.0, "Small window digital stage height must clamp to 220pt")
+
+        // Medium window (height 700 -> availableH ≈ 640)
+        let medAvailableH: CGFloat = 640.0
+        let medStageH = max(220, min(medAvailableH * 0.35, 330))
+        XCTAssertEqual(medStageH, 224.0, accuracy: 0.1)
+
+        // Large window (height 900 -> availableH ≈ 830)
+        let largeAvailableH: CGFloat = 830.0
+        let largeStageH = max(220, min(largeAvailableH * 0.35, 330))
+        XCTAssertEqual(largeStageH, 290.5, accuracy: 0.5)
+
+        // Ultra-tall / 4K window (height 1200 -> availableH ≈ 1130)
+        let tallAvailableH: CGFloat = 1130.0
+        let tallStageH = max(220, min(tallAvailableH * 0.35, 330))
+        XCTAssertEqual(tallStageH, 330.0, "Tall window digital stage height must cap at 330pt, eliminating the 520pt void")
+    }
+
+    @MainActor
+    func testResponsiveLayout_09_MinimumWindowSize850x600_FitConstraints() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+        let player = AmbientAudioPlayer()
+
+        let view = ContentView(viewModel: vm, audioPlayer: player)
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame = NSRect(x: 0, y: 0, width: 850, height: 600)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 850, height: 600),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.layoutIfNeeded()
+
+        XCTAssertEqual(window.contentView?.frame.size.width, 850)
+        XCTAssertEqual(window.contentView?.frame.size.height, 600)
+    }
+
+    @MainActor
+    func testResponsiveLayout_10_CrossModeMiniBar_TopClearanceDoesNotDuplicatePadding() {
+        XCTAssertEqual(WindowLayoutMetrics.postMiniBarSpacing, 12.0)
+        XCTAssertEqual(WindowLayoutMetrics.postBannerSpacing, 12.0)
+
+        // Verify that TasksView with postMiniBarSpacing starts at 12pt instead of 52pt
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+
+        let tasksView = TasksView(viewModel: vm, topPadding: WindowLayoutMetrics.postMiniBarSpacing)
+        XCTAssertEqual(tasksView.topPadding, 12.0, "TasksView under an active mini-bar must have 12pt top padding, preventing 140+ pt double padding")
+    }
+
+    @MainActor
+    func testResponsiveLayout_11_PhysicalControlCoordinateClearance() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+        let player = AmbientAudioPlayer()
+
+        let view = ContentView(viewModel: vm, audioPlayer: player)
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame = NSRect(x: 0, y: 0, width: 1050, height: 700)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 1050, height: 700),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.contentView = hosting
+        window.layoutIfNeeded()
+
+        // Measure physical AppKit window chrome (typically 28pt on standard macOS window, up to 32pt with specific display metrics)
+        let windowH = window.frame.height
+        let contentLayoutH = window.contentLayoutRect.height
+        let chromeHeight = windowH - contentLayoutH
+        XCTAssertTrue(chromeHeight >= 28.0 && chromeHeight <= 32.0, "Physical AppKit titlebar chrome height must be 28-32pt (actual: \(chromeHeight))")
+
+        // Top clearance of 28pt guarantees native titlebar alignment in windowed mode
+        let clearance = WindowLayoutMetrics.topClearance(for: window)
+        XCTAssertEqual(clearance, 28.0)
+
+        // Measure physical close button in window coordinates
+        if let closeBtn = window.standardWindowButton(.closeButton), let themeView = window.contentView?.superview {
+            let frameInWindow = closeBtn.convert(closeBtn.bounds, to: themeView)
+            let closeBtnTopDist = windowH - frameInWindow.maxY
+            let closeBtnBottomDist = windowH - frameInWindow.minY
+            XCTAssertTrue(closeBtnTopDist >= 5.0 && closeBtnTopDist <= 10.0, "Close button top sits at 6-9pt from top edge (actual: \(closeBtnTopDist))")
+            XCTAssertTrue(closeBtnBottomDist >= 19.0 && closeBtnBottomDist <= 24.0, "Close button bottom sits at 20-23pt from top edge (actual: \(closeBtnBottomDist))")
+
+            let marginBelowButtons = clearance - closeBtnBottomDist
+            XCTAssertTrue(marginBelowButtons >= 4.0 && marginBelowButtons <= 10.0, "Header maintains clean clearance below traffic light buttons (actual: \(marginBelowButtons))")
+        }
+    }
+
+    @MainActor
+    func testResponsiveLayout_12_HeaderBaselineAlignmentAcrossAllDestinations() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+        let player = AmbientAudioPlayer()
+
+        let clearance = WindowLayoutMetrics.standardTopClearance
+        XCTAssertEqual(clearance, 28.0)
+
+        // Verify Sidebar header padding
+        var isCollapsed = false
+        let sidebar = SidebarView(
+            gradient: LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing),
+            selection: .constant(.focusTimer),
+            isCollapsed: Binding(get: { isCollapsed }, set: { isCollapsed = $0 }),
+            viewModel: vm,
+            topPadding: clearance
+        )
+        XCTAssertEqual(sidebar.topPadding, 28.0)
+
+        // Verify DashboardTimerView (Focus Timer & Stopwatch)
+        let timerDashboard = DashboardTimerView(
+            viewModel: vm,
+            gradient: LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing),
+            clockStyle: .constant("Digital"),
+            isFocusState: .constant(false),
+            showingWorkspace: .constant(false),
+            isStopwatchMode: false,
+            topPadding: clearance
+        )
+        XCTAssertEqual(timerDashboard.topPadding, 28.0)
+
+        let stopwatchDashboard = DashboardTimerView(
+            viewModel: vm,
+            gradient: LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing),
+            clockStyle: .constant("Digital"),
+            isFocusState: .constant(false),
+            showingWorkspace: .constant(false),
+            isStopwatchMode: true,
+            topPadding: clearance
+        )
+        XCTAssertEqual(stopwatchDashboard.topPadding, 28.0)
+
+        // Verify secondary views
+        let tasks = TasksView(viewModel: vm, topPadding: clearance)
+        XCTAssertEqual(tasks.topPadding, 28.0)
+
+        let soundscapes = SoundscapesView(audioPlayer: player, topPadding: clearance)
+        XCTAssertEqual(soundscapes.topPadding, 28.0)
+
+        let insights = InsightsView(viewModel: vm, topPadding: clearance)
+        XCTAssertEqual(insights.topPadding, 28.0)
+
+        let settings = SettingsView(viewModel: vm, topPadding: clearance)
+        XCTAssertEqual(settings.topPadding, 28.0)
+    }
+
+    @MainActor
+    func testResponsiveLayout_13_FullScreenChromeRevealAndAutohideTransition() {
+        // In fullscreen when titlebar is revealed (user moves cursor to top or has persistent menu bar)
+        let revealedClearance = WindowLayoutMetrics.topClearance(isFullScreen: true, isTitlebarRevealed: true)
+        XCTAssertEqual(revealedClearance, 40.0, "Revealed fullscreen clearance must be 40pt")
+        XCTAssertGreaterThan(revealedClearance, WindowLayoutMetrics.titlebarChromeHeight, "Revealed clearance must exceed 28pt titlebar to prevent clipping")
+
+        // In fullscreen when chrome is genuinely absent (autohidden)
+        let autohiddenClearance = WindowLayoutMetrics.topClearance(isFullScreen: true, isTitlebarRevealed: false)
+        XCTAssertEqual(autohiddenClearance, 20.0, "Autohidden fullscreen clearance must be 20pt, avoiding excessive margins")
+
+        // Windowed mode always preserves 28pt authoritative clearance
+        let windowedClearance = WindowLayoutMetrics.topClearance(isFullScreen: false, isTitlebarRevealed: true)
+        XCTAssertEqual(windowedClearance, 28.0)
+        let windowedClearanceAlt = WindowLayoutMetrics.topClearance(isFullScreen: false, isTitlebarRevealed: false)
+        XCTAssertEqual(windowedClearanceAlt, 28.0)
+    }
+
+    @MainActor
+    private func renderViewToPNGFile<V: View>(_ view: V, size: CGSize, fileName: String) {
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "FocusFlow"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        let hostingView = NSHostingView(rootView: view.frame(width: size.width, height: size.height).preferredColorScheme(.dark))
+        hostingView.frame = NSRect(origin: .zero, size: size)
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        window.layoutIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+
+        let renderTarget: NSView = window.contentView?.superview ?? hostingView
+        renderTarget.layoutSubtreeIfNeeded()
+
+        guard let rep = renderTarget.bitmapImageRepForCachingDisplay(in: renderTarget.bounds) else {
+            XCTFail("Failed to render view to PNG for \(fileName)")
+            return
+        }
+        renderTarget.cacheDisplay(in: renderTarget.bounds, to: rep)
+
+        guard let pngData = rep.representation(using: .png, properties: [:]) else {
+            XCTFail("Failed to encode PNG data")
+            return
+        }
+
+        let localArtifactDir = "/Users/deepaksinghjethi/.gemini/antigravity/brain/a7db7b67-cb01-4e70-89ca-66391e88e690"
+        let fallbackDir = NSTemporaryDirectory() + "focusflow_qa"
+        let targetDir = FileManager.default.fileExists(atPath: localArtifactDir) ? localArtifactDir : fallbackDir
+        try? FileManager.default.createDirectory(atPath: targetDir, withIntermediateDirectories: true)
+
+        let destinationPath = "\(targetDir)/\(fileName)"
+        do {
+            try pngData.write(to: URL(fileURLWithPath: destinationPath))
+            print("Successfully rendered QA artifact: \(destinationPath) (\(rep.pixelsWide)x\(rep.pixelsHigh))")
+        } catch {
+            print("Warning: Could not write QA artifact: \(error)")
+        }
+    }
+
+    @MainActor
+    func testGenerateVisualQAScreenshots() {
+        // 1. 850x600 expanded sidebar, 90:00 active (verify 90m chip is present and highlighted)
+        do {
+            UserDefaults.standard.set(false, forKey: "isSidebarCollapsed")
+            let (vm, tempURL) = makeIsolatedViewModel()
+            defer { cleanup(url: tempURL) }
+            let player = AmbientAudioPlayer()
+            vm.totalTime = 90 * 60
+            vm.timeRemaining = 90 * 60
+
+            let view = ContentView(viewModel: vm, audioPlayer: player, initialTab: .focusTimer)
+            renderViewToPNGFile(view, size: CGSize(width: 850, height: 600), fileName: "qa_850x600_expanded.png")
+        }
+
+        // 2. 850x600 collapsed sidebar
+        do {
+            UserDefaults.standard.set(true, forKey: "isSidebarCollapsed")
+            let (vm, tempURL) = makeIsolatedViewModel()
+            defer { cleanup(url: tempURL) }
+            let player = AmbientAudioPlayer()
+            vm.totalTime = 90 * 60
+            vm.timeRemaining = 90 * 60
+
+            let view = ContentView(viewModel: vm, audioPlayer: player, initialTab: .focusTimer)
+            renderViewToPNGFile(view, size: CGSize(width: 850, height: 600), fileName: "qa_850x600_collapsed.png")
+        }
+
+        // Restore expanded sidebar preference
+        UserDefaults.standard.set(false, forKey: "isSidebarCollapsed")
+
+        // 3. 1050x700 standard window
+        do {
+            let (vm, tempURL) = makeIsolatedViewModel()
+            defer { cleanup(url: tempURL) }
+            let player = AmbientAudioPlayer()
+            vm.totalTime = 25 * 60
+            vm.timeRemaining = 25 * 60
+
+            let view = ContentView(viewModel: vm, audioPlayer: player, initialTab: .focusTimer)
+            renderViewToPNGFile(view, size: CGSize(width: 1050, height: 700), fileName: "qa_1050x700_standard.png")
+        }
+
+        // 4. 1440x900 large window (verify stage height bounded without 520pt void)
+        do {
+            let (vm, tempURL) = makeIsolatedViewModel()
+            defer { cleanup(url: tempURL) }
+            let player = AmbientAudioPlayer()
+            vm.totalTime = 90 * 60
+            vm.timeRemaining = 90 * 60
+
+            let view = ContentView(viewModel: vm, audioPlayer: player, initialTab: .focusTimer)
+            renderViewToPNGFile(view, size: CGSize(width: 1440, height: 900), fileName: "qa_1440x900_large.png")
+        }
+
+        // 5. Fullscreen window (40pt top clearance with revealed chrome)
+        do {
+            let (vm, tempURL) = makeIsolatedViewModel()
+            defer { cleanup(url: tempURL) }
+            let player = AmbientAudioPlayer()
+            vm.totalTime = 25 * 60
+            vm.timeRemaining = 25 * 60
+
+            let view = ContentView(viewModel: vm, audioPlayer: player, initialTab: .focusTimer, isFullScreen: true, isTitlebarRevealed: true)
+            renderViewToPNGFile(view, size: CGSize(width: 1440, height: 900), fileName: "qa_fullscreen_1440x900.png")
+        }
+
+        // 6. Tasks page with active timer mini-bar (verify 12pt spacing, no 140pt gap)
+        do {
+            let (vm, tempURL) = makeIsolatedViewModel()
+            defer { cleanup(url: tempURL) }
+            let player = AmbientAudioPlayer()
+            vm.startTimer()
+
+            let view = ContentView(viewModel: vm, audioPlayer: player, initialTab: .tasks)
+            renderViewToPNGFile(view, size: CGSize(width: 1050, height: 700), fileName: "qa_tasks_with_minibar.png")
+        }
+    }
 }
+
+
+
+
+

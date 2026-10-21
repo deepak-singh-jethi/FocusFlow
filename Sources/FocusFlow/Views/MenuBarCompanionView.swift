@@ -50,10 +50,7 @@ public struct MenuBarCompanionView: View {
     private var selectedMode: TimerViewModel.CompanionMode {
         viewModel.selectedCompanionMode
     }
-    @State private var inputMinutes: String = "25"
-    @State private var inputSeconds: String = "00"
-    @State private var isEditingDirectTime: Bool = false
-    @State private var isSyncingFields: Bool = false
+    @StateObject private var companionController = TimeInputController()
 
     @State private var isPlayHovered: Bool = false
     @State private var isLapHovered: Bool = false
@@ -88,6 +85,12 @@ public struct MenuBarCompanionView: View {
                 recoverySuccessBanner
             }
 
+            if let activeInterval = viewModel.idleReviewCoordinator.activeReviewInterval {
+                compactIdleReviewCard(interval: activeInterval)
+            } else if !viewModel.idleReviewCoordinator.pendingIntervals.isEmpty {
+                pendingIdleReviewBanner
+            }
+
             Group {
                 modeSegmentedControl
 
@@ -118,7 +121,16 @@ public struct MenuBarCompanionView: View {
         .frame(width: 316)
         .background(Color(red: 0.08, green: 0.09, blue: 0.13))
         .onAppear {
-            syncInputFields()
+            companionController.sync(from: viewModel.totalTime)
+            companionController.onCommit = { [weak targetVM = viewModel] minutes, seconds in
+                guard let viewModel = targetVM else { return }
+                if viewModel.isBreakPreset {
+                    let name = (minutes >= 15) ? "Long Break" : "Short Break"
+                    viewModel.requestModeOrPresetChange(name: name, minutes: minutes, seconds: seconds, mode: "Pomodoro", isBreak: true, origin: .menuBar)
+                } else {
+                    viewModel.setCustomDuration(minutes: minutes, seconds: seconds, origin: .menuBar)
+                }
+            }
             if viewModel.isStopwatchRunning && !viewModel.isTimerRunning && !viewModel.isTimerActive {
                 viewModel.selectedCompanionMode = .stopwatch
             } else if viewModel.isTimerRunning && !viewModel.isStopwatchRunning {
@@ -126,26 +138,10 @@ public struct MenuBarCompanionView: View {
             }
         }
         .onChange(of: viewModel.totalTime) { _, _ in
-            if !isEditingDirectTime {
-                syncInputFields()
-            }
+            companionController.sync(from: viewModel.totalTime)
         }
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: viewModel.activePreset)
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: viewModel.isTimerRunning)
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: viewModel.isStopwatchRunning)
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: audioPlayer.isPlaying)
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: audioPlayer.selectedSound)
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: viewModel.showConflictModal)
-    }
-
-    private func syncInputFields() {
-        isSyncingFields = true
-        let m = viewModel.totalTime / 60
-        let s = viewModel.totalTime % 60
-        inputMinutes = "\(m)"
-        inputSeconds = String(format: "%02d", s)
-        DispatchQueue.main.async {
-            isSyncingFields = false
+        .onExitCommand {
+            companionController.cancelEditing()
         }
     }
 
@@ -185,7 +181,9 @@ public struct MenuBarCompanionView: View {
     }
 
     private var statusPillText: String {
-        if selectedMode == .stopwatch {
+        if viewModel.isDeferredCompletionPending {
+            return "IDLE REVIEW"
+        } else if selectedMode == .stopwatch {
             return viewModel.isStopwatchRunning ? "RUNNING" : (viewModel.stopwatchTime > 0 ? "PAUSED" : "STOPWATCH")
         } else if viewModel.isTimerRunning {
             return isBreak ? "BREAK" : "RUNNING"
@@ -197,7 +195,9 @@ public struct MenuBarCompanionView: View {
     }
 
     private var statusPillColor: Color {
-        if selectedMode == .stopwatch {
+        if viewModel.isDeferredCompletionPending {
+            return .orange
+        } else if selectedMode == .stopwatch {
             return viewModel.isStopwatchRunning ? .cyan : (viewModel.stopwatchTime > 0 ? .yellow : .cyan)
         } else if isBreak {
             return .teal
@@ -256,6 +256,7 @@ public struct MenuBarCompanionView: View {
 
                     // Running progress bar
                     GeometryReader { geo in
+                        let completedFraction = min(max(1.0 - viewModel.fillAmount, 0.0), 1.0)
                         ZStack(alignment: .leading) {
                             Capsule()
                                 .fill(Color.white.opacity(0.08))
@@ -271,8 +272,8 @@ public struct MenuBarCompanionView: View {
                                         endPoint: .trailing
                                     )
                                 )
-                                .frame(width: max(0, geo.size.width * CGFloat(viewModel.fillAmount)), height: 4)
-                                .animation(.linear(duration: 0.1), value: viewModel.fillAmount)
+                                .frame(width: max(0, geo.size.width * CGFloat(completedFraction)), height: 4)
+                                .animation(.linear(duration: 0.1), value: completedFraction)
                         }
                     }
                     .frame(height: 4)
@@ -296,6 +297,7 @@ public struct MenuBarCompanionView: View {
 
                     // Paused progress bar (retains exact fill amount)
                     GeometryReader { geo in
+                        let completedFraction = min(max(1.0 - viewModel.fillAmount, 0.0), 1.0)
                         ZStack(alignment: .leading) {
                             Capsule()
                                 .fill(Color.white.opacity(0.08))
@@ -311,7 +313,7 @@ public struct MenuBarCompanionView: View {
                                         endPoint: .trailing
                                     )
                                 )
-                                .frame(width: max(0, geo.size.width * CGFloat(viewModel.fillAmount)), height: 4)
+                                .frame(width: max(0, geo.size.width * CGFloat(completedFraction)), height: 4)
                         }
                     }
                     .frame(height: 4)
@@ -328,73 +330,187 @@ public struct MenuBarCompanionView: View {
                 // Direct Input Area: Click/type right inside where time is shown!
                 VStack(spacing: 6) {
                     HStack(alignment: .center, spacing: 6) {
-                        // -5m quick stepper
+                        // -5m quick stepper (seconds-preserving)
                         Button {
-                            adjustMinutes(by: -5)
+                            companionController.adjustMinutes(by: -5)
                         } label: {
                             Image(systemName: "minus.circle.fill")
                                 .font(.system(size: 18))
-                                .foregroundColor(.gray.opacity(0.8))
+                                .foregroundColor(companionController.canAdjustMinus5 ? .gray.opacity(0.8) : .gray.opacity(0.3))
                         }
                         .buttonStyle(.plain)
-                        .help("Subtract 5 minutes")
+                        .disabled(!companionController.canAdjustMinus5)
+                        .accessibilityLabel("Subtract 5 minutes")
+                        .help("Subtract 5 minutes (preserves seconds)")
 
                         // Minutes Direct Input Field
-                        TextField("25", text: $inputMinutes)
-                            .font(.system(size: 34, weight: .bold, design: .rounded))
-                            .monospacedDigit()
-                            .multilineTextAlignment(.center)
-                            .textFieldStyle(.plain)
-                            .foregroundColor(.white)
-                            .frame(width: 68, height: 38)
-                            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.40), lineWidth: 1))
-                            .onSubmit { applyCustomInput() }
-                            .onChange(of: inputMinutes) { _, newVal in
-                                guard !isSyncingFields else { return }
-                                let digits = newVal.filter { $0.isNumber }
-                                let val = min(Int(digits) ?? 0, 360)
-                                if digits != newVal {
-                                    inputMinutes = "\(val)"
+                        ZStack {
+                            let isInvalid = companionController.hasInvalidDraft
+                            let strokeColor = isInvalid ? Color(red: 1.0, green: 0.35, blue: 0.35) : (companionController.activeEditingField == .minutes ? Color.orange : Color.orange.opacity(0.40))
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.white.opacity(companionController.activeEditingField == .minutes ? 0.12 : 0.08))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(strokeColor, lineWidth: (companionController.activeEditingField == .minutes || isInvalid) ? 2 : 1)
+                                )
+
+                            if companionController.activeEditingField == .minutes {
+                                TimeDigitField(
+                                    text: $companionController.inputMinutes,
+                                    placeholder: "MM",
+                                    fontSize: 24,
+                                    maxLength: 3,
+                                    onTab: {
+                                        companionController.commitAndSwitchField(to: .seconds)
+                                    },
+                                    onBacktab: {
+                                        companionController.commitEditing()
+                                    },
+                                    onReturn: {
+                                        companionController.commitEditing()
+                                    },
+                                    onEscape: {
+                                        companionController.cancelEditing()
+                                    },
+                                    onFocusLost: {
+                                        DispatchQueue.main.async {
+                                            if companionController.activeEditingField == .minutes {
+                                                companionController.commitEditing()
+                                            }
+                                        }
+                                    }
+                                )
+                                .padding(.horizontal, 2)
+                            } else {
+                                Button {
+                                    if companionController.activeEditingField == .seconds {
+                                        companionController.commitAndSwitchField(to: .minutes)
+                                    } else if companionController.activeEditingField != .minutes {
+                                        companionController.startEditing(.minutes)
+                                    }
+                                } label: {
+                                    Text(companionController.inputMinutes.isEmpty ? "MM" : companionController.inputMinutes)
+                                        .font(.system(size: companionController.inputMinutes.isEmpty ? 19 : 24, weight: .bold, design: .rounded))
+                                        .monospacedDigit()
+                                        .multilineTextAlignment(.center)
+                                        .foregroundColor(companionController.inputMinutes.isEmpty ? Color.white.opacity(0.30) : .white)
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.65)
+                                        .padding(.horizontal, 2)
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                                 }
-                                applyCustomInput()
+                                .buttonStyle(.plain)
+                                .contentShape(RoundedRectangle(cornerRadius: 8))
                             }
+                        }
+                        .frame(width: 68, height: 38)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("Minutes, \(companionController.inputMinutes.isEmpty ? "empty" : companionController.inputMinutes)")
+                        .accessibilityHint("Click to edit minutes")
 
                         Text(":")
-                            .font(.system(size: 28, weight: .bold, design: .rounded))
+                            .font(.system(size: 22, weight: .bold, design: .rounded))
                             .foregroundColor(.gray.opacity(0.7))
 
                         // Seconds Direct Input Field
-                        TextField("00", text: $inputSeconds)
-                            .font(.system(size: 34, weight: .bold, design: .rounded))
-                            .monospacedDigit()
-                            .multilineTextAlignment(.center)
-                            .textFieldStyle(.plain)
-                            .foregroundColor(.white)
-                            .frame(width: 58, height: 38)
-                            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.15), lineWidth: 1))
-                            .onSubmit { applyCustomInput() }
-                            .onChange(of: inputSeconds) { _, newVal in
-                                guard !isSyncingFields else { return }
-                                let digits = newVal.filter { $0.isNumber }
-                                let val = min(Int(digits) ?? 0, 59)
-                                if digits != newVal {
-                                    inputSeconds = String(format: "%02d", val)
-                                }
-                                applyCustomInput()
-                            }
+                        ZStack {
+                            let isInvalid = companionController.hasInvalidDraft
+                            let strokeColor = isInvalid ? Color(red: 1.0, green: 0.35, blue: 0.35) : (companionController.activeEditingField == .seconds ? Color.orange : Color.white.opacity(0.15))
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.white.opacity(companionController.activeEditingField == .seconds ? 0.12 : 0.08))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(strokeColor, lineWidth: (companionController.activeEditingField == .seconds || isInvalid) ? 2 : 1)
+                                )
 
-                        // +5m quick stepper
+                            if companionController.activeEditingField == .seconds {
+                                TimeDigitField(
+                                    text: $companionController.inputSeconds,
+                                    placeholder: "SS",
+                                    fontSize: 24,
+                                    maxLength: 2,
+                                    onTab: {
+                                        companionController.commitEditing()
+                                    },
+                                    onBacktab: {
+                                        companionController.commitAndSwitchField(to: .minutes)
+                                    },
+                                    onReturn: {
+                                        companionController.commitEditing()
+                                    },
+                                    onEscape: {
+                                        companionController.cancelEditing()
+                                    },
+                                    onFocusLost: {
+                                        DispatchQueue.main.async {
+                                            if companionController.activeEditingField == .seconds {
+                                                companionController.commitEditing()
+                                            }
+                                        }
+                                    }
+                                )
+                                .padding(.horizontal, 2)
+                            } else {
+                                Button {
+                                    if companionController.activeEditingField == .minutes {
+                                        companionController.commitAndSwitchField(to: .seconds)
+                                    } else if companionController.activeEditingField != .seconds {
+                                        companionController.startEditing(.seconds)
+                                    }
+                                } label: {
+                                    Text(companionController.inputSeconds.isEmpty ? "SS" : companionController.inputSeconds)
+                                        .font(.system(size: companionController.inputSeconds.isEmpty ? 19 : 24, weight: .bold, design: .rounded))
+                                        .monospacedDigit()
+                                        .multilineTextAlignment(.center)
+                                        .foregroundColor(companionController.inputSeconds.isEmpty ? Color.white.opacity(0.30) : .white)
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.65)
+                                        .padding(.horizontal, 2)
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                }
+                                .buttonStyle(.plain)
+                                .contentShape(RoundedRectangle(cornerRadius: 8))
+                            }
+                        }
+                        .frame(width: 68, height: 38)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("Seconds, \(companionController.inputSeconds)")
+                        .accessibilityHint("Click to edit seconds")
+
+                        // +5m quick stepper (seconds-preserving)
                         Button {
-                            adjustMinutes(by: 5)
+                            companionController.adjustMinutes(by: 5)
                         } label: {
                             Image(systemName: "plus.circle.fill")
                                 .font(.system(size: 18))
-                                .foregroundColor(.orange)
+                                .foregroundColor(companionController.canAdjustPlus5 ? .orange : .gray.opacity(0.3))
                         }
                         .buttonStyle(.plain)
-                        .help("Add 5 minutes")
+                        .disabled(!companionController.canAdjustPlus5)
+                        .accessibilityLabel("Add 5 minutes")
+                        .help("Add 5 minutes (preserves seconds)")
+                    }
+
+                    // Validation Error Banner (if invalid draft)
+                    if let error = companionController.validationError {
+                        HStack(spacing: 4) {
+                            Image(systemName: "exclamationmark.circle.fill")
+                                .font(.system(size: 10))
+                                .foregroundColor(Color(red: 1.0, green: 0.40, blue: 0.40))
+                            Text(error.localizedDescription)
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .foregroundColor(Color(red: 1.0, green: 0.45, blue: 0.45))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.80)
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Color(red: 0.25, green: 0.08, blue: 0.08).opacity(0.85), in: RoundedRectangle(cornerRadius: 4))
+                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.red.opacity(0.30), lineWidth: 1))
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("Validation Error: \(error.localizedDescription)")
                     }
 
                     // Quick Chips directly inside the time input area
@@ -402,7 +518,7 @@ public struct MenuBarCompanionView: View {
                         ForEach([10, 15, 25, 30, 45, 60], id: \.self) { chipM in
                             let isCurrent = (viewModel.totalTime / 60) == chipM && (viewModel.totalTime % 60) == 0
                             Button {
-                                selectQuickDuration(minutes: chipM)
+                                companionController.selectPreset(minutes: chipM)
                             } label: {
                                 Text("\(chipM)m")
                                     .font(.system(size: 10, weight: isCurrent ? .bold : .medium))
@@ -432,48 +548,14 @@ public struct MenuBarCompanionView: View {
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.06), lineWidth: 1))
     }
 
-    private func adjustMinutes(by delta: Int) {
-        let currentM = Int(inputMinutes.filter { $0.isNumber }) ?? (viewModel.totalTime / 60)
-        let newM = min(max(currentM + delta, 1), 360)
-        inputMinutes = "\(newM)"
-        inputSeconds = "00"
-        if viewModel.isBreakPreset {
-            viewModel.switchToBreak(minutes: newM, origin: .menuBar)
-        } else {
-            viewModel.setCustomDuration(minutes: newM, seconds: 0, origin: .menuBar)
-        }
-    }
-
-    private func selectQuickDuration(minutes: Int) {
-        inputMinutes = "\(minutes)"
-        inputSeconds = "00"
-        if viewModel.isBreakPreset {
-            viewModel.switchToBreak(minutes: minutes, origin: .menuBar)
-        } else {
-            viewModel.setCustomDuration(minutes: minutes, seconds: 0, origin: .menuBar)
-        }
-    }
-
-    private func applyCustomInput() {
-        guard !isSyncingFields else { return }
-        let m = min(max(Int(inputMinutes.filter { $0.isNumber }) ?? 0, 0), 360)
-        let s = min(max(Int(inputSeconds.filter { $0.isNumber }) ?? 0, 0), 59)
-        let total = m * 60 + s
-        if total >= 5 {
-            if viewModel.isBreakPreset {
-                let name = (m >= 15) ? "Long Break" : "Short Break"
-                viewModel.requestModeOrPresetChange(name: name, minutes: m, seconds: s, mode: "Pomodoro", isBreak: true, origin: .menuBar)
-            } else {
-                viewModel.setCustomDuration(minutes: m, seconds: s, origin: .menuBar)
-            }
-        }
-    }
-
     // MARK: - 4. Timer Action Buttons
     private var timerActionButtonsRow: some View {
         HStack(spacing: 8) {
             // Start / Pause
             Button {
+                if companionController.isEditing || companionController.hasInvalidDraft {
+                    guard companionController.commitEditing() else { return }
+                }
                 viewModel.toggleTimer()
             } label: {
                 HStack(spacing: 5) {
@@ -505,7 +587,8 @@ public struct MenuBarCompanionView: View {
             // Reset
             Button {
                 viewModel.resetFocusTimer()
-                syncInputFields()
+                companionController.cancelEditing()
+                companionController.sync(from: viewModel.totalTime)
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.counterclockwise")
@@ -527,7 +610,8 @@ public struct MenuBarCompanionView: View {
             // Skip
             Button {
                 viewModel.skipSession()
-                syncInputFields()
+                companionController.cancelEditing()
+                companionController.sync(from: viewModel.totalTime)
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "forward.end.fill")
@@ -566,7 +650,7 @@ public struct MenuBarCompanionView: View {
             } else {
                 viewModel.requestPresetChange(name: name, minutes: minutes, origin: .menuBar)
             }
-            syncInputFields()
+            companionController.sync(from: viewModel.totalTime)
         } label: {
             HStack(spacing: 3) {
                 Image(systemName: icon)
@@ -606,7 +690,7 @@ public struct MenuBarCompanionView: View {
 
                 Button {
                     viewModel.continueCurrentTimer()
-                    syncInputFields()
+                    companionController.sync(from: viewModel.totalTime)
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 9, weight: .bold))
@@ -677,7 +761,7 @@ public struct MenuBarCompanionView: View {
             HStack(spacing: 8) {
                 Button {
                     viewModel.continueCurrentTimer()
-                    syncInputFields()
+                    companionController.sync(from: viewModel.totalTime)
                 } label: {
                     Text("Keep Current Session")
                         .font(.system(size: 10.5, weight: .medium))
@@ -695,7 +779,7 @@ public struct MenuBarCompanionView: View {
 
                 Button {
                     viewModel.endAndSwitch()
-                    syncInputFields()
+                    companionController.sync(from: viewModel.totalTime)
                 } label: {
                     Text("End & Switch")
                         .font(.system(size: 10.5, weight: .bold))
@@ -1164,5 +1248,179 @@ public struct MenuBarCompanionView: View {
         .padding(.vertical, 6)
         .background(Color.orange.opacity(0.25), in: RoundedRectangle(cornerRadius: 6))
         .help(viewModel.saveErrorMessage ?? "Recent changes may not have been saved due to a storage error.")
+    }
+
+    // MARK: - Idle Review Components (Menu Bar)
+    @ViewBuilder
+    private func compactIdleReviewCard(interval: IdleReviewInterval) -> some View {
+        let accentColor = Color.orange
+        let totalPending = viewModel.idleReviewCoordinator.pendingIntervals.count
+        let currentIndex = (viewModel.idleReviewCoordinator.pendingIntervals.firstIndex(where: { $0.id == interval.id }) ?? 0) + 1
+        let taskTitle = interval.taskId.flatMap { id in viewModel.tasks.first(where: { $0.id == id })?.title }
+
+        VStack(spacing: 8) {
+            // Header
+            HStack(spacing: 6) {
+                Image(systemName: "moon.fill")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(accentColor)
+
+                Text("Inactive Time Review")
+                    .font(.system(size: 11.5, weight: .bold))
+                    .foregroundColor(.white)
+
+                if totalPending > 1 {
+                    Text("\(currentIndex) of \(totalPending)")
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundColor(accentColor)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(accentColor.opacity(0.18), in: Capsule())
+                }
+
+                Spacer()
+
+                Button {
+                    viewModel.idleReviewCoordinator.dismissActiveReviewToDecideLater()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundColor(.gray)
+                        .padding(4)
+                        .background(Color.white.opacity(0.06), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Decide Later (Esc)")
+            }
+
+            // Interval summary
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(interval.sessionType == "Stopwatch" ? "Stopwatch" : "\(interval.sessionType) Session")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.white.opacity(0.70))
+
+                    if let title = taskTitle, !title.isEmpty {
+                        Text(title)
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                    }
+                }
+
+                Spacer()
+
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(interval.formattedDuration)
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .foregroundColor(accentColor)
+
+                    Text(interval.formattedTimeRange())
+                        .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.55))
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+
+            // Action Buttons
+            HStack(spacing: 6) {
+                // Decide Later
+                Button {
+                    viewModel.idleReviewCoordinator.resolve(intervalId: interval.id, decision: .decideLater)
+                } label: {
+                    Text("Later")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.white.opacity(0.75))
+                        .frame(maxWidth: .infinity, minHeight: 26)
+                        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.10), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .help("Decide Later")
+
+                // Exclude
+                Button {
+                    viewModel.idleReviewCoordinator.resolve(intervalId: interval.id, decision: .excludeFromFocus)
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "minus.circle")
+                            .font(.system(size: 9, weight: .bold))
+                        Text("Exclude")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .foregroundColor(.white.opacity(0.90))
+                    .frame(maxWidth: .infinity, minHeight: 26)
+                    .background(Color.red.opacity(0.18), in: RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.red.opacity(0.35), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .help("Exclude from focus time")
+
+                // Count as Focus
+                Button {
+                    viewModel.idleReviewCoordinator.resolve(intervalId: interval.id, decision: .countAsFocus)
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 9, weight: .bold))
+                        Text("Count")
+                            .font(.system(size: 10, weight: .bold))
+                    }
+                    .foregroundColor(Color(red: 0.02, green: 0.18, blue: 0.08))
+                    .frame(maxWidth: .infinity, minHeight: 26)
+                    .background(
+                        LinearGradient(
+                            colors: [Color(red: 0.20, green: 0.85, blue: 0.45), Color(red: 0.15, green: 0.75, blue: 0.38)],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        ),
+                        in: RoundedRectangle(cornerRadius: 6)
+                    )
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.20), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .help("Count as focused time")
+            }
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity)
+        .background(Color(red: 0.11, green: 0.12, blue: 0.16), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(accentColor.opacity(0.35), lineWidth: 1))
+    }
+
+    @ViewBuilder
+    private var pendingIdleReviewBanner: some View {
+        let count = viewModel.idleReviewCoordinator.pendingIntervals.count
+        HStack(spacing: 6) {
+            Image(systemName: "moon.fill")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.orange)
+
+            Text("\(count) Inactive Review\(count > 1 ? "s" : "")")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.white)
+
+            Spacer()
+
+            Button {
+                if let first = viewModel.idleReviewCoordinator.pendingIntervals.first {
+                    viewModel.idleReviewCoordinator.openReview(for: first)
+                }
+            } label: {
+                Text("Review")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(Color(red: 0.10, green: 0.05, blue: 0.05))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2.5)
+                    .background(Color.orange, in: RoundedRectangle(cornerRadius: 4))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.orange.opacity(0.20), in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.orange.opacity(0.30), lineWidth: 1))
     }
 }

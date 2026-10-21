@@ -145,6 +145,9 @@ public struct DigitalClockView: View {
                 }
 
                 if !minimal && !isStopwatch {
+                    let completedFraction = min(max(1.0 - viewModel.preciseProgress, 0.0), 1.0)
+                    let completedPercentage = Int(round(completedFraction * 100))
+
                     VStack(spacing: 8) {
                         GeometryReader { bar in
                             ZStack(alignment: .leading) {
@@ -155,15 +158,15 @@ public struct DigitalClockView: View {
                                         startPoint: .leading,
                                         endPoint: .trailing
                                     ))
-                                    .frame(width: bar.size.width * max(0.001, viewModel.preciseProgress))
-                                    .shadow(color: .orange.opacity(0.4), radius: 4)
-                                    .animation(.linear(duration: 0.1), value: viewModel.preciseProgress)
+                                    .frame(width: bar.size.width * max(0.001, completedFraction))
+                                    .shadow(color: (viewModel.isBreakPreset ? Color.teal : Color.orange).opacity(0.4), radius: 4)
+                                    .animation(.linear(duration: 0.1), value: completedFraction)
                             }
                         }
                         .frame(width: min(size * 1.30, 720), height: max(6, min(10, size * 0.018)))
 
                         HStack {
-                            Text("\(Int(viewModel.preciseProgress * 100))% completed")
+                            Text("\(completedPercentage)% completed")
                                 .font(.system(size: max(11, min(14, size * 0.026)), weight: .semibold))
                                 .foregroundColor(.gray)
                             Spacer()

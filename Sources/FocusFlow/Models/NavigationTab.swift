@@ -10,7 +10,16 @@ public enum NavigationTab: String, CaseIterable, Identifiable, Codable {
     case settings = "Settings"
 
     public var id: String { rawValue }
-    public var title: String { rawValue }
+    public var title: String {
+        switch self {
+        case .focusTimer: return "Focus"
+        case .stopwatch: return "Stopwatch"
+        case .tasks: return "Tasks"
+        case .soundscapes: return "Sounds"
+        case .insights: return "Insights"
+        case .settings: return "Settings"
+        }
+    }
 
     public var icon: String {
         switch self {
@@ -21,6 +30,14 @@ public enum NavigationTab: String, CaseIterable, Identifiable, Codable {
         case .insights: return "chart.bar"
         case .settings: return "gearshape"
         }
+    }
+
+    public var isWorkspaceTab: Bool {
+        self != .settings
+    }
+
+    public static var workspaceTabs: [NavigationTab] {
+        [.focusTimer, .stopwatch, .tasks, .soundscapes, .insights]
     }
 }
 

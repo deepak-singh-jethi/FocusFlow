@@ -3,9 +3,11 @@ import SwiftUI
 // MARK: - Insights & Stats View (Date-Aware Analytics)
 public struct InsightsView: View {
     @ObservedObject public var viewModel: TimerViewModel
+    public var topPadding: CGFloat
 
-    public init(viewModel: TimerViewModel) {
+    public init(viewModel: TimerViewModel, topPadding: CGFloat = WindowLayoutMetrics.standardTopClearance) {
         self.viewModel = viewModel
+        self.topPadding = topPadding
     }
 
     private var completedTasks: Int { viewModel.tasks.filter(\.isCompleted).count }
@@ -36,7 +38,7 @@ public struct InsightsView: View {
                         .font(.system(size: 13))
                         .foregroundColor(.gray)
                 }
-                .padding(.top, 30)
+                .padding(.top, topPadding)
 
                 // Date-Aware Analytics Metric Cards
                 HStack(spacing: 12) {

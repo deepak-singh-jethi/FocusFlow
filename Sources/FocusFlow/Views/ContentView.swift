@@ -4,18 +4,47 @@ import SwiftUI
 public struct ContentView: View {
     @ObservedObject public var viewModel: TimerViewModel
     @ObservedObject public var audioPlayer: AmbientAudioPlayer
-    @State private var sidebarSelection: NavigationTab = .focusTimer
+    @State private var sidebarSelection: NavigationTab
+    @AppStorage("isSidebarCollapsed") private var isSidebarCollapsed: Bool = false
     @State private var isFocusState = false
     @State private var showingWorkspace = false
     @AppStorage("clockStyle") private var clockStyle = "Digital"
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isFullScreen: Bool
+    @State private var isTitlebarRevealed: Bool = true
 
     let bgMain = Color(red: 0.08, green: 0.09, blue: 0.13)
     let bgSidebar = Color(red: 0.11, green: 0.12, blue: 0.16)
     let accentGradient = LinearGradient(colors: [Color.orange, Color.pink], startPoint: .topLeading, endPoint: .bottomTrailing)
 
-    public init(viewModel: TimerViewModel? = nil, audioPlayer: AmbientAudioPlayer? = nil) {
+    public init(
+        viewModel: TimerViewModel? = nil,
+        audioPlayer: AmbientAudioPlayer? = nil,
+        initialTab: NavigationTab = .focusTimer,
+        isFullScreen: Bool = false,
+        isTitlebarRevealed: Bool = true
+    ) {
         self.viewModel = viewModel ?? TimerViewModel()
         self.audioPlayer = audioPlayer ?? AmbientAudioPlayer()
+        self._sidebarSelection = State(initialValue: initialTab)
+        self._isFullScreen = State(initialValue: isFullScreen)
+        self._isTitlebarRevealed = State(initialValue: isTitlebarRevealed)
+    }
+
+    private var hasBanner: Bool {
+        viewModel.isPersistenceBlocked || viewModel.isSaveFailed || (viewModel.didRecoverFromBackup && viewModel.showRecoveryNotice)
+    }
+
+    private var topClearance: CGFloat {
+        WindowLayoutMetrics.topClearance(isFullScreen: isFullScreen, isTitlebarRevealed: isTitlebarRevealed)
+    }
+
+    private var bannerTopPadding: CGFloat {
+        (isFullScreen && !isTitlebarRevealed) ? 8 : (WindowLayoutMetrics.titlebarChromeHeight + 4)
+    }
+
+    private var contentTopPadding: CGFloat {
+        hasBanner ? WindowLayoutMetrics.postBannerSpacing : topClearance
     }
 
     public var body: some View {
@@ -41,6 +70,7 @@ public struct ContentView: View {
                                 isFocusState: $isFocusState,
                                 showingWorkspace: $showingWorkspace,
                                 isStopwatchMode: false,
+                                topPadding: contentTopPadding,
                                 onSwitchToStopwatch: {
                                     withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
                                         sidebarSelection = .stopwatch
@@ -59,6 +89,7 @@ public struct ContentView: View {
                                 isFocusState: $isFocusState,
                                 showingWorkspace: $showingWorkspace,
                                 isStopwatchMode: true,
+                                topPadding: contentTopPadding,
                                 onSwitchToTimer: {
                                     withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
                                         sidebarSelection = .focusTimer
@@ -70,9 +101,13 @@ public struct ContentView: View {
                                 removal: .opacity
                             ))
                         } else {
+                            let hasFocusMiniBar = viewModel.isTimerRunning || viewModel.timeRemaining < viewModel.totalTime || viewModel.hasPreservedSession
+                            let hasStopwatchMiniBar = viewModel.isStopwatchRunning || viewModel.stopwatchTime > 0
+                            let hasAnyMiniBar = hasFocusMiniBar || hasStopwatchMiniBar
+
                             VStack(spacing: 0) {
                                 // Persistent Mini Bar if Focus Timer is running or active
-                                if viewModel.isTimerRunning || viewModel.timeRemaining < viewModel.totalTime || viewModel.hasPreservedSession {
+                                if hasFocusMiniBar {
                                     PersistentCrossModeMiniBar(viewModel: viewModel, type: .focusTimer) {
                                         withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
                                             viewModel.restorePreservedSessionIfNeeded()
@@ -80,25 +115,25 @@ public struct ContentView: View {
                                         }
                                     }
                                     .padding(.horizontal, 24)
-                                    .padding(.top, 14)
+                                    .padding(.top, contentTopPadding)
                                     .padding(.bottom, 6)
                                     .transition(.move(edge: .top).combined(with: .opacity))
                                 }
 
                                 // Persistent Mini Bar if Stopwatch is running or has elapsed time
-                                if viewModel.isStopwatchRunning || viewModel.stopwatchTime > 0 {
+                                if hasStopwatchMiniBar {
                                     PersistentCrossModeMiniBar(viewModel: viewModel, type: .stopwatch) {
                                         withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
                                             sidebarSelection = .stopwatch
                                         }
                                     }
                                     .padding(.horizontal, 24)
-                                    .padding(.top, (viewModel.isTimerRunning || viewModel.timeRemaining < viewModel.totalTime || viewModel.hasPreservedSession) ? 4 : 14)
+                                    .padding(.top, hasFocusMiniBar ? 4 : contentTopPadding)
                                     .padding(.bottom, 6)
                                     .transition(.move(edge: .top).combined(with: .opacity))
                                 }
 
-                                selectedPage
+                                selectedPageView(topPadding: hasAnyMiniBar ? WindowLayoutMetrics.postMiniBarSpacing : contentTopPadding)
                                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                             }
                             .transition(.asymmetric(
@@ -113,6 +148,10 @@ public struct ContentView: View {
                 }
             }
             .animation(.spring(response: 0.38, dampingFraction: 0.82), value: sidebarSelection)
+            .animation(
+                reduceMotion ? .linear(duration: 0.05) : .spring(response: 0.32, dampingFraction: 0.85),
+                value: isSidebarCollapsed
+            )
 
             if isFocusState {
                 FocusStateView(viewModel: viewModel, clockStyle: $clockStyle, isPresented: $isFocusState, isStopwatch: sidebarSelection == .stopwatch)
@@ -122,30 +161,109 @@ public struct ContentView: View {
                     ))
                     .zIndex(100)
             }
+
+            if let activeInterval = viewModel.idleReviewCoordinator.activeReviewInterval {
+                let taskTitle: String? = {
+                    if let taskId = activeInterval.taskId, let found = viewModel.tasks.first(where: { $0.id == taskId }) {
+                        return found.title
+                    }
+                    return nil
+                }()
+                IdleReviewModalView(coordinator: viewModel.idleReviewCoordinator, interval: activeInterval, taskTitle: taskTitle)
+                    .transition(.asymmetric(
+                        insertion: .scale(scale: 0.96).combined(with: .opacity),
+                        removal: .scale(scale: 0.96).combined(with: .opacity)
+                    ))
+                    .zIndex(110)
+            }
         }
         .animation(.spring(response: 0.40, dampingFraction: 0.80), value: isFocusState)
+        .animation(.spring(response: 0.35, dampingFraction: 0.82), value: viewModel.idleReviewCoordinator.activeReviewInterval != nil)
         .background(bgMain)
-        .ignoresSafeArea(.container, edges: .top)
         .sheet(isPresented: $showingWorkspace) {
             RightPanelView(viewModel: viewModel, showLaps: sidebarSelection == .stopwatch)
                 .frame(minWidth: 390, idealWidth: 430, minHeight: 520)
                 .background(bgMain)
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { notification in
+            guard isFocusFlowMainWindow(notification.object) else { return }
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                isFullScreen = true
+                updateTitlebarPresentation(for: notification.object as? NSWindow)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { notification in
+            guard isFocusFlowMainWindow(notification.object) else { return }
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                isFullScreen = false
+                isTitlebarRevealed = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResizeNotification)) { notification in
+            guard isFocusFlowMainWindow(notification.object) else { return }
+            if let window = notification.object as? NSWindow {
+                updateTitlebarPresentation(for: window)
+            }
+        }
+        .onAppear {
+            guard let app = NSApp else { return }
+            let window = FocusFlowAppDelegate.shared?.mainWindow ?? app.keyWindow ?? app.mainWindow
+            if let window = window {
+                isFullScreen = window.styleMask.contains(.fullScreen)
+                updateTitlebarPresentation(for: window)
+            }
+        }
+    }
+
+    private func isFocusFlowMainWindow(_ object: Any?) -> Bool {
+        guard let window = object as? NSWindow else { return false }
+        if let main = FocusFlowAppDelegate.shared?.mainWindow {
+            return window === main
+        }
+        if let app = NSApp {
+            if let main = app.mainWindow { return window === main }
+            if let key = app.keyWindow { return window === key }
+        }
+        return true
+    }
+
+    private func updateTitlebarPresentation(for window: NSWindow?) {
+        guard let window = window else { return }
+        if window.styleMask.contains(.fullScreen) {
+            let frameH = window.frame.height
+            let contentH = window.contentLayoutRect.height
+            let chromeH = max(0, frameH - contentH)
+            if chromeH >= 24.0 {
+                isTitlebarRevealed = true
+            } else if let btn = window.standardWindowButton(.closeButton), !btn.isHidden, btn.alphaValue > 0.1, btn.window != nil {
+                isTitlebarRevealed = true
+            } else {
+                isTitlebarRevealed = false
+            }
+        } else {
+            isTitlebarRevealed = true
+        }
     }
 
     private var sidebar: some View {
-        SidebarView(gradient: accentGradient, selection: $sidebarSelection, viewModel: viewModel)
-            .frame(width: 252)
-            .background(bgSidebar)
+        SidebarView(
+            gradient: accentGradient,
+            selection: $sidebarSelection,
+            isCollapsed: $isSidebarCollapsed,
+            viewModel: viewModel,
+            topPadding: topClearance
+        )
+        .frame(width: isSidebarCollapsed ? SidebarTokens.collapsedWidth : SidebarTokens.sidebarWidth)
+        .background(SidebarTokens.sidebarBackground)
     }
 
     @ViewBuilder
-    private var selectedPage: some View {
+    private func selectedPageView(topPadding: CGFloat) -> some View {
         switch sidebarSelection {
-        case .tasks: TasksView(viewModel: viewModel)
-        case .soundscapes: SoundscapesView(audioPlayer: audioPlayer)
-        case .insights: InsightsView(viewModel: viewModel)
-        default: SettingsView(viewModel: viewModel)
+        case .tasks: TasksView(viewModel: viewModel, topPadding: topPadding)
+        case .soundscapes: SoundscapesView(audioPlayer: audioPlayer, topPadding: topPadding)
+        case .insights: InsightsView(viewModel: viewModel, topPadding: topPadding)
+        default: SettingsView(viewModel: viewModel, topPadding: topPadding)
         }
     }
 
@@ -166,7 +284,8 @@ public struct ContentView: View {
             Spacer()
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.top, bannerTopPadding)
+        .padding(.bottom, 10)
         .background(Color.red.opacity(0.28))
         .overlay(
             Rectangle()
@@ -204,7 +323,8 @@ public struct ContentView: View {
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.top, bannerTopPadding)
+        .padding(.bottom, 10)
         .background(Color.green.opacity(0.22))
         .overlay(
             Rectangle()
@@ -243,7 +363,8 @@ public struct ContentView: View {
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.top, bannerTopPadding)
+        .padding(.bottom, 10)
         .background(Color.orange.opacity(0.25))
         .overlay(
             Rectangle()

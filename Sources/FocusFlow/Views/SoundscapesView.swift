@@ -4,14 +4,16 @@ import AppKit
 // MARK: - Soundscapes View
 public struct SoundscapesView: View {
     @ObservedObject public var audioPlayer: AmbientAudioPlayer
+    public var topPadding: CGFloat
     private let sounds: [(String, String, String)] = [
         ("Rain", "cloud.rain.fill", "Steady rainfall with gentle drops"),
         ("Ocean", "water.waves", "Slow surf and rolling swells"),
         ("Forest", "leaf.fill", "Breeze and distant birdsong")
     ]
 
-    public init(audioPlayer: AmbientAudioPlayer) {
+    public init(audioPlayer: AmbientAudioPlayer, topPadding: CGFloat = WindowLayoutMetrics.standardTopClearance) {
         self.audioPlayer = audioPlayer
+        self.topPadding = topPadding
     }
 
     public var body: some View {
@@ -25,7 +27,7 @@ public struct SoundscapesView: View {
                         .font(.system(size: 13))
                         .foregroundColor(.gray)
                 }
-                .padding(.top, 30)
+                .padding(.top, topPadding)
 
                 HStack(spacing: 12) {
                     ForEach(sounds, id: \.0) { sound, icon, detail in

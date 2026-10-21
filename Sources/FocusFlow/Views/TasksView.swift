@@ -4,13 +4,15 @@ import AppKit
 // MARK: - Tasks View (Generalized Task Manager)
 public struct TasksView: View {
     @ObservedObject public var viewModel: TimerViewModel
+    public var topPadding: CGFloat
     @State private var showingAddTask = false
     @State private var newTaskTitle = ""
     @State private var expectedMinutes = 25
     @State private var isAddHovered = false
 
-    public init(viewModel: TimerViewModel) {
+    public init(viewModel: TimerViewModel, topPadding: CGFloat = WindowLayoutMetrics.standardTopClearance) {
         self.viewModel = viewModel
+        self.topPadding = topPadding
     }
 
     private var totalSpentLabel: String {
@@ -59,7 +61,7 @@ public struct TasksView: View {
                         if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
                     }
                 }
-                .padding(.top, 30)
+                .padding(.top, topPadding)
 
                 // Metric Summary Cards
                 HStack(spacing: 12) {

@@ -3,358 +3,590 @@ import AppKit
 
 // MARK: - In-Place Interactive Time Input View
 /// Allows the user to directly click and edit minutes/seconds right inside the time display area,
-/// and provides 1-click shortcut chips ("click put time") for effortless duration selection.
+/// and provides 1-click shortcut chips for effortless duration selection.
+/// Built on a deterministic Draft -> Validate -> Commit transaction model with zero layout shift.
 public struct InPlaceTimeInputView: View {
     @ObservedObject public var viewModel: TimerViewModel
     public var size: CGFloat
     public var accentColor: Color = .orange
     public var isCompact: Bool = false
 
-    @State private var inputMinutes: String = "25"
-    @State private var inputSeconds: String = "00"
-    @FocusState private var focusedField: TimeInputField?
-    @State private var isMinutesHovered: Bool = false
-    @State private var isSecondsHovered: Bool = false
-    @State private var isSyncingProgrammatically: Bool = false
-
-    private enum TimeInputField: Hashable {
-        case minutes
-        case seconds
+    // MARK: - Model Type Compatibility Wrapper
+    public class Model: TimeInputController {
+        public override init(totalTime: Int = 25 * 60) {
+            super.init(totalTime: totalTime)
+        }
     }
 
-    public init(viewModel: TimerViewModel, size: CGFloat, accentColor: Color = .orange, isCompact: Bool = false) {
+    public typealias TimeInputField = FocusFlow.TimeInputField
+
+    @ObservedObject public var model: TimeInputController
+    @State private var isMinutesHovered: Bool = false
+    @State private var isSecondsHovered: Bool = false
+    @State private var isMinusHovered: Bool = false
+    @State private var isPlusHovered: Bool = false
+    @State private var isPlus15Hovered: Bool = false
+
+    public init(
+        viewModel: TimerViewModel,
+        size: CGFloat,
+        accentColor: Color = .orange,
+        isCompact: Bool = false,
+        model: TimeInputController? = nil
+    ) {
         self.viewModel = viewModel
         self.size = size
         self.accentColor = accentColor
         self.isCompact = isCompact
+        // Stable ownership: default to viewModel's persistent controller to survive view reconstruction
+        self.model = model ?? viewModel.customTimeInputController
+    }
+
+    public var activeEditingField: TimeInputField? {
+        get { model.activeEditingField }
+        nonmutating set { model.activeEditingField = newValue }
+    }
+    public var inputMinutes: String {
+        get { model.inputMinutes }
+        nonmutating set { model.inputMinutes = newValue }
+    }
+    public var inputSeconds: String {
+        get { model.inputSeconds }
+        nonmutating set { model.inputSeconds = newValue }
     }
 
     private var activeColor: Color {
         viewModel.isBreakPreset ? .teal : accentColor
     }
 
+    private func cardStrokeColor(for field: TimeInputField, isHovered: Bool) -> Color {
+        if model.hasInvalidDraft {
+            if model.validationErrorField == nil || model.validationErrorField == field {
+                return Color(red: 1.0, green: 0.35, blue: 0.35)
+            }
+            return Color.white.opacity(isHovered ? 0.20 : 0.08)
+        }
+        if model.activeEditingField == field {
+            return activeColor
+        }
+        return isHovered ? Color.white.opacity(0.24) : Color.white.opacity(0.09)
+    }
+
+    private func cardShadowColor(for field: TimeInputField) -> Color {
+        if model.hasInvalidDraft {
+            if model.validationErrorField == nil || model.validationErrorField == field {
+                return Color.red.opacity(0.35)
+            }
+            return .clear
+        }
+        return model.activeEditingField == field ? activeColor.opacity(0.35) : .clear
+    }
+
+    public struct ShortcutEntry: Identifiable, Equatable {
+        public let id: String
+        public let title: String
+        public let minutes: Int
+        public let isCurrent: Bool
+        public let isCustom: Bool
+
+        public init(id: String, title: String, minutes: Int, isCurrent: Bool, isCustom: Bool) {
+            self.id = id
+            self.title = title
+            self.minutes = minutes
+            self.isCurrent = isCurrent
+            self.isCustom = isCustom
+        }
+    }
+
+    public var shortcutEntries: [ShortcutEntry] {
+        let currentTotal = viewModel.totalTime
+        let currentM = currentTotal / 60
+        let currentS = currentTotal % 60
+        let isWholeMinutes = (currentS == 0)
+
+        let baseMinutes: [Int] = viewModel.isBreakPreset
+            ? [3, 5, 10, 15, 20, 30]
+            : [5, 10, 15, 20, 25, 30, 45, 60, 90]
+
+        var entries: [ShortcutEntry] = []
+
+        if isWholeMinutes {
+            let effectiveMinutes: [Int]
+            if currentM > 0 && !baseMinutes.contains(currentM) {
+                effectiveMinutes = (baseMinutes + [currentM]).sorted()
+            } else {
+                effectiveMinutes = baseMinutes
+            }
+
+            for m in effectiveMinutes {
+                let isCurr = (m == currentM)
+                let isCust = (m == currentM && !baseMinutes.contains(m))
+                entries.append(ShortcutEntry(
+                    id: "\(m)m",
+                    title: "\(m)m",
+                    minutes: m,
+                    isCurrent: isCurr,
+                    isCustom: isCust
+                ))
+            }
+        } else {
+            for m in baseMinutes {
+                entries.append(ShortcutEntry(
+                    id: "\(m)m",
+                    title: "\(m)m",
+                    minutes: m,
+                    isCurrent: false,
+                    isCustom: false
+                ))
+            }
+            let title = String(format: "%d:%02d", currentM, currentS)
+            entries.append(ShortcutEntry(
+                id: "custom-\(currentTotal)",
+                title: title,
+                minutes: currentM,
+                isCurrent: true,
+                isCustom: true
+            ))
+        }
+
+        return entries
+    }
+
     public var body: some View {
         let isStageCompact = isCompact || size < 340
-        let digitFontSize = max(38, min(size * 0.20, 84))
-        let colonFontSize = max(32, min(size * 0.17, 72))
-        let minutesBoxWidth = max(86, min(size * 0.29, 142))
-        let secondsBoxWidth = max(78, min(size * 0.26, 126))
-        let boxHeight = max(52, min(size * 0.17, 78))
-        let stepperSize = max(28, min(size * 0.08, 38))
-        let stepperIconSize = max(15, min(size * 0.045, 22))
+        // Desktop idle digits: prominent ~72-92pt with responsive scaling
+        let digitFontSize: CGFloat = isStageCompact ? max(48, min(size * 0.17, 64)) : max(72, min(size * 0.21, 92))
+        let colonFontSize: CGFloat = isStageCompact ? max(38, min(size * 0.13, 50)) : max(60, min(size * 0.175, 76))
+        // Box widths: minutes fits up to 360 with generous margins; seconds fits 59 comfortably
+        let minutesBoxWidth: CGFloat = isStageCompact ? max(120, min(size * 0.40, 150)) : max(176, min(size * 0.46, 196))
+        let secondsBoxWidth: CGFloat = isStageCompact ? max(96, min(size * 0.30, 120)) : max(136, min(size * 0.35, 154))
+        let boxHeight: CGFloat = isStageCompact ? max(72, min(size * 0.22, 84)) : max(96, min(size * 0.25, 110))
+        let stepperSize: CGFloat = isStageCompact ? 36 : 42
+        let stepperIconSize: CGFloat = isStageCompact ? 20 : 24
 
         VStack(spacing: max(10, size * 0.026)) {
-            // MARK: - 1. Interactive Digits Row
-            HStack(alignment: .center, spacing: max(6, size * 0.022)) {
-                // -5m Quick Stepper
-                Button {
-                    adjustMinutes(by: -5)
-                } label: {
-                    Image(systemName: "minus.circle.fill")
-                        .font(.system(size: stepperIconSize, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.70))
-                        .frame(width: stepperSize, height: stepperSize)
-                        .background(Color.white.opacity(0.06), in: Circle())
-                        .overlay(Circle().stroke(Color.white.opacity(0.12), lineWidth: 1))
-                }
-                .buttonStyle(.plain)
-                .help("Subtract 5 minutes")
+            // MARK: - 1. Time Display & Quick Steppers (Optically & Vertically Centered)
+            VStack(spacing: max(8, size * 0.020)) {
+                HStack(alignment: .center, spacing: max(8, size * 0.022)) {
+                    // -5m Quick Stepper (Seconds-Preserving, with boundary disable)
+                    Button {
+                        model.adjustMinutes(by: -5)
+                    } label: {
+                        Image(systemName: "minus.circle.fill")
+                            .font(.system(size: stepperIconSize, weight: .semibold))
+                            .foregroundColor(model.canAdjustMinus5 ? activeColor.opacity(0.90) : Color.white.opacity(0.20))
+                            .frame(width: stepperSize, height: stepperSize)
+                            .background(Color.white.opacity(isMinusHovered && model.canAdjustMinus5 ? 0.10 : 0.05), in: Circle())
+                            .overlay(Circle().stroke(model.canAdjustMinus5 ? activeColor.opacity(0.35) : Color.white.opacity(0.08), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!model.canAdjustMinus5)
+                    .onHover { h in isMinusHovered = h }
+                    .accessibilityLabel("Subtract 5 minutes")
+                    .help("Subtract 5 minutes (preserves seconds)")
 
-                // Minutes Input Card
-                VStack(spacing: 3) {
-                    TextField("25", text: $inputMinutes)
-                        .font(.system(size: digitFontSize, weight: .bold, design: .rounded))
-                        .monospacedDigit()
-                        .multilineTextAlignment(.center)
-                        .textFieldStyle(.plain)
-                        .foregroundColor(.white)
-                        .focused($focusedField, equals: .minutes)
-                        .frame(width: minutesBoxWidth, height: boxHeight)
-                        .background(
-                            Color.white.opacity(focusedField == .minutes ? 0.08 : (isMinutesHovered ? 0.06 : 0.035)),
-                            in: RoundedRectangle(cornerRadius: 14)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14)
-                                .stroke(
-                                    focusedField == .minutes
-                                        ? activeColor
-                                        : (isMinutesHovered ? Color.white.opacity(0.25) : Color.white.opacity(0.09)),
-                                    lineWidth: focusedField == .minutes ? 2 : 1
-                                )
-                        )
-                        .shadow(color: focusedField == .minutes ? activeColor.opacity(0.35) : .clear, radius: 10)
-                        .onHover { h in isMinutesHovered = h }
-                        .onSubmit {
-                            applyCustomInput()
-                            focusedField = .seconds
+                    // Minutes Input Card
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 18)
+                            .fill(Color.white.opacity(model.activeEditingField == .minutes ? 0.09 : (isMinutesHovered ? 0.06 : 0.035)))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 18)
+                                    .stroke(
+                                        cardStrokeColor(for: .minutes, isHovered: isMinutesHovered),
+                                        lineWidth: (model.activeEditingField == .minutes || (model.hasInvalidDraft && (model.validationErrorField == .minutes || model.validationErrorField == nil))) ? 2 : 1
+                                    )
+                            )
+                            .shadow(color: cardShadowColor(for: .minutes), radius: 10)
+
+                        if model.activeEditingField == .minutes {
+                            TimeDigitField(
+                                text: $model.inputMinutes,
+                                placeholder: "MM",
+                                fontSize: digitFontSize,
+                                maxLength: 3,
+                                onTab: {
+                                    model.commitAndSwitchField(to: .seconds)
+                                },
+                                onBacktab: {
+                                    model.commitEditing()
+                                },
+                                onReturn: {
+                                    model.commitEditing()
+                                },
+                                onEscape: {
+                                    model.cancelEditing()
+                                },
+                                onFocusLost: {
+                                    DispatchQueue.main.async {
+                                        if model.activeEditingField == .minutes {
+                                            model.commitEditing()
+                                        }
+                                    }
+                                }
+                            )
+                            .padding(.horizontal, 4)
+                        } else {
+                            Button {
+                                if model.activeEditingField == .seconds {
+                                    model.commitAndSwitchField(to: .minutes)
+                                } else if model.activeEditingField != .minutes {
+                                    model.startEditing(.minutes)
+                                }
+                            } label: {
+                                Text(model.inputMinutes.isEmpty ? "MM" : model.inputMinutes)
+                                    .font(.system(size: model.inputMinutes.isEmpty ? max(14, digitFontSize * 0.78) : digitFontSize, weight: .bold, design: .rounded))
+                                    .monospacedDigit()
+                                    .multilineTextAlignment(.center)
+                                    .foregroundColor(model.inputMinutes.isEmpty ? Color.white.opacity(0.30) : .white)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.70)
+                                    .padding(.horizontal, 4)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            }
+                            .buttonStyle(.plain)
+                            .contentShape(RoundedRectangle(cornerRadius: 18))
                         }
-                        .onChange(of: inputMinutes) { _, newVal in
-                            handleMinutesChange(newVal)
+                    }
+                    .frame(width: minutesBoxWidth, height: boxHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: 18))
+                    .onHover { h in isMinutesHovered = h }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Minutes, \(model.inputMinutes.isEmpty ? "empty" : model.inputMinutes)")
+                    .accessibilityHint("Click to edit minutes")
+
+                    // Colon Separator
+                    Text(":")
+                        .font(.system(size: colonFontSize, weight: .bold, design: .rounded))
+                        .foregroundColor(.white.opacity(0.65))
+                        .frame(width: max(16, colonFontSize * 0.35))
+
+                    // Seconds Input Card
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 18)
+                            .fill(Color.white.opacity(model.activeEditingField == .seconds ? 0.09 : (isSecondsHovered ? 0.06 : 0.035)))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 18)
+                                    .stroke(
+                                        cardStrokeColor(for: .seconds, isHovered: isSecondsHovered),
+                                        lineWidth: (model.activeEditingField == .seconds || (model.hasInvalidDraft && (model.validationErrorField == .seconds || model.validationErrorField == nil))) ? 2 : 1
+                                    )
+                            )
+                            .shadow(color: cardShadowColor(for: .seconds), radius: 10)
+
+                        if model.activeEditingField == .seconds {
+                            TimeDigitField(
+                                text: $model.inputSeconds,
+                                placeholder: "SS",
+                                fontSize: digitFontSize,
+                                maxLength: 2,
+                                onTab: {
+                                    model.commitEditing()
+                                },
+                                onBacktab: {
+                                    model.commitAndSwitchField(to: .minutes)
+                                },
+                                onReturn: {
+                                    model.commitEditing()
+                                },
+                                onEscape: {
+                                    model.cancelEditing()
+                                },
+                                onFocusLost: {
+                                    DispatchQueue.main.async {
+                                        if model.activeEditingField == .seconds {
+                                            model.commitEditing()
+                                        }
+                                    }
+                                }
+                            )
+                            .padding(.horizontal, 4)
+                        } else {
+                            Button {
+                                if model.activeEditingField == .minutes {
+                                    model.commitAndSwitchField(to: .seconds)
+                                } else if model.activeEditingField != .seconds {
+                                    model.startEditing(.seconds)
+                                }
+                            } label: {
+                                Text(model.inputSeconds.isEmpty ? "SS" : model.inputSeconds)
+                                    .font(.system(size: model.inputSeconds.isEmpty ? max(14, digitFontSize * 0.78) : digitFontSize, weight: .bold, design: .rounded))
+                                    .monospacedDigit()
+                                    .multilineTextAlignment(.center)
+                                    .foregroundColor(model.inputSeconds.isEmpty ? Color.white.opacity(0.30) : .white)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.70)
+                                    .padding(.horizontal, 4)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            }
+                            .buttonStyle(.plain)
+                            .contentShape(RoundedRectangle(cornerRadius: 18))
                         }
+                    }
+                    .frame(width: secondsBoxWidth, height: boxHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: 18))
+                    .onHover { h in isSecondsHovered = h }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Seconds, \(model.inputSeconds.isEmpty ? "empty" : model.inputSeconds)")
+                    .accessibilityHint("Click to edit seconds")
+
+                    // +5m Quick Stepper (Seconds-Preserving, with boundary disable)
+                    Button {
+                        model.adjustMinutes(by: 5)
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: stepperIconSize, weight: .semibold))
+                            .foregroundColor(model.canAdjustPlus5 ? activeColor.opacity(0.90) : Color.white.opacity(0.20))
+                            .frame(width: stepperSize, height: stepperSize)
+                            .background(Color.white.opacity(isPlusHovered && model.canAdjustPlus5 ? 0.10 : 0.05), in: Circle())
+                            .overlay(Circle().stroke(model.canAdjustPlus5 ? activeColor.opacity(0.35) : Color.white.opacity(0.08), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!model.canAdjustPlus5)
+                    .onHover { h in isPlusHovered = h }
+                    .accessibilityLabel("Add 5 minutes")
+                    .help("Add 5 minutes (preserves seconds)")
+                }
+
+                // Sublabels Row (Symmetrically aligned directly beneath the cards)
+                HStack(spacing: max(8, size * 0.022)) {
+                    Color.clear.frame(width: stepperSize, height: 12)
 
                     Text("MINUTES")
-                        .font(.system(size: max(8, min(size * 0.024, 10)), weight: .bold))
+                        .font(.system(size: max(9, min(size * 0.024, 11)), weight: .bold))
                         .tracking(1.4)
-                        .foregroundColor(focusedField == .minutes ? activeColor : .gray.opacity(0.7))
-                }
+                        .foregroundColor(model.activeEditingField == .minutes ? activeColor : .gray.opacity(0.7))
+                        .frame(width: minutesBoxWidth)
 
-                // Colon Separator
-                Text(":")
-                    .font(.system(size: colonFontSize, weight: .bold, design: .rounded))
-                    .foregroundColor(.white.opacity(0.65))
-                    .offset(y: -6)
-
-                // Seconds Input Card
-                VStack(spacing: 3) {
-                    TextField("00", text: $inputSeconds)
-                        .font(.system(size: digitFontSize, weight: .bold, design: .rounded))
-                        .monospacedDigit()
-                        .multilineTextAlignment(.center)
-                        .textFieldStyle(.plain)
-                        .foregroundColor(.white)
-                        .focused($focusedField, equals: .seconds)
-                        .frame(width: secondsBoxWidth, height: boxHeight)
-                        .background(
-                            Color.white.opacity(focusedField == .seconds ? 0.08 : (isSecondsHovered ? 0.06 : 0.035)),
-                            in: RoundedRectangle(cornerRadius: 14)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14)
-                                .stroke(
-                                    focusedField == .seconds
-                                        ? activeColor
-                                        : (isSecondsHovered ? Color.white.opacity(0.25) : Color.white.opacity(0.09)),
-                                    lineWidth: focusedField == .seconds ? 2 : 1
-                                )
-                        )
-                        .shadow(color: focusedField == .seconds ? activeColor.opacity(0.35) : .clear, radius: 10)
-                        .onHover { h in isSecondsHovered = h }
-                        .onSubmit {
-                            applyCustomInput()
-                            focusedField = nil
-                        }
-                        .onChange(of: inputSeconds) { _, newVal in
-                            handleSecondsChange(newVal)
-                        }
+                    Text(":")
+                        .font(.system(size: colonFontSize, weight: .bold, design: .rounded))
+                        .opacity(0)
+                        .frame(width: max(16, colonFontSize * 0.35), height: 12)
 
                     Text("SECONDS")
-                        .font(.system(size: max(8, min(size * 0.024, 10)), weight: .bold))
+                        .font(.system(size: max(9, min(size * 0.024, 11)), weight: .bold))
                         .tracking(1.4)
-                        .foregroundColor(focusedField == .seconds ? activeColor : .gray.opacity(0.7))
-                }
+                        .foregroundColor(model.activeEditingField == .seconds ? activeColor : .gray.opacity(0.7))
+                        .frame(width: secondsBoxWidth)
 
-                // +5m Quick Stepper
-                Button {
-                    adjustMinutes(by: 5)
-                } label: {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.system(size: stepperIconSize, weight: .semibold))
-                        .foregroundColor(activeColor)
-                        .frame(width: stepperSize, height: stepperSize)
-                        .background(Color.white.opacity(0.06), in: Circle())
-                        .overlay(Circle().stroke(activeColor.opacity(0.30), lineWidth: 1))
+                    Color.clear.frame(width: stepperSize, height: 12)
                 }
-                .buttonStyle(.plain)
-                .help("Add 5 minutes")
             }
 
             // MARK: - 2. Shortcut Inputs Bar ("Click Put Time")
-            let shortcutDurations: [Int] = viewModel.isBreakPreset
-                ? (isStageCompact ? [3, 5, 10, 15, 20] : [3, 5, 10, 15, 20, 30])
-                : (isStageCompact ? [5, 10, 15, 25, 30, 45, 60] : [5, 10, 15, 20, 25, 30, 45, 60, 90])
+            let isWholeMinutes = (viewModel.totalTime % 60) == 0
 
             VStack(spacing: 8) {
-                HStack(spacing: isStageCompact ? 5 : 8) {
-                    ForEach(shortcutDurations, id: \.self) { chipM in
-                        let isCurrent = (viewModel.totalTime / 60) == chipM && (viewModel.totalTime % 60) == 0
-
-                        ShortcutChipButton(
-                            minutes: chipM,
-                            isCurrent: isCurrent,
-                            accentColor: activeColor,
-                            isStageCompact: isStageCompact,
-                            size: size
-                        ) {
-                            withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
-                                selectPreset(minutes: chipM)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: isStageCompact ? 5 : 8) {
+                        ForEach(shortcutEntries) { entry in
+                            ShortcutChipButton(
+                                title: entry.title,
+                                isCurrent: entry.isCurrent,
+                                accentColor: activeColor,
+                                isStageCompact: isStageCompact,
+                                size: size,
+                                isCustom: entry.isCustom
+                            ) {
+                                withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                                    if entry.isCustom && !isWholeMinutes {
+                                        model.startEditing(.minutes)
+                                    } else {
+                                        model.selectPreset(minutes: entry.minutes)
+                                    }
+                                }
                             }
                         }
-                    }
 
-                    // +15m Quick Boost
-                    Button {
-                        adjustMinutes(by: 15)
-                    } label: {
-                        Text("+15m")
-                            .font(.system(size: max(10, min(size * 0.026, 12)), weight: .semibold))
-                            .foregroundColor(activeColor.opacity(0.95))
-                            .padding(.horizontal, isStageCompact ? 6 : 10)
-                            .frame(height: max(26, min(size * 0.066, 32)))
-                            .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(activeColor.opacity(0.30), lineWidth: 1))
+                        // +15m Quick Boost (Seconds-Preserving, with dedicated '+' icon)
+                        let canPlus15 = model.canAdjustPlus15
+                        Button {
+                            model.adjustMinutes(by: 15)
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "plus")
+                                    .font(.system(size: max(9, min(size * 0.024, 11)), weight: .bold))
+                                Text("15m")
+                                    .font(.system(size: max(10, min(size * 0.026, 12)), weight: .semibold))
+                            }
+                            .foregroundColor(canPlus15 ? activeColor.opacity(0.95) : Color.white.opacity(0.20))
+                            .padding(.horizontal, isStageCompact ? 6 : (size < 400 ? 8 : 10))
+                            .frame(height: max(28, min(size * 0.070, 34)))
+                            .background(Color.white.opacity(isPlus15Hovered && canPlus15 ? 0.10 : 0.04), in: RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(canPlus15 ? activeColor.opacity(0.35) : Color.white.opacity(0.08), lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!canPlus15)
+                        .onHover { h in isPlus15Hovered = h }
+                        .accessibilityLabel("Add 15 minutes")
+                        .accessibilityHint(canPlus15 ? "Add 15 minutes to timer" : "Maximum timer limit reached")
+                        .help(canPlus15 ? "Add 15 minutes to timer (preserves seconds)" : "Cannot add 15 minutes: reaches maximum duration (360:59)")
                     }
-                    .buttonStyle(.plain)
-                    .help("Add 15 minutes to timer")
+                    .padding(.horizontal, 4)
+                    .frame(maxWidth: .infinity, alignment: .center)
                 }
 
-                // Helper Microcopy
-                HStack(spacing: 5) {
-                    Image(systemName: "hand.tap.fill")
-                        .font(.system(size: 10))
-                        .foregroundColor(.gray.opacity(0.7))
-                    Text("Click numbers above to type custom time, or click a shortcut chip")
-                        .font(.system(size: max(10, min(size * 0.026, 12)), weight: .medium))
-                        .foregroundColor(.gray.opacity(0.8))
+                // MARK: - 3. Reserved 32pt Helper / Validation Row (Zero Layout Shift!)
+                ZStack {
+                    if let error = model.validationError {
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.circle.fill")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(Color(red: 1.0, green: 0.40, blue: 0.40))
+                            Text(error.localizedDescription)
+                                .font(.system(size: max(10, min(size * 0.026, 12)), weight: .semibold))
+                                .foregroundColor(Color(red: 1.0, green: 0.45, blue: 0.45))
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color(red: 0.25, green: 0.08, blue: 0.08).opacity(0.85), in: Capsule())
+                        .overlay(Capsule().stroke(Color.red.opacity(0.35), lineWidth: 1))
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("Validation Error: \(error.localizedDescription)")
+                    } else if model.activeEditingField != nil {
+                        HStack(spacing: 10) {
+                            Text("Enter to apply · Esc to cancel")
+                                .font(.system(size: max(10, min(size * 0.026, 11)), weight: .medium))
+                                .foregroundColor(activeColor.opacity(0.85))
+
+                            Button {
+                                model.commitEditing()
+                            } label: {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 9, weight: .bold))
+                                    Text("Apply")
+                                        .font(.system(size: 10, weight: .semibold))
+                                }
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(activeColor.opacity(0.30), in: Capsule())
+                                .overlay(Capsule().stroke(activeColor.opacity(0.60), lineWidth: 1))
+                            }
+                            .buttonStyle(.plain)
+                            .help("Apply changes (Return)")
+
+                            Button {
+                                model.cancelEditing()
+                            } label: {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 9, weight: .bold))
+                                    Text("Cancel")
+                                        .font(.system(size: 10, weight: .medium))
+                                }
+                                .foregroundColor(.gray)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Color.white.opacity(0.06), in: Capsule())
+                                .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 1))
+                            }
+                            .buttonStyle(.plain)
+                            .help("Cancel editing (Esc)")
+                        }
+                    } else {
+                        HStack(spacing: 5) {
+                            Image(systemName: "hand.tap.fill")
+                                .font(.system(size: 10))
+                                .foregroundColor(.gray.opacity(0.7))
+                            Text("Click the time to edit · Enter to apply")
+                                .font(.system(size: max(10, min(size * 0.026, 12)), weight: .medium))
+                                .foregroundColor(.gray.opacity(0.8))
+                        }
+                    }
                 }
+                .frame(height: 32)
             }
             .padding(.top, 2)
         }
-        .onAppear {
-            syncInputFields()
-        }
-        .onChange(of: viewModel.totalTime) { _, _ in
-            if focusedField == nil {
-                syncInputFields()
-            }
-        }
-        .onChange(of: focusedField) { _, newField in
-            if newField == nil {
-                formatAndFinalizeFields()
-            }
+        .onExitCommand {
+            model.cancelEditing()
         }
     }
 
-    private func syncInputFields() {
-        isSyncingProgrammatically = true
-        let m = viewModel.totalTime / 60
-        let s = viewModel.totalTime % 60
-        inputMinutes = "\(m)"
-        inputSeconds = String(format: "%02d", s)
-        DispatchQueue.main.async {
-            isSyncingProgrammatically = false
-        }
+    public func startEditing(_ field: TimeInputField) {
+        model.startEditing(field)
     }
 
-    private func adjustMinutes(by delta: Int) {
-        let currentM = Int(inputMinutes.filter { $0.isNumber }) ?? (viewModel.totalTime / 60)
-        let newM = min(max(currentM + delta, 1), 360)
-        inputMinutes = "\(newM)"
-        inputSeconds = "00"
-        if viewModel.isBreakPreset {
-            viewModel.switchToBreak(minutes: newM)
-        } else {
-            viewModel.setCustomDuration(minutes: newM, seconds: 0)
-        }
+    public func stopEditing() {
+        model.stopEditing()
     }
 
-    private func selectPreset(minutes: Int) {
-        inputMinutes = "\(minutes)"
-        inputSeconds = "00"
-        if viewModel.isBreakPreset {
-            viewModel.switchToBreak(minutes: minutes)
-        } else {
-            viewModel.setCustomDuration(minutes: minutes, seconds: 0)
-        }
-        focusedField = nil
-    }
-
-    private func handleMinutesChange(_ newVal: String) {
-        guard !isSyncingProgrammatically, focusedField == .minutes else { return }
-        let digits = newVal.filter { $0.isNumber }
-        if digits.count > 3 {
-            inputMinutes = String(digits.prefix(3))
-            return
-        }
-        if digits != newVal {
-            inputMinutes = digits
-        }
-        if let val = Int(digits), val > 0 {
-            let safeM = min(val, 360)
-            let s = Int(inputSeconds.filter { $0.isNumber }) ?? (viewModel.totalTime % 60)
-            if viewModel.isBreakPreset {
-                let name = (safeM >= 15) ? "Long Break" : "Short Break"
-                viewModel.requestModeOrPresetChange(name: name, minutes: safeM, seconds: s, mode: "Pomodoro", isBreak: true)
-            } else {
-                viewModel.setCustomDuration(minutes: safeM, seconds: s)
-            }
-        }
-    }
-
-    private func handleSecondsChange(_ newVal: String) {
-        guard !isSyncingProgrammatically, focusedField == .seconds else { return }
-        let digits = newVal.filter { $0.isNumber }
-        if digits.count > 2 {
-            inputSeconds = String(digits.prefix(2))
-            return
-        }
-        if digits != newVal {
-            inputSeconds = digits
-        }
-        if let val = Int(digits) {
-            let safeS = min(val, 59)
-            let m = Int(inputMinutes.filter { $0.isNumber }) ?? (viewModel.totalTime / 60)
-            let total = m * 60 + safeS
-            if total >= 5 {
-                if viewModel.isBreakPreset {
-                    let name = (m >= 15) ? "Long Break" : "Short Break"
-                    viewModel.requestModeOrPresetChange(name: name, minutes: m, seconds: safeS, mode: "Pomodoro", isBreak: true)
-                } else {
-                    viewModel.setCustomDuration(minutes: m, seconds: safeS)
-                }
-            }
-        }
-    }
-
-    private func applyCustomInput() {
-        guard !isSyncingProgrammatically else { return }
-        let m = min(max(Int(inputMinutes.filter { $0.isNumber }) ?? 0, 0), 360)
-        let s = min(max(Int(inputSeconds.filter { $0.isNumber }) ?? 0, 0), 59)
-        let total = m * 60 + s
-        if total >= 5 {
-            if viewModel.isBreakPreset {
-                let name = (m >= 15) ? "Long Break" : "Short Break"
-                viewModel.requestModeOrPresetChange(name: name, minutes: m, seconds: s, mode: "Pomodoro", isBreak: true)
-            } else {
-                viewModel.setCustomDuration(minutes: m, seconds: s)
-            }
-        }
-        formatAndFinalizeFields()
-    }
-
-    private func formatAndFinalizeFields() {
-        let m = max(Int(inputMinutes.filter { $0.isNumber }) ?? 0, (viewModel.totalTime >= 60 ? viewModel.totalTime / 60 : 0))
-        let s = min(max(Int(inputSeconds.filter { $0.isNumber }) ?? 0, 0), 59)
-        inputMinutes = "\(m)"
-        inputSeconds = String(format: "%02d", s)
+    public func cancelEditing() {
+        model.cancelEditing()
     }
 }
 
 // MARK: - Shortcut Chip Subview
 struct ShortcutChipButton: View {
-    let minutes: Int
+    let title: String
     let isCurrent: Bool
     let accentColor: Color
     let isStageCompact: Bool
     let size: CGFloat
+    let isCustom: Bool
     let onSelect: () -> Void
 
     @State private var isHovered: Bool = false
 
+    init(
+        title: String,
+        isCurrent: Bool,
+        accentColor: Color,
+        isStageCompact: Bool,
+        size: CGFloat,
+        isCustom: Bool = false,
+        onSelect: @escaping () -> Void
+    ) {
+        self.title = title
+        self.isCurrent = isCurrent
+        self.accentColor = accentColor
+        self.isStageCompact = isStageCompact
+        self.size = size
+        self.isCustom = isCustom
+        self.onSelect = onSelect
+    }
+
+    init(
+        minutes: Int,
+        isCurrent: Bool,
+        accentColor: Color,
+        isStageCompact: Bool,
+        size: CGFloat,
+        onSelect: @escaping () -> Void
+    ) {
+        self.init(
+            title: "\(minutes)m",
+            isCurrent: isCurrent,
+            accentColor: accentColor,
+            isStageCompact: isStageCompact,
+            size: size,
+            isCustom: false,
+            onSelect: onSelect
+        )
+    }
+
     var body: some View {
         Button(action: onSelect) {
-            Text("\(minutes)m")
-                .font(.system(size: max(11, min(size * 0.028, 13)), weight: isCurrent ? .bold : .medium))
-                .foregroundColor(textColor)
-                .padding(.horizontal, isStageCompact ? 8 : 12)
-                .frame(height: max(26, min(size * 0.066, 32)))
-                .background(bgColor, in: RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(borderColor, lineWidth: 1))
-                .shadow(color: isCurrent ? accentColor.opacity(0.35) : Color.clear, radius: 6)
+            HStack(spacing: 3) {
+                if isCustom {
+                    Circle()
+                        .fill(isCurrent ? accentColor : Color.white.opacity(0.40))
+                        .frame(width: 4, height: 4)
+                }
+                Text(title)
+                    .font(.system(size: max(11, min(size * 0.028, 13)), weight: isCurrent ? .bold : .medium))
+                    .foregroundColor(textColor)
+            }
+            .padding(.horizontal, isStageCompact ? 6 : (size < 400 ? 8 : 12))
+            .frame(height: max(28, min(size * 0.070, 34)))
+            .background(bgColor, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(borderColor, lineWidth: 1))
+            .shadow(color: isCurrent ? accentColor.opacity(0.35) : Color.clear, radius: 6)
         }
         .buttonStyle(.plain)
         .onHover { h in isHovered = h }
-        .help("Set duration to \(minutes) minutes")
+        .help(isCustom ? "Custom duration: \(title)" : "Set duration to \(title)")
     }
 
     private var textColor: Color {
