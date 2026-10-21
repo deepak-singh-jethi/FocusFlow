@@ -21161,7 +21161,7 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(SidebarTokens.sidebarWidth, 252)
         XCTAssertEqual(SidebarTokens.horizontalPadding, 12)
         XCTAssertEqual(SidebarTokens.headerHorizontalPadding, 16)
-        XCTAssertEqual(SidebarTokens.headerTopPadding, 40)
+        XCTAssertEqual(SidebarTokens.headerTopPadding, 28)
         XCTAssertEqual(SidebarTokens.headerBottomPadding, 16)
         XCTAssertEqual(SidebarTokens.sectionSpacing, 6)
         XCTAssertEqual(SidebarTokens.itemSpacing, 3)
@@ -21567,9 +21567,9 @@ final class FocusFlowTests: XCTestCase {
 
     @MainActor
     func testSidebar_TitlebarClearanceIntegrity() {
-        // Verify that SidebarTokens.headerTopPadding provides complete titlebar clearance (40pt = 32pt titlebar + 8pt breathing room)
+        // Verify that SidebarTokens.headerTopPadding provides native standard titlebar clearance (28pt)
         // so brand identity and collapse controls sit comfortably below the native traffic lights without excessive void
-        XCTAssertEqual(SidebarTokens.headerTopPadding, 40, "headerTopPadding must be 40pt for complete traffic light clearance")
+        XCTAssertEqual(SidebarTokens.headerTopPadding, 28, "headerTopPadding must be 28pt for standard macOS titlebar clearance")
         XCTAssertEqual(SidebarTokens.headerBottomPadding, 16, "headerBottomPadding must be 16pt")
         XCTAssertEqual(SidebarTokens.sidebarWidth, 252, "Expanded sidebar width must be 252pt")
         XCTAssertEqual(SidebarTokens.collapsedWidth, 68, "Collapsed sidebar width must be 68pt")
@@ -21606,15 +21606,15 @@ final class FocusFlowTests: XCTestCase {
 
     @MainActor
     func testResponsiveLayout_01_WindowLayoutMetrics_AuthoritativeGeometryConstants() {
-        XCTAssertEqual(WindowLayoutMetrics.titlebarChromeHeight, 32.0, "Native titlebar chrome height must be 32pt")
-        XCTAssertEqual(WindowLayoutMetrics.standardBreathingRoom, 8.0, "Intentional breathing room must be 8pt")
-        XCTAssertEqual(WindowLayoutMetrics.standardTopClearance, 40.0, "Authoritative windowed top clearance must be exactly 40pt (32 chrome + 8 breathing room)")
+        XCTAssertEqual(WindowLayoutMetrics.titlebarChromeHeight, 28.0, "Native titlebar chrome height must be 28pt")
+        XCTAssertEqual(WindowLayoutMetrics.standardBreathingRoom, 0.0, "Standard breathing room in windowed mode must be 0pt (native titlebar alignment)")
+        XCTAssertEqual(WindowLayoutMetrics.standardTopClearance, 28.0, "Authoritative windowed top clearance must be exactly 28pt (native macOS titlebar height)")
         XCTAssertEqual(WindowLayoutMetrics.fullScreenRevealedClearance, 40.0, "Fullscreen top clearance with revealed chrome must be 40pt")
         XCTAssertEqual(WindowLayoutMetrics.fullScreenHiddenChromeClearance, 20.0, "Fullscreen top clearance with autohidden chrome must be 20pt")
         XCTAssertEqual(WindowLayoutMetrics.postBannerSpacing, 12.0, "Post-banner spacing must be 12pt")
         XCTAssertEqual(WindowLayoutMetrics.postMiniBarSpacing, 12.0, "Post-mini-bar spacing must be 12pt")
 
-        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: false), 40.0)
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: false), 28.0)
         XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: true, isTitlebarRevealed: true), 40.0)
         XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: true, isTitlebarRevealed: false), 20.0)
     }
@@ -21640,9 +21640,9 @@ final class FocusFlowTests: XCTestCase {
         window.contentView = hosting
         window.layoutIfNeeded()
 
-        // Windowed mode clearance: 40pt via window query or constant
-        XCTAssertEqual(WindowLayoutMetrics.topClearance(for: window), 40.0)
-        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: false), 40.0)
+        // Windowed mode clearance: 28pt via window query or constant
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(for: window), 28.0)
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: false), 28.0)
         // Fullscreen clearance with titlebar revealed: 40pt
         XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: true, isTitlebarRevealed: true), 40.0)
         // Fullscreen clearance with chrome autohidden: 20pt
@@ -21654,7 +21654,7 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(SidebarTokens.sidebarWidth, 252.0)
         XCTAssertEqual(SidebarTokens.collapsedWidth, 68.0)
         XCTAssertEqual(SidebarTokens.collapsedItemWidth, 44.0)
-        XCTAssertEqual(SidebarTokens.headerTopPadding, 40.0)
+        XCTAssertEqual(SidebarTokens.headerTopPadding, 28.0)
         XCTAssertEqual(SidebarTokens.headerBottomPadding, 16.0)
 
         let (vm, tempURL) = makeIsolatedViewModel()
@@ -21666,9 +21666,9 @@ final class FocusFlowTests: XCTestCase {
             selection: .constant(.focusTimer),
             isCollapsed: Binding(get: { isCollapsed }, set: { isCollapsed = $0 }),
             viewModel: vm,
-            topPadding: 40.0
+            topPadding: 28.0
         )
-        XCTAssertEqual(expandedSidebar.topPadding, 40.0)
+        XCTAssertEqual(expandedSidebar.topPadding, 28.0)
 
         isCollapsed = true
         let collapsedSidebar = SidebarView(
@@ -21676,9 +21676,9 @@ final class FocusFlowTests: XCTestCase {
             selection: .constant(.focusTimer),
             isCollapsed: Binding(get: { isCollapsed }, set: { isCollapsed = $0 }),
             viewModel: vm,
-            topPadding: 40.0
+            topPadding: 28.0
         )
-        XCTAssertEqual(collapsedSidebar.topPadding, 40.0)
+        XCTAssertEqual(collapsedSidebar.topPadding, 28.0)
     }
 
     @MainActor
@@ -21895,9 +21895,9 @@ final class FocusFlowTests: XCTestCase {
         let chromeHeight = windowH - contentLayoutH
         XCTAssertTrue(chromeHeight >= 28.0 && chromeHeight <= 32.0, "Physical AppKit titlebar chrome height must be 28-32pt (actual: \(chromeHeight))")
 
-        // Top clearance of 40pt guarantees authoritative baseline clearance regardless of window variations
+        // Top clearance of 28pt guarantees native titlebar alignment in windowed mode
         let clearance = WindowLayoutMetrics.topClearance(for: window)
-        XCTAssertEqual(clearance, 40.0)
+        XCTAssertEqual(clearance, 28.0)
 
         // Measure physical close button in window coordinates
         if let closeBtn = window.standardWindowButton(.closeButton), let themeView = window.contentView?.superview {
@@ -21908,9 +21908,7 @@ final class FocusFlowTests: XCTestCase {
             XCTAssertTrue(closeBtnBottomDist >= 19.0 && closeBtnBottomDist <= 24.0, "Close button bottom sits at 20-23pt from top edge (actual: \(closeBtnBottomDist))")
 
             let marginBelowButtons = clearance - closeBtnBottomDist
-            XCTAssertTrue(marginBelowButtons >= 16.0 && marginBelowButtons <= 21.0, "Header must maintain comfortable clearance below traffic light buttons (actual: \(marginBelowButtons))")
-            let marginBelowChrome = clearance - chromeHeight
-            XCTAssertTrue(marginBelowChrome >= 8.0 && marginBelowChrome <= 13.0, "Header must maintain intentional breathing room below titlebar chrome (actual: \(marginBelowChrome))")
+            XCTAssertTrue(marginBelowButtons >= 4.0 && marginBelowButtons <= 10.0, "Header maintains clean clearance below traffic light buttons (actual: \(marginBelowButtons))")
         }
     }
 
@@ -21921,7 +21919,7 @@ final class FocusFlowTests: XCTestCase {
         let player = AmbientAudioPlayer()
 
         let clearance = WindowLayoutMetrics.standardTopClearance
-        XCTAssertEqual(clearance, 40.0)
+        XCTAssertEqual(clearance, 28.0)
 
         // Verify Sidebar header padding
         var isCollapsed = false
@@ -21932,7 +21930,7 @@ final class FocusFlowTests: XCTestCase {
             viewModel: vm,
             topPadding: clearance
         )
-        XCTAssertEqual(sidebar.topPadding, 40.0)
+        XCTAssertEqual(sidebar.topPadding, 28.0)
 
         // Verify DashboardTimerView (Focus Timer & Stopwatch)
         let timerDashboard = DashboardTimerView(
@@ -21944,7 +21942,7 @@ final class FocusFlowTests: XCTestCase {
             isStopwatchMode: false,
             topPadding: clearance
         )
-        XCTAssertEqual(timerDashboard.topPadding, 40.0)
+        XCTAssertEqual(timerDashboard.topPadding, 28.0)
 
         let stopwatchDashboard = DashboardTimerView(
             viewModel: vm,
@@ -21955,20 +21953,20 @@ final class FocusFlowTests: XCTestCase {
             isStopwatchMode: true,
             topPadding: clearance
         )
-        XCTAssertEqual(stopwatchDashboard.topPadding, 40.0)
+        XCTAssertEqual(stopwatchDashboard.topPadding, 28.0)
 
         // Verify secondary views
         let tasks = TasksView(viewModel: vm, topPadding: clearance)
-        XCTAssertEqual(tasks.topPadding, 40.0)
+        XCTAssertEqual(tasks.topPadding, 28.0)
 
         let soundscapes = SoundscapesView(audioPlayer: player, topPadding: clearance)
-        XCTAssertEqual(soundscapes.topPadding, 40.0)
+        XCTAssertEqual(soundscapes.topPadding, 28.0)
 
         let insights = InsightsView(viewModel: vm, topPadding: clearance)
-        XCTAssertEqual(insights.topPadding, 40.0)
+        XCTAssertEqual(insights.topPadding, 28.0)
 
         let settings = SettingsView(viewModel: vm, topPadding: clearance)
-        XCTAssertEqual(settings.topPadding, 40.0)
+        XCTAssertEqual(settings.topPadding, 28.0)
     }
 
     @MainActor
@@ -21976,17 +21974,17 @@ final class FocusFlowTests: XCTestCase {
         // In fullscreen when titlebar is revealed (user moves cursor to top or has persistent menu bar)
         let revealedClearance = WindowLayoutMetrics.topClearance(isFullScreen: true, isTitlebarRevealed: true)
         XCTAssertEqual(revealedClearance, 40.0, "Revealed fullscreen clearance must be 40pt")
-        XCTAssertGreaterThan(revealedClearance, WindowLayoutMetrics.titlebarChromeHeight, "Revealed clearance must exceed 32pt titlebar to prevent clipping")
+        XCTAssertGreaterThan(revealedClearance, WindowLayoutMetrics.titlebarChromeHeight, "Revealed clearance must exceed 28pt titlebar to prevent clipping")
 
         // In fullscreen when chrome is genuinely absent (autohidden)
         let autohiddenClearance = WindowLayoutMetrics.topClearance(isFullScreen: true, isTitlebarRevealed: false)
         XCTAssertEqual(autohiddenClearance, 20.0, "Autohidden fullscreen clearance must be 20pt, avoiding excessive margins")
 
-        // Windowed mode always preserves 40pt authoritative clearance
+        // Windowed mode always preserves 28pt authoritative clearance
         let windowedClearance = WindowLayoutMetrics.topClearance(isFullScreen: false, isTitlebarRevealed: true)
-        XCTAssertEqual(windowedClearance, 40.0)
+        XCTAssertEqual(windowedClearance, 28.0)
         let windowedClearanceAlt = WindowLayoutMetrics.topClearance(isFullScreen: false, isTitlebarRevealed: false)
-        XCTAssertEqual(windowedClearanceAlt, 40.0)
+        XCTAssertEqual(windowedClearanceAlt, 28.0)
     }
 
     @MainActor

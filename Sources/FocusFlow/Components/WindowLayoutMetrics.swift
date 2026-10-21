@@ -6,24 +6,22 @@ import AppKit
 /// Guarantees that Sidebar branding and Dashboard/Page headers align to the same baseline,
 /// clears the native traffic-light titlebar in windowed mode, and adapts smoothly in fullscreen.
 public enum WindowLayoutMetrics {
-    /// Native titlebar chrome height in standard windowed mode (traffic lights region: ~28-32pt)
-    public static let titlebarChromeHeight: CGFloat = 32.0
+    /// Native titlebar chrome height in standard windowed mode (standard macOS titlebar: 28pt)
+    public static let titlebarChromeHeight: CGFloat = 28.0
 
-    /// Intentional breathing room below titlebar chrome in standard windowed mode (8.0pt)
-    /// Traffic lights sit at y = 9pt..23pt. Chrome ends at 32pt.
-    /// 8pt breathing room places interactive content at 40pt (17pt below traffic lights, 8pt below chrome).
-    public static let standardBreathingRoom: CGFloat = 8.0
+    /// Intentional breathing room below titlebar chrome in standard windowed mode (0.0pt for native titlebar alignment)
+    public static let standardBreathingRoom: CGFloat = 0.0
 
     /// Legacy alias for compatibility
     public static var windowedBreathingRoom: CGFloat { standardBreathingRoom }
 
-    /// Authoritative total top clearance in standard windowed mode (32 + 8 = 40pt).
-    /// Eliminates the 29pt empty void while preserving comfortable breathing room below traffic lights.
-    public static let standardTopClearance: CGFloat = titlebarChromeHeight + standardBreathingRoom
+    /// Authoritative total top clearance in standard windowed mode (28.0pt, native macOS titlebar height).
+    /// Places interactive content cleanly below traffic lights while eliminating unnecessary top voids.
+    public static let standardTopClearance: CGFloat = 28.0
 
     /// Authoritative total top clearance in Full Screen mode when native titlebar/traffic lights are revealed or present (40pt).
     /// Guarantees that FocusFlow branding, Custom Timer heading, and collapse button are NEVER clipped beneath the 32pt titlebar.
-    public static let fullScreenRevealedClearance: CGFloat = titlebarChromeHeight + standardBreathingRoom
+    public static let fullScreenRevealedClearance: CGFloat = 40.0
 
     /// Authoritative top clearance in Full Screen mode when native titlebar chrome is genuinely absent (20pt).
     /// Avoids large unnecessary margins when titlebar is autohidden.
@@ -48,7 +46,6 @@ public enum WindowLayoutMetrics {
     }
 
     /// AppKit-derived authoritative clearance dynamically computed from an actual NSWindow instance.
-    /// Distinguishes system chrome clearance from intentional visual breathing room.
     public static func topClearance(for window: NSWindow?) -> CGFloat {
         guard let window = window else {
             return standardTopClearance
@@ -66,12 +63,9 @@ public enum WindowLayoutMetrics {
                 }
                 return false
             }()
-            return isChromeVisible ? standardTopClearance : fullScreenHiddenChromeClearance
+            return isChromeVisible ? fullScreenRevealedClearance : fullScreenHiddenChromeClearance
         } else {
-            // In standard windowed mode, guarantee at least standardTopClearance (40pt)
-            // so header baselines remain identical across machines and window chrome variations.
-            // If chrome is unusually tall (e.g. custom toolbar), expand accordingly.
-            return max(standardTopClearance, chromeHeight + standardBreathingRoom)
+            return standardTopClearance
         }
     }
 }
