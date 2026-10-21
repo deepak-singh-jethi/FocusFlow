@@ -72,10 +72,16 @@ public final class FocusFlowAppDelegate: NSObject, NSApplicationDelegate, NSWind
     }
 
     public func windowDidEnterFullScreen(_ notification: Notification) {
+        if let window = notification.object as? NSWindow, let main = mainWindow {
+            guard window === main else { return }
+        }
         isFullScreen = true
     }
 
     public func windowDidExitFullScreen(_ notification: Notification) {
+        if let window = notification.object as? NSWindow, let main = mainWindow {
+            guard window === main else { return }
+        }
         isFullScreen = false
         guard let window = (notification.object as? NSWindow) ?? mainWindow else { return }
         if isPendingCloseAfterFullScreenExit {

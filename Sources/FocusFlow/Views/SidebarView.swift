@@ -11,7 +11,7 @@ public enum SidebarTokens {
     // Spacing
     public static let horizontalPadding: CGFloat = 12
     public static let headerHorizontalPadding: CGFloat = 16
-    public static let headerTopPadding: CGFloat = 52
+    public static let headerTopPadding: CGFloat = WindowLayoutMetrics.standardTopClearance
     public static let headerBottomPadding: CGFloat = 16
     public static let sectionSpacing: CGFloat = 6
     public static let itemSpacing: CGFloat = 3

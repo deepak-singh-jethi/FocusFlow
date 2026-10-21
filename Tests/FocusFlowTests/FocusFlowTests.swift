@@ -21161,7 +21161,7 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(SidebarTokens.sidebarWidth, 252)
         XCTAssertEqual(SidebarTokens.horizontalPadding, 12)
         XCTAssertEqual(SidebarTokens.headerHorizontalPadding, 16)
-        XCTAssertEqual(SidebarTokens.headerTopPadding, 52)
+        XCTAssertEqual(SidebarTokens.headerTopPadding, 40)
         XCTAssertEqual(SidebarTokens.headerBottomPadding, 16)
         XCTAssertEqual(SidebarTokens.sectionSpacing, 6)
         XCTAssertEqual(SidebarTokens.itemSpacing, 3)
@@ -21567,9 +21567,9 @@ final class FocusFlowTests: XCTestCase {
 
     @MainActor
     func testSidebar_TitlebarClearanceIntegrity() {
-        // Verify that SidebarTokens.headerTopPadding provides complete titlebar clearance (52pt = 32pt titlebar + 20pt breathing room)
-        // so brand identity and collapse controls sit comfortably below the native traffic lights
-        XCTAssertEqual(SidebarTokens.headerTopPadding, 52, "headerTopPadding must be 52pt for complete traffic light clearance")
+        // Verify that SidebarTokens.headerTopPadding provides complete titlebar clearance (40pt = 32pt titlebar + 8pt breathing room)
+        // so brand identity and collapse controls sit comfortably below the native traffic lights without excessive void
+        XCTAssertEqual(SidebarTokens.headerTopPadding, 40, "headerTopPadding must be 40pt for complete traffic light clearance")
         XCTAssertEqual(SidebarTokens.headerBottomPadding, 16, "headerBottomPadding must be 16pt")
         XCTAssertEqual(SidebarTokens.sidebarWidth, 252, "Expanded sidebar width must be 252pt")
         XCTAssertEqual(SidebarTokens.collapsedWidth, 68, "Collapsed sidebar width must be 68pt")
@@ -21607,14 +21607,16 @@ final class FocusFlowTests: XCTestCase {
     @MainActor
     func testResponsiveLayout_01_WindowLayoutMetrics_AuthoritativeGeometryConstants() {
         XCTAssertEqual(WindowLayoutMetrics.titlebarChromeHeight, 32.0, "Native titlebar chrome height must be 32pt")
-        XCTAssertEqual(WindowLayoutMetrics.windowedBreathingRoom, 20.0, "Intentional breathing room must be 20pt")
-        XCTAssertEqual(WindowLayoutMetrics.standardTopClearance, 52.0, "Authoritative windowed top clearance must be exactly 52pt")
-        XCTAssertEqual(WindowLayoutMetrics.fullScreenTopClearance, 16.0, "Fullscreen top clearance must be 16pt (no traffic lights)")
+        XCTAssertEqual(WindowLayoutMetrics.standardBreathingRoom, 8.0, "Intentional breathing room must be 8pt")
+        XCTAssertEqual(WindowLayoutMetrics.standardTopClearance, 40.0, "Authoritative windowed top clearance must be exactly 40pt (32 chrome + 8 breathing room)")
+        XCTAssertEqual(WindowLayoutMetrics.fullScreenRevealedClearance, 40.0, "Fullscreen top clearance with revealed chrome must be 40pt")
+        XCTAssertEqual(WindowLayoutMetrics.fullScreenHiddenChromeClearance, 20.0, "Fullscreen top clearance with autohidden chrome must be 20pt")
         XCTAssertEqual(WindowLayoutMetrics.postBannerSpacing, 12.0, "Post-banner spacing must be 12pt")
         XCTAssertEqual(WindowLayoutMetrics.postMiniBarSpacing, 12.0, "Post-mini-bar spacing must be 12pt")
 
-        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: false), 52.0)
-        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: true), 16.0)
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: false), 40.0)
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: true, isTitlebarRevealed: true), 40.0)
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: true, isTitlebarRevealed: false), 20.0)
     }
 
     @MainActor
@@ -21638,10 +21640,13 @@ final class FocusFlowTests: XCTestCase {
         window.contentView = hosting
         window.layoutIfNeeded()
 
-        // Windowed mode clearance: 52pt
-        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: false), 52.0)
-        // Fullscreen clearance: 16pt
-        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: true), 16.0)
+        // Windowed mode clearance: 40pt via window query or constant
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(for: window), 40.0)
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: false), 40.0)
+        // Fullscreen clearance with titlebar revealed: 40pt
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: true, isTitlebarRevealed: true), 40.0)
+        // Fullscreen clearance with chrome autohidden: 20pt
+        XCTAssertEqual(WindowLayoutMetrics.topClearance(isFullScreen: true, isTitlebarRevealed: false), 20.0)
     }
 
     @MainActor
@@ -21649,7 +21654,7 @@ final class FocusFlowTests: XCTestCase {
         XCTAssertEqual(SidebarTokens.sidebarWidth, 252.0)
         XCTAssertEqual(SidebarTokens.collapsedWidth, 68.0)
         XCTAssertEqual(SidebarTokens.collapsedItemWidth, 44.0)
-        XCTAssertEqual(SidebarTokens.headerTopPadding, 52.0)
+        XCTAssertEqual(SidebarTokens.headerTopPadding, 40.0)
         XCTAssertEqual(SidebarTokens.headerBottomPadding, 16.0)
 
         let (vm, tempURL) = makeIsolatedViewModel()
@@ -21661,9 +21666,9 @@ final class FocusFlowTests: XCTestCase {
             selection: .constant(.focusTimer),
             isCollapsed: Binding(get: { isCollapsed }, set: { isCollapsed = $0 }),
             viewModel: vm,
-            topPadding: 52.0
+            topPadding: 40.0
         )
-        XCTAssertEqual(expandedSidebar.topPadding, 52.0)
+        XCTAssertEqual(expandedSidebar.topPadding, 40.0)
 
         isCollapsed = true
         let collapsedSidebar = SidebarView(
@@ -21671,9 +21676,9 @@ final class FocusFlowTests: XCTestCase {
             selection: .constant(.focusTimer),
             isCollapsed: Binding(get: { isCollapsed }, set: { isCollapsed = $0 }),
             viewModel: vm,
-            topPadding: 16.0
+            topPadding: 40.0
         )
-        XCTAssertEqual(collapsedSidebar.topPadding, 16.0)
+        XCTAssertEqual(collapsedSidebar.topPadding, 40.0)
     }
 
     @MainActor
@@ -21864,6 +21869,126 @@ final class FocusFlowTests: XCTestCase {
     }
 
     @MainActor
+    func testResponsiveLayout_11_PhysicalControlCoordinateClearance() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+        let player = AmbientAudioPlayer()
+
+        let view = ContentView(viewModel: vm, audioPlayer: player)
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame = NSRect(x: 0, y: 0, width: 1050, height: 700)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 1050, height: 700),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.contentView = hosting
+        window.layoutIfNeeded()
+
+        // Measure physical AppKit window chrome
+        let windowH = window.frame.height
+        let contentLayoutH = window.contentLayoutRect.height
+        let chromeHeight = windowH - contentLayoutH
+        XCTAssertEqual(chromeHeight, 32.0, "Physical AppKit titlebar chrome height must be 32pt")
+
+        // Measure physical close button in window coordinates
+        if let closeBtn = window.standardWindowButton(.closeButton), let themeView = window.contentView?.superview {
+            let frameInWindow = closeBtn.convert(closeBtn.bounds, to: themeView)
+            let closeBtnTopDist = windowH - frameInWindow.maxY
+            let closeBtnBottomDist = windowH - frameInWindow.minY
+            XCTAssertEqual(closeBtnTopDist, 9.0, accuracy: 1.0, "Close button top must sit at ~9pt from top edge")
+            XCTAssertEqual(closeBtnBottomDist, 23.0, accuracy: 1.0, "Close button bottom must sit at ~23pt from top edge")
+
+            // Top clearance of 40pt leaves 17pt below the traffic lights
+            let clearance = WindowLayoutMetrics.topClearance(for: window)
+            XCTAssertEqual(clearance, 40.0)
+            let marginBelowButtons = clearance - closeBtnBottomDist
+            XCTAssertEqual(marginBelowButtons, 17.0, accuracy: 1.0, "Header must maintain 17pt clearance below traffic light buttons")
+            let marginBelowChrome = clearance - chromeHeight
+            XCTAssertEqual(marginBelowChrome, 8.0, accuracy: 0.1, "Header must maintain 8pt breathing room below titlebar chrome")
+        }
+    }
+
+    @MainActor
+    func testResponsiveLayout_12_HeaderBaselineAlignmentAcrossAllDestinations() {
+        let (vm, tempURL) = makeIsolatedViewModel()
+        defer { cleanup(url: tempURL) }
+        let player = AmbientAudioPlayer()
+
+        let clearance = WindowLayoutMetrics.standardTopClearance
+        XCTAssertEqual(clearance, 40.0)
+
+        // Verify Sidebar header padding
+        var isCollapsed = false
+        let sidebar = SidebarView(
+            gradient: LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing),
+            selection: .constant(.focusTimer),
+            isCollapsed: Binding(get: { isCollapsed }, set: { isCollapsed = $0 }),
+            viewModel: vm,
+            topPadding: clearance
+        )
+        XCTAssertEqual(sidebar.topPadding, 40.0)
+
+        // Verify DashboardTimerView (Focus Timer & Stopwatch)
+        let timerDashboard = DashboardTimerView(
+            viewModel: vm,
+            gradient: LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing),
+            clockStyle: .constant("Digital"),
+            isFocusState: .constant(false),
+            showingWorkspace: .constant(false),
+            isStopwatchMode: false,
+            topPadding: clearance
+        )
+        XCTAssertEqual(timerDashboard.topPadding, 40.0)
+
+        let stopwatchDashboard = DashboardTimerView(
+            viewModel: vm,
+            gradient: LinearGradient(colors: [.orange, .pink], startPoint: .topLeading, endPoint: .bottomTrailing),
+            clockStyle: .constant("Digital"),
+            isFocusState: .constant(false),
+            showingWorkspace: .constant(false),
+            isStopwatchMode: true,
+            topPadding: clearance
+        )
+        XCTAssertEqual(stopwatchDashboard.topPadding, 40.0)
+
+        // Verify secondary views
+        let tasks = TasksView(viewModel: vm, topPadding: clearance)
+        XCTAssertEqual(tasks.topPadding, 40.0)
+
+        let soundscapes = SoundscapesView(audioPlayer: player, topPadding: clearance)
+        XCTAssertEqual(soundscapes.topPadding, 40.0)
+
+        let insights = InsightsView(viewModel: vm, topPadding: clearance)
+        XCTAssertEqual(insights.topPadding, 40.0)
+
+        let settings = SettingsView(viewModel: vm, topPadding: clearance)
+        XCTAssertEqual(settings.topPadding, 40.0)
+    }
+
+    @MainActor
+    func testResponsiveLayout_13_FullScreenChromeRevealAndAutohideTransition() {
+        // In fullscreen when titlebar is revealed (user moves cursor to top or has persistent menu bar)
+        let revealedClearance = WindowLayoutMetrics.topClearance(isFullScreen: true, isTitlebarRevealed: true)
+        XCTAssertEqual(revealedClearance, 40.0, "Revealed fullscreen clearance must be 40pt")
+        XCTAssertGreaterThan(revealedClearance, WindowLayoutMetrics.titlebarChromeHeight, "Revealed clearance must exceed 32pt titlebar to prevent clipping")
+
+        // In fullscreen when chrome is genuinely absent (autohidden)
+        let autohiddenClearance = WindowLayoutMetrics.topClearance(isFullScreen: true, isTitlebarRevealed: false)
+        XCTAssertEqual(autohiddenClearance, 20.0, "Autohidden fullscreen clearance must be 20pt, avoiding excessive margins")
+
+        // Windowed mode always preserves 40pt authoritative clearance
+        let windowedClearance = WindowLayoutMetrics.topClearance(isFullScreen: false, isTitlebarRevealed: true)
+        XCTAssertEqual(windowedClearance, 40.0)
+        let windowedClearanceAlt = WindowLayoutMetrics.topClearance(isFullScreen: false, isTitlebarRevealed: false)
+        XCTAssertEqual(windowedClearanceAlt, 40.0)
+    }
+
+    @MainActor
     private func renderViewToPNGFile<V: View>(_ view: V, size: CGSize, fileName: String) {
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: size),
@@ -21871,18 +21996,24 @@ final class FocusFlowTests: XCTestCase {
             backing: .buffered,
             defer: false
         )
+        window.title = "FocusFlow"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
         let hostingView = NSHostingView(rootView: view.frame(width: size.width, height: size.height).preferredColorScheme(.dark))
         hostingView.frame = NSRect(origin: .zero, size: size)
         window.contentView = hostingView
-        window.orderBack(nil)
+        window.makeKeyAndOrderFront(nil)
         window.layoutIfNeeded()
         hostingView.layoutSubtreeIfNeeded()
 
-        guard let rep = hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds) else {
+        let renderTarget: NSView = window.contentView?.superview ?? hostingView
+        renderTarget.layoutSubtreeIfNeeded()
+
+        guard let rep = renderTarget.bitmapImageRepForCachingDisplay(in: renderTarget.bounds) else {
             XCTFail("Failed to render view to PNG for \(fileName)")
             return
         }
-        hostingView.cacheDisplay(in: hostingView.bounds, to: rep)
+        renderTarget.cacheDisplay(in: renderTarget.bounds, to: rep)
 
         guard let pngData = rep.representation(using: .png, properties: [:]) else {
             XCTFail("Failed to encode PNG data")
@@ -21958,7 +22089,7 @@ final class FocusFlowTests: XCTestCase {
             renderViewToPNGFile(view, size: CGSize(width: 1440, height: 900), fileName: "qa_1440x900_large.png")
         }
 
-        // 5. Fullscreen window (16pt top clearance)
+        // 5. Fullscreen window (40pt top clearance with revealed chrome)
         do {
             let (vm, tempURL) = makeIsolatedViewModel()
             defer { cleanup(url: tempURL) }
@@ -21966,7 +22097,7 @@ final class FocusFlowTests: XCTestCase {
             vm.totalTime = 25 * 60
             vm.timeRemaining = 25 * 60
 
-            let view = ContentView(viewModel: vm, audioPlayer: player, initialTab: .focusTimer, isFullScreen: true)
+            let view = ContentView(viewModel: vm, audioPlayer: player, initialTab: .focusTimer, isFullScreen: true, isTitlebarRevealed: true)
             renderViewToPNGFile(view, size: CGSize(width: 1440, height: 900), fileName: "qa_fullscreen_1440x900.png")
         }
 

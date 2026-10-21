@@ -11,6 +11,7 @@ public struct ContentView: View {
     @AppStorage("clockStyle") private var clockStyle = "Digital"
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isFullScreen: Bool
+    @State private var isTitlebarRevealed: Bool = true
 
     let bgMain = Color(red: 0.08, green: 0.09, blue: 0.13)
     let bgSidebar = Color(red: 0.11, green: 0.12, blue: 0.16)
@@ -20,12 +21,14 @@ public struct ContentView: View {
         viewModel: TimerViewModel? = nil,
         audioPlayer: AmbientAudioPlayer? = nil,
         initialTab: NavigationTab = .focusTimer,
-        isFullScreen: Bool = false
+        isFullScreen: Bool = false,
+        isTitlebarRevealed: Bool = true
     ) {
         self.viewModel = viewModel ?? TimerViewModel()
         self.audioPlayer = audioPlayer ?? AmbientAudioPlayer()
         self._sidebarSelection = State(initialValue: initialTab)
         self._isFullScreen = State(initialValue: isFullScreen)
+        self._isTitlebarRevealed = State(initialValue: isTitlebarRevealed)
     }
 
     private var hasBanner: Bool {
@@ -33,7 +36,11 @@ public struct ContentView: View {
     }
 
     private var topClearance: CGFloat {
-        WindowLayoutMetrics.topClearance(isFullScreen: isFullScreen)
+        WindowLayoutMetrics.topClearance(isFullScreen: isFullScreen, isTitlebarRevealed: isTitlebarRevealed)
+    }
+
+    private var bannerTopPadding: CGFloat {
+        (isFullScreen && !isTitlebarRevealed) ? 8 : (WindowLayoutMetrics.titlebarChromeHeight + 4)
     }
 
     private var contentTopPadding: CGFloat {
@@ -178,21 +185,63 @@ public struct ContentView: View {
                 .frame(minWidth: 390, idealWidth: 430, minHeight: 520)
                 .background(bgMain)
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { notification in
+            guard isFocusFlowMainWindow(notification.object) else { return }
             withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
                 isFullScreen = true
+                updateTitlebarPresentation(for: notification.object as? NSWindow)
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { notification in
+            guard isFocusFlowMainWindow(notification.object) else { return }
             withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
                 isFullScreen = false
+                isTitlebarRevealed = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResizeNotification)) { notification in
+            guard isFocusFlowMainWindow(notification.object) else { return }
+            if let window = notification.object as? NSWindow {
+                updateTitlebarPresentation(for: window)
             }
         }
         .onAppear {
             guard let app = NSApp else { return }
-            if let window = app.keyWindow ?? app.mainWindow {
+            let window = FocusFlowAppDelegate.shared?.mainWindow ?? app.keyWindow ?? app.mainWindow
+            if let window = window {
                 isFullScreen = window.styleMask.contains(.fullScreen)
+                updateTitlebarPresentation(for: window)
             }
+        }
+    }
+
+    private func isFocusFlowMainWindow(_ object: Any?) -> Bool {
+        guard let window = object as? NSWindow else { return false }
+        if let main = FocusFlowAppDelegate.shared?.mainWindow {
+            return window === main
+        }
+        if let app = NSApp {
+            if let main = app.mainWindow { return window === main }
+            if let key = app.keyWindow { return window === key }
+        }
+        return true
+    }
+
+    private func updateTitlebarPresentation(for window: NSWindow?) {
+        guard let window = window else { return }
+        if window.styleMask.contains(.fullScreen) {
+            let frameH = window.frame.height
+            let contentH = window.contentLayoutRect.height
+            let chromeH = max(0, frameH - contentH)
+            if chromeH >= 24.0 {
+                isTitlebarRevealed = true
+            } else if let btn = window.standardWindowButton(.closeButton), !btn.isHidden, btn.alphaValue > 0.1, btn.window != nil {
+                isTitlebarRevealed = true
+            } else {
+                isTitlebarRevealed = false
+            }
+        } else {
+            isTitlebarRevealed = true
         }
     }
 
@@ -235,7 +284,7 @@ public struct ContentView: View {
             Spacer()
         }
         .padding(.horizontal, 16)
-        .padding(.top, isFullScreen ? 8 : (WindowLayoutMetrics.titlebarChromeHeight + 4))
+        .padding(.top, bannerTopPadding)
         .padding(.bottom, 10)
         .background(Color.red.opacity(0.28))
         .overlay(
@@ -274,7 +323,7 @@ public struct ContentView: View {
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 16)
-        .padding(.top, isFullScreen ? 8 : (WindowLayoutMetrics.titlebarChromeHeight + 4))
+        .padding(.top, bannerTopPadding)
         .padding(.bottom, 10)
         .background(Color.green.opacity(0.22))
         .overlay(
@@ -314,7 +363,7 @@ public struct ContentView: View {
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 16)
-        .padding(.top, isFullScreen ? 8 : (WindowLayoutMetrics.titlebarChromeHeight + 4))
+        .padding(.top, bannerTopPadding)
         .padding(.bottom, 10)
         .background(Color.orange.opacity(0.25))
         .overlay(
