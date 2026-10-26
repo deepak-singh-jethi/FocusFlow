@@ -31,8 +31,17 @@ public struct ContentView: View {
         self._isTitlebarRevealed = State(initialValue: isTitlebarRevealed)
     }
 
+    private var hasPendingIdleReview: Bool {
+        viewModel.isDeferredCompletionPending &&
+        viewModel.idleReviewCoordinator.activeReviewInterval == nil &&
+        !viewModel.idleReviewCoordinator.pendingIntervals.isEmpty
+    }
+
     private var hasBanner: Bool {
-        viewModel.isPersistenceBlocked || viewModel.isSaveFailed || (viewModel.didRecoverFromBackup && viewModel.showRecoveryNotice)
+        viewModel.isPersistenceBlocked ||
+        viewModel.isSaveFailed ||
+        (viewModel.didRecoverFromBackup && viewModel.showRecoveryNotice) ||
+        hasPendingIdleReview
     }
 
     private var topClearance: CGFloat {
@@ -59,6 +68,8 @@ public struct ContentView: View {
                         saveFailureBanner
                     } else if viewModel.didRecoverFromBackup && viewModel.showRecoveryNotice {
                         recoverySuccessBanner
+                    } else if hasPendingIdleReview {
+                        pendingIdleReviewBanner
                     }
 
                     ZStack {
@@ -370,6 +381,50 @@ public struct ContentView: View {
             Rectangle()
                 .frame(height: 1)
                 .foregroundColor(Color.orange.opacity(0.4)),
+            alignment: .bottom
+        )
+    }
+
+    @ViewBuilder
+    private var pendingIdleReviewBanner: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: "clock.badge.exclamationmark.fill")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(.indigo)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Session Review Pending")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(.white)
+                Text("Review your inactive time before starting another session.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.85))
+            }
+            Spacer()
+            if let firstInterval = viewModel.idleReviewCoordinator.pendingIntervals.first {
+                Button {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
+                        viewModel.idleReviewCoordinator.openReview(for: firstInterval)
+                    }
+                } label: {
+                    Text("Review Now")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color.indigo.opacity(0.8))
+                        .cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, bannerTopPadding)
+        .padding(.bottom, 10)
+        .background(Color.indigo.opacity(0.25))
+        .overlay(
+            Rectangle()
+                .frame(height: 1)
+                .foregroundColor(Color.indigo.opacity(0.4)),
             alignment: .bottom
         )
     }

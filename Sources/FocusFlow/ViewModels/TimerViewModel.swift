@@ -217,6 +217,36 @@ public class TimerViewModel: ObservableObject {
     @Published public var idleReviewEnabled: Bool = true {
         didSet {
             idleReviewCoordinator.isEnabled = idleReviewEnabled
+            let now = currentDateProvider()
+            if !idleReviewEnabled {
+                let isSessionActive = isTimerRunning || isStopwatchRunning || isDeferredCompletionPending
+                let sessionType: String
+                if isTimerRunning || isDeferredCompletionPending {
+                    sessionType = isBreakPreset ? "Break" : (activeMode == "Custom Timer" ? "Custom" : "Focus")
+                } else if isStopwatchRunning {
+                    sessionType = "Stopwatch"
+                } else {
+                    sessionType = "Idle"
+                }
+                let sessId = isDeferredCompletionPending ? (deferredCompletionSessionId ?? activeTimerSessionId) : activeTimerSessionId
+                let sDeadline = isDeferredCompletionPending ? deferredCompletionTargetEndDate : targetEndDate
+                let sStartDate = isDeferredCompletionPending ? deferredCompletionSegmentStartDate : sessionSegmentStartDate
+                let currentTaskId = isDeferredCompletionPending ? deferredCompletionTaskId : ((tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted) ? tasks[activeTaskIndex].id : nil)
+
+                idleReviewCoordinator.tick(
+                    now: now,
+                    isSessionActive: isSessionActive,
+                    sessionType: sessionType,
+                    sessionId: sessId,
+                    taskId: currentTaskId,
+                    sessionDeadline: sDeadline,
+                    sessionStartDate: sStartDate
+                )
+
+                if isDeferredCompletionPending && !isDisputedInactivityPresent(at: now) {
+                    finalizeDeferredSession(decision: .countAsFocus)
+                }
+            }
             guard !isLoadingPersistedData else { return }
             persistData()
         }
@@ -229,6 +259,9 @@ public class TimerViewModel: ObservableObject {
         }
     }
     @Published public var isDeferredCompletionPending: Bool = false
+    public var isCountdownMutationBlocked: Bool {
+        isDeferredCompletionPending
+    }
     internal var deferredCompletionSessionId: UUID? = nil
     internal var deferredCompletionTargetEndDate: Date? = nil
     internal var deferredCompletionTaskId: UUID? = nil
@@ -932,7 +965,8 @@ public class TimerViewModel: ObservableObject {
             self.deferredCompletionTaskId = recovery.activeSessionTaskId
             self.deferredCompletionSegmentStartDate = recovery.sessionSegmentStartDate
             self.deferredCompletionSegmentCreditedSeconds = recovery.segmentCreditedSeconds
-            self.segmentCreditedSeconds = recovery.segmentCreditedSeconds
+            self.sessionSegmentStartDate = nil
+            self.segmentCreditedSeconds = 0
             self.activePreset = recovery.activePreset
             self.activeMode = recovery.activeMode
             self.isBreakSession = recovery.isBreakSession
@@ -1388,7 +1422,7 @@ public class TimerViewModel: ObservableObject {
                 isDeferredCompletionPending: isDeferredCompletionPending ? true : nil,
                 pendingIdleIntervals: idleReviewCoordinator.pendingIntervals.isEmpty ? nil : idleReviewCoordinator.pendingIntervals,
                 sessionExclusionLedger: sessionExclusionLedger.isEmpty ? nil : sessionExclusionLedger,
-                checkpointTimestamp: max(now, sessionSegmentStartDate?.addingTimeInterval(Double(segmentCreditedSeconds)) ?? now)
+                checkpointTimestamp: max(now, (isDeferredCompletionPending ? deferredCompletionSegmentStartDate : sessionSegmentStartDate)?.addingTimeInterval(Double(isDeferredCompletionPending ? deferredCompletionSegmentCreditedSeconds : segmentCreditedSeconds)) ?? now)
             )
         } else {
             recoveryState = nil
@@ -1923,6 +1957,7 @@ public class TimerViewModel: ObservableObject {
     // MARK: Mode Switching within Timer Sessions
     public func changeMode(to newMode: String, origin: ConflictPresentationOrigin = .mainWindow) {
         guard !isPersistenceBlocked else { return }
+        guard !isCountdownMutationBlocked else { return }
         if newMode == "Pomodoro" {
             switchToFocus(minutes: 25, origin: origin)
         } else if newMode == "Custom Timer" {
@@ -1940,8 +1975,10 @@ public class TimerViewModel: ObservableObject {
         origin: ConflictPresentationOrigin = .mainWindow
     ) {
         guard !isPersistenceBlocked else { return }
+        guard !isCountdownMutationBlocked else { return }
         let now = currentDateProvider()
         reconcileIfExpired(at: now)
+        guard !isCountdownMutationBlocked else { return }
         let isSame = (activePreset == name && activeMode == mode && totalTime == (minutes * 60 + seconds))
         if isSame { return }
 
@@ -1959,6 +1996,7 @@ public class TimerViewModel: ObservableObject {
 
     public func applyPresetDirectly(name: String, minutes: Int, seconds: Int = 0, mode: String = "Pomodoro", isBreak: Bool = false) {
         guard !isPersistenceBlocked else { return }
+        guard !isCountdownMutationBlocked else { return }
         if isTimerRunning { stopTimer() }
         fractionalRemaining = nil
         pausedSession = nil
@@ -1986,6 +2024,7 @@ public class TimerViewModel: ObservableObject {
 
     public func pauseAndSwitch() {
         guard !isPersistenceBlocked else { return }
+        guard !isCountdownMutationBlocked else { return }
         endAndSwitch()
     }
 
@@ -1996,6 +2035,7 @@ public class TimerViewModel: ObservableObject {
 
     public func endAndSwitch(autoStart: Bool = true) {
         guard !isPersistenceBlocked else { return }
+        guard !isCountdownMutationBlocked else { return }
         guard let pending = pendingTimerRequest else {
             showConflictModal = false
             conflictOrigin = nil
@@ -2030,6 +2070,7 @@ public class TimerViewModel: ObservableObject {
 
     public func restorePreservedSession() {
         guard !isPersistenceBlocked else { return }
+        guard !isCountdownMutationBlocked else { return }
         guard let preserved = preservedSession else { return }
 
         // If current timer is active, swap it into preservedSession so neither is lost!
@@ -2037,6 +2078,7 @@ public class TimerViewModel: ObservableObject {
         if isTimerRunning {
             stopTimer()
         }
+        guard !isCountdownMutationBlocked else { return }
         let swapSession = currentWasActive ? PreservedTimerSession(
             activePreset: activePreset,
             activeMode: activeMode,
@@ -2081,6 +2123,7 @@ public class TimerViewModel: ObservableObject {
 
     public func restorePreservedSessionIfNeeded() {
         guard !isPersistenceBlocked else { return }
+        guard !isCountdownMutationBlocked else { return }
         if hasPreservedSession && !isTimerRunning {
             restorePreservedSession()
         }
@@ -2145,7 +2188,7 @@ public class TimerViewModel: ObservableObject {
         settleActiveTime(at: now)
 
         // 2. Periodic Idle Review Evaluation (evaluates return against fully accrued session credit)
-        if idleReviewCoordinator.isEnabled {
+        if idleReviewCoordinator.isEnabled || idleReviewCoordinator.isCurrentlyIdleDetected {
             let isSessionActive = isTimerRunning || isStopwatchRunning || isDeferredCompletionPending
             let sessionType: String
             if isTimerRunning || isDeferredCompletionPending {
@@ -2189,6 +2232,10 @@ public class TimerViewModel: ObservableObject {
                 deferredCompletionSegmentStartDate = sessionSegmentStartDate
                 deferredCompletionSegmentCreditedSeconds = segmentCreditedSeconds
 
+                // Clear running segment state so subsequent actions cannot capture it
+                sessionSegmentStartDate = nil
+                segmentCreditedSeconds = 0
+
                 isTimerRunning = false
                 targetEndDate = nil
                 fractionalRemaining = nil
@@ -2222,6 +2269,13 @@ public class TimerViewModel: ObservableObject {
             handleSessionComplete(at: now)
         }
 
+        // 3b. Finalize deferred session if user returned and has no registered pending reviews or active disputed inactivity
+        if isDeferredCompletionPending {
+            if !isDisputedInactivityPresent(at: now) {
+                finalizeDeferredSession(decision: .countAsFocus)
+            }
+        }
+
         recalculateFocusMetrics(now: now)
 
         // 3. Periodic checkpoint for crash recovery
@@ -2249,6 +2303,7 @@ public class TimerViewModel: ObservableObject {
     // MARK: Focus Timer Core Controls
     public func startTimer(at date: Date? = nil) {
         guard !isPersistenceBlocked, !hasTerminated else { return }
+        guard !isCountdownMutationBlocked else { return }
         guard !isTimerRunning else { return }
         // Ensure only one countdown timer runs at a time
         isTimerRunning = true
@@ -2294,6 +2349,7 @@ public class TimerViewModel: ObservableObject {
 
     public func stopTimer(at date: Date? = nil) {
         guard !isPersistenceBlocked else { return }
+        if isCountdownMutationBlocked && !isTimerRunning { return }
         let now = date ?? currentDateProvider()
 
         if reconcileIfExpired(at: now) {
@@ -2349,6 +2405,7 @@ public class TimerViewModel: ObservableObject {
 
     public func toggleTimer() {
         guard !isPersistenceBlocked else { return }
+        guard !isCountdownMutationBlocked else { return }
         if !isTimerRunning && (customTimeInputController.isEditing || customTimeInputController.hasInvalidDraft) {
             guard commitActiveTimeInputBeforeStart() else { return }
         }
@@ -2356,11 +2413,13 @@ public class TimerViewModel: ObservableObject {
         if reconcileIfExpired(at: now) {
             return
         }
+        guard !isCountdownMutationBlocked else { return }
         if isTimerRunning {
             stopTimer(at: now)
         } else {
             if timeRemaining == 0 && hasPreservedSession {
                 restorePreservedSession()
+                guard !isCountdownMutationBlocked else { return }
                 startTimer()
             } else {
                 startTimer()
@@ -2370,12 +2429,16 @@ public class TimerViewModel: ObservableObject {
 
     public func resetFocusTimer() {
         guard !isPersistenceBlocked else { return }
+        guard !isCountdownMutationBlocked else { return }
         let now = currentDateProvider()
         if isTimerRunning {
+            reconcileIfExpired(at: now)
+            guard !isCountdownMutationBlocked else { return }
             stopTimer(at: now)
         } else {
             reconcileIfExpired(at: now)
         }
+        guard !isCountdownMutationBlocked else { return }
         fractionalRemaining = nil
         timeRemaining = totalTime
         preciseProgress = 1.0
@@ -2391,6 +2454,7 @@ public class TimerViewModel: ObservableObject {
     // MARK: Stopwatch Core Controls (Priority 5)
     public func startStopwatch() {
         guard !isPersistenceBlocked, !hasTerminated else { return }
+        guard !isCountdownMutationBlocked else { return }
         guard !isStopwatchRunning else { return }
         isStopwatchRunning = true
         let now = currentDateProvider()
@@ -2432,6 +2496,7 @@ public class TimerViewModel: ObservableObject {
         if isStopwatchRunning {
             stopStopwatch()
         } else {
+            guard !isCountdownMutationBlocked else { return }
             startStopwatch()
         }
     }
@@ -2515,6 +2580,10 @@ public class TimerViewModel: ObservableObject {
                 resetStopwatch()
             }
         } else {
+            guard !isCountdownMutationBlocked else { return }
+            let now = currentDateProvider()
+            reconcileIfExpired(at: now)
+            guard !isCountdownMutationBlocked else { return }
             if timeRemaining < totalTime {
                 showResetAlert = true
             } else {
@@ -2539,7 +2608,7 @@ public class TimerViewModel: ObservableObject {
         reconcileIfExpired(at: now)
 
         let newTask = FocusTask(title: title, estimatedMinutes: expectedMinutes, icon: "checkmark.circle", iconColor: .cyan)
-        let shouldBecomeActive = tasks.isEmpty || !tasks.indices.contains(activeTaskIndex) || tasks[activeTaskIndex].isCompleted
+        let shouldBecomeActive = (tasks.isEmpty || !tasks.indices.contains(activeTaskIndex) || tasks[activeTaskIndex].isCompleted) && !isCountdownMutationBlocked
 
         if shouldBecomeActive {
             let oldTaskId = (isTimerRunning && isFocusPreset) ? activeSessionTaskId : (isStopwatchRunning && tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted ? tasks[activeTaskIndex].id : nil)
@@ -2571,10 +2640,12 @@ public class TimerViewModel: ObservableObject {
 
     public func selectTask(at index: Int) {
         guard !isPersistenceBlocked else { return }
+        guard !isCountdownMutationBlocked else { return }
         guard tasks.indices.contains(index), !tasks[index].isCompleted else { return }
 
         let now = currentDateProvider()
         reconcileIfExpired(at: now)
+        guard !isCountdownMutationBlocked else { return }
 
         let targetTask = tasks[index]
         let currentActiveId = (isTimerRunning && isFocusPreset) ? activeSessionTaskId : (isStopwatchRunning && tasks.indices.contains(activeTaskIndex) && !tasks[activeTaskIndex].isCompleted ? tasks[activeTaskIndex].id : nil)
@@ -2613,9 +2684,20 @@ public class TimerViewModel: ObservableObject {
     public func toggleTaskCompletion(at index: Int) {
         guard !isPersistenceBlocked else { return }
         guard tasks.indices.contains(index) else { return }
+        if isCountdownMutationBlocked {
+            if let defId = deferredCompletionTaskId, tasks[index].id == defId {
+                return
+            }
+        }
 
         let now = currentDateProvider()
         reconcileIfExpired(at: now)
+        if isCountdownMutationBlocked {
+            if let defId = deferredCompletionTaskId, tasks.indices.contains(index) && tasks[index].id == defId {
+                return
+            }
+        }
+        guard tasks.indices.contains(index) else { return }
 
         let targetTask = tasks[index]
         let isRunningFocus = isTimerRunning && isFocusPreset
@@ -2698,9 +2780,20 @@ public class TimerViewModel: ObservableObject {
     public func removeTask(at index: Int) {
         guard !isPersistenceBlocked else { return }
         guard tasks.indices.contains(index) else { return }
+        if isCountdownMutationBlocked {
+            if let defId = deferredCompletionTaskId, tasks[index].id == defId {
+                return
+            }
+        }
 
         let now = currentDateProvider()
         reconcileIfExpired(at: now)
+        if isCountdownMutationBlocked {
+            if let defId = deferredCompletionTaskId, tasks.indices.contains(index) && tasks[index].id == defId {
+                return
+            }
+        }
+        guard tasks.indices.contains(index) else { return }
 
         let deletingTask = tasks[index]
         let isRunningFocus = isTimerRunning && isFocusPreset
@@ -2781,6 +2874,19 @@ public class TimerViewModel: ObservableObject {
     public func resetTaskTime(at index: Int) {
         guard !isPersistenceBlocked else { return }
         guard tasks.indices.contains(index) else { return }
+        if isCountdownMutationBlocked {
+            if let defId = deferredCompletionTaskId, tasks[index].id == defId {
+                return
+            }
+        }
+        let now = currentDateProvider()
+        reconcileIfExpired(at: now)
+        if isCountdownMutationBlocked {
+            if let defId = deferredCompletionTaskId, tasks.indices.contains(index) && tasks[index].id == defId {
+                return
+            }
+        }
+        guard tasks.indices.contains(index) else { return }
         tasks[index].timeSpentSeconds = 0
         persistData(force: true)
     }
@@ -2804,6 +2910,7 @@ public class TimerViewModel: ObservableObject {
 
     public func requestPresetChange(name: String, minutes: Int, origin: ConflictPresentationOrigin = .mainWindow) {
         guard !isPersistenceBlocked else { return }
+        guard !isCountdownMutationBlocked else { return }
         guard minutes > 0 else { return }
         if name == "Focus" {
             switchToFocus(minutes: minutes, origin: origin)
@@ -2823,6 +2930,7 @@ public class TimerViewModel: ObservableObject {
 
     public func setCustomDuration(minutes: Int, seconds: Int, origin: ConflictPresentationOrigin = .mainWindow) {
         guard !isPersistenceBlocked else { return }
+        guard !isCountdownMutationBlocked else { return }
         let safeM = max(0, min(minutes, 360))
         let safeS = max(0, min(seconds, 59))
         requestModeOrPresetChange(name: "Custom", minutes: safeM, seconds: safeS, mode: "Custom Timer", isBreak: false, origin: origin)
@@ -2830,6 +2938,10 @@ public class TimerViewModel: ObservableObject {
 
     public func switchToBreak(minutes: Int = 5, origin: ConflictPresentationOrigin = .mainWindow) {
         guard !isPersistenceBlocked else { return }
+        guard !isCountdownMutationBlocked else { return }
+        let now = currentDateProvider()
+        reconcileIfExpired(at: now)
+        guard !isCountdownMutationBlocked else { return }
         let breakName = (minutes >= 15) ? "Long Break" : "Short Break"
         // If we are already in this exact Break preset with the exact same duration, do nothing
         if isBreakPreset && activeMode == "Pomodoro" && activePreset == breakName && totalTime == minutes * 60 { return }
@@ -2850,6 +2962,10 @@ public class TimerViewModel: ObservableObject {
 
     public func switchToFocus(minutes: Int = 25, origin: ConflictPresentationOrigin = .mainWindow) {
         guard !isPersistenceBlocked else { return }
+        guard !isCountdownMutationBlocked else { return }
+        let now = currentDateProvider()
+        reconcileIfExpired(at: now)
+        guard !isCountdownMutationBlocked else { return }
         // If we are already in Focus with this duration, do nothing
         if isFocusPreset && activeMode == "Pomodoro" && (activePreset == "Focus" && totalTime == minutes * 60) { return }
 
@@ -2869,6 +2985,7 @@ public class TimerViewModel: ObservableObject {
 
     public func applyPendingPreset() {
         guard !isPersistenceBlocked else { return }
+        guard !isCountdownMutationBlocked else { return }
         guard let pending = pendingPreset else { return }
         requestPresetChange(name: pending.name, minutes: pending.minutes)
         pendingPreset = nil
@@ -2880,12 +2997,14 @@ public class TimerViewModel: ObservableObject {
 
     public func applyPreset(name: String, minutes: Int) {
         guard !isPersistenceBlocked else { return }
+        guard !isCountdownMutationBlocked else { return }
         let isBreak = (name == "Short Break" || name == "Long Break" || name == "Break")
         applyPresetDirectly(name: name, minutes: minutes, seconds: 0, mode: "Pomodoro", isBreak: isBreak)
     }
 
     public func skipSession() {
         guard !isPersistenceBlocked, !hasTerminated else { return }
+        guard !isCountdownMutationBlocked else { return }
         let now = currentDateProvider()
         if reconcileIfExpired(at: now) {
             return
@@ -3059,6 +3178,7 @@ public class TimerViewModel: ObservableObject {
 
     public func adjustCustomDuration(by minutes: Int) {
         guard !isPersistenceBlocked else { return }
+        guard !isCountdownMutationBlocked else { return }
         guard !isTimerRunning else { return }
         let currentTotal = totalTime
         let newTotal = min(max(currentTotal + minutes * 60, 5), 360 * 60)
@@ -3217,6 +3337,14 @@ public class TimerViewModel: ObservableObject {
             // Pending time remains in queue; confirmed time remains without provisional credit.
             persistData(force: true)
         }
+    }
+
+    internal func isDisputedInactivityPresent(at now: Date) -> Bool {
+        let targetSessionId = deferredCompletionSessionId ?? activeTimerSessionId
+        let hasPendingReviewsForSession = idleReviewCoordinator.pendingIntervals.contains { $0.sessionId == targetSessionId }
+        let isIdleExceedingThreshold = idleReviewCoordinator.isCurrentlyIdleDetected ||
+            idleReviewCoordinator.activityProvider.systemIdleDuration(at: now) >= Double(idleReviewCoordinator.thresholdSeconds)
+        return hasPendingReviewsForSession || isIdleExceedingThreshold
     }
 
     internal func finalizeDeferredSession(decision: IdleReviewDecision) {

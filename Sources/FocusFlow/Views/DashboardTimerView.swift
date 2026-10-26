@@ -191,13 +191,14 @@ public struct DashboardTimerView: View {
                         .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
+                    .disabled(viewModel.isCountdownMutationBlocked)
                     .onHover { h in
                         withAnimation(.easeInOut(duration: 0.15)) {
                             isFocusHovered = h
                         }
                         if h { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
                     }
-                    .help(viewModel.isTimerActive && !viewModel.isFocusPreset ? "Switch to Focus Session (confirms ending break)" : "Switch to Focus Session")
+                    .help(viewModel.isCountdownMutationBlocked ? "Review your inactive time before starting another session." : (viewModel.isTimerActive && !viewModel.isFocusPreset ? "Switch to Focus Session (confirms ending break)" : "Switch to Focus Session"))
 
                     Button {
                         withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
@@ -234,13 +235,14 @@ public struct DashboardTimerView: View {
                         .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
+                    .disabled(viewModel.isCountdownMutationBlocked)
                     .onHover { h in
                         withAnimation(.easeInOut(duration: 0.15)) {
                             isBreakHovered = h
                         }
                         if h { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
                     }
-                    .help(viewModel.isTimerActive && viewModel.isFocusPreset ? "Switch to Break (confirms ending focus session)" : "Switch to Break Session")
+                    .help(viewModel.isCountdownMutationBlocked ? "Review your inactive time before starting another session." : (viewModel.isTimerActive && viewModel.isFocusPreset ? "Switch to Break (confirms ending focus session)" : "Switch to Break Session"))
                 }
                 .padding(3)
                 .background(Color.white.opacity(0.04), in: Capsule())
@@ -323,6 +325,14 @@ public struct DashboardTimerView: View {
         let dockButtonWidth: CGFloat = isCompact ? 86 : 108
         let dockSpacing: CGFloat = isCompact ? 8 : 12
 
+        let isPrimaryBlocked: Bool = {
+            if isStopwatchMode {
+                return viewModel.isCountdownMutationBlocked && !viewModel.isStopwatchRunning
+            } else {
+                return viewModel.isCountdownMutationBlocked && !viewModel.isTimerRunning
+            }
+        }()
+
         HStack(spacing: dockSpacing) {
             CapsuleActionButton(
                 icon: (isStopwatchMode ? viewModel.isStopwatchRunning : viewModel.isTimerRunning) ? "pause.fill" : "play.fill",
@@ -340,6 +350,8 @@ public struct DashboardTimerView: View {
                 }
             }
             .keyboardShortcut(.space, modifiers: [])
+            .disabled(isPrimaryBlocked)
+            .help(isPrimaryBlocked ? "Review your inactive time before starting another session." : (viewModel.isTimerRunning ? "Pause timer" : "Start timer"))
 
             CapsuleActionButton(
                 icon: "arrow.counterclockwise",
@@ -350,6 +362,8 @@ public struct DashboardTimerView: View {
             ) {
                 viewModel.requestReset(isStopwatch: isStopwatchMode)
             }
+            .disabled(viewModel.isCountdownMutationBlocked && !isStopwatchMode)
+            .help(viewModel.isCountdownMutationBlocked && !isStopwatchMode ? "Review your inactive time before starting another session." : "Reset Timer")
 
             if !isStopwatchMode {
                 CapsuleActionButton(
@@ -361,6 +375,8 @@ public struct DashboardTimerView: View {
                 ) {
                     viewModel.skipSession()
                 }
+                .disabled(viewModel.isCountdownMutationBlocked)
+                .help(viewModel.isCountdownMutationBlocked ? "Review your inactive time before starting another session." : "Skip Session")
             }
 
             CapsuleActionButton(

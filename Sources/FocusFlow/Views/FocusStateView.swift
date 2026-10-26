@@ -23,6 +23,7 @@ public struct FocusStateView: View {
             if viewModel.isStopwatchRunning { return "Pause" }
             return viewModel.stopwatchTime == 0 ? "Start" : "Resume"
         } else {
+            if viewModel.isCountdownMutationBlocked { return "Waiting for Review" }
             if viewModel.isTimerRunning { return "Pause" }
             return viewModel.timeRemaining == viewModel.totalTime ? "Start" : "Resume"
         }
@@ -47,6 +48,7 @@ public struct FocusStateView: View {
                     ClockFaceView(viewModel: viewModel, style: clockStyle, size: min(geometry.size.width * 0.72, geometry.size.height * 0.74, 680), minimal: true, isStopwatch: isStopwatch)
                 }
                 .buttonStyle(.plain)
+                .disabled(!isStopwatch && viewModel.isCountdownMutationBlocked)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 VStack {
@@ -85,6 +87,8 @@ public struct FocusStateView: View {
                         ) {
                             toggleRunning()
                         }
+                        .disabled(!isStopwatch && viewModel.isCountdownMutationBlocked)
+                        .opacity(!isStopwatch && viewModel.isCountdownMutationBlocked ? 0.6 : 1.0)
                         .keyboardShortcut(.space, modifiers: [])
                         .frame(minWidth: 145)
 

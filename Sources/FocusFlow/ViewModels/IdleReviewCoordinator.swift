@@ -53,6 +53,10 @@ public class IdleReviewCoordinator: ObservableObject {
     }
     @Published public var activeReviewInterval: IdleReviewInterval? = nil
 
+    public var isCurrentlyIdleDetected: Bool {
+        return isCurrentlyIdle || state.isIdleDetected
+    }
+
     // Injected Dependencies
     public let activityProvider: IdleActivityProvider
     public var currentDateProvider: () -> Date

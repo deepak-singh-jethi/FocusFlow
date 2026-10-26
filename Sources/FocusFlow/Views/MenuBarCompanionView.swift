@@ -339,9 +339,9 @@ public struct MenuBarCompanionView: View {
                                 .foregroundColor(companionController.canAdjustMinus5 ? .gray.opacity(0.8) : .gray.opacity(0.3))
                         }
                         .buttonStyle(.plain)
-                        .disabled(!companionController.canAdjustMinus5)
+                        .disabled(!companionController.canAdjustMinus5 || viewModel.isCountdownMutationBlocked)
                         .accessibilityLabel("Subtract 5 minutes")
-                        .help("Subtract 5 minutes (preserves seconds)")
+                        .help(viewModel.isCountdownMutationBlocked ? "Review your inactive time before starting another session." : "Subtract 5 minutes (preserves seconds)")
 
                         // Minutes Direct Input Field
                         ZStack {
@@ -488,9 +488,9 @@ public struct MenuBarCompanionView: View {
                                 .foregroundColor(companionController.canAdjustPlus5 ? .orange : .gray.opacity(0.3))
                         }
                         .buttonStyle(.plain)
-                        .disabled(!companionController.canAdjustPlus5)
+                        .disabled(!companionController.canAdjustPlus5 || viewModel.isCountdownMutationBlocked)
                         .accessibilityLabel("Add 5 minutes")
-                        .help("Add 5 minutes (preserves seconds)")
+                        .help(viewModel.isCountdownMutationBlocked ? "Review your inactive time before starting another session." : "Add 5 minutes (preserves seconds)")
                     }
 
                     // Validation Error Banner (if invalid draft)
@@ -534,6 +534,8 @@ public struct MenuBarCompanionView: View {
                                     )
                             }
                             .buttonStyle(.plain)
+                            .disabled(viewModel.isCountdownMutationBlocked)
+                            .help(viewModel.isCountdownMutationBlocked ? "Review your inactive time before starting another session." : "")
                         }
                     }
                     .padding(.horizontal, 4)
@@ -579,6 +581,8 @@ public struct MenuBarCompanionView: View {
                 .scaleEffect(isPlayHovered ? 1.02 : 1.0)
             }
             .buttonStyle(.plain)
+            .disabled(viewModel.isCountdownMutationBlocked && !viewModel.isTimerRunning)
+            .help(viewModel.isCountdownMutationBlocked && !viewModel.isTimerRunning ? "Review your inactive time before starting another session." : "")
             .onHover { h in
                 isPlayHovered = h
                 if h { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
@@ -602,6 +606,8 @@ public struct MenuBarCompanionView: View {
                 .overlay(Capsule().stroke(Color.white.opacity(isResetHovered ? 0.16 : 0.08), lineWidth: 1))
             }
             .buttonStyle(.plain)
+            .disabled(viewModel.isCountdownMutationBlocked)
+            .help(viewModel.isCountdownMutationBlocked ? "Review your inactive time before starting another session." : "Reset Timer")
             .onHover { h in
                 isResetHovered = h
                 if h { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
@@ -625,6 +631,8 @@ public struct MenuBarCompanionView: View {
                 .overlay(Capsule().stroke(Color.white.opacity(isSkipHovered ? 0.16 : 0.08), lineWidth: 1))
             }
             .buttonStyle(.plain)
+            .disabled(viewModel.isCountdownMutationBlocked)
+            .help(viewModel.isCountdownMutationBlocked ? "Review your inactive time before starting another session." : "Skip Session")
             .onHover { h in
                 isSkipHovered = h
                 if h { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
@@ -670,6 +678,8 @@ public struct MenuBarCompanionView: View {
             )
         }
         .buttonStyle(.plain)
+        .disabled(viewModel.isCountdownMutationBlocked)
+        .help(viewModel.isCountdownMutationBlocked ? "Review your inactive time before starting another session." : "")
     }
 
     // MARK: - Compact Conflict Confirmation Card (Menu Bar)
@@ -864,6 +874,8 @@ public struct MenuBarCompanionView: View {
                 .scaleEffect(isPlayHovered ? 1.02 : 1.0)
             }
             .buttonStyle(.plain)
+            .disabled(viewModel.isCountdownMutationBlocked && !viewModel.isStopwatchRunning)
+            .help(viewModel.isCountdownMutationBlocked && !viewModel.isStopwatchRunning ? "Review your inactive time before starting another session." : "")
             .onHover { h in
                 isPlayHovered = h
                 if h { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }

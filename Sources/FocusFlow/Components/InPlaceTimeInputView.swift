@@ -180,10 +180,10 @@ public struct InPlaceTimeInputView: View {
                             .overlay(Circle().stroke(model.canAdjustMinus5 ? activeColor.opacity(0.35) : Color.white.opacity(0.08), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
-                    .disabled(!model.canAdjustMinus5)
+                    .disabled(!model.canAdjustMinus5 || viewModel.isCountdownMutationBlocked)
                     .onHover { h in isMinusHovered = h }
                     .accessibilityLabel("Subtract 5 minutes")
-                    .help("Subtract 5 minutes (preserves seconds)")
+                    .help(viewModel.isCountdownMutationBlocked ? "Review your inactive time before starting another session." : "Subtract 5 minutes (preserves seconds)")
 
                     // Minutes Input Card
                     ZStack {
@@ -244,6 +244,8 @@ public struct InPlaceTimeInputView: View {
                                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                             }
                             .buttonStyle(.plain)
+                            .disabled(viewModel.isCountdownMutationBlocked)
+                            .help(viewModel.isCountdownMutationBlocked ? "Review your inactive time before starting another session." : "")
                             .contentShape(RoundedRectangle(cornerRadius: 18))
                         }
                     }
@@ -319,6 +321,8 @@ public struct InPlaceTimeInputView: View {
                                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                             }
                             .buttonStyle(.plain)
+                            .disabled(viewModel.isCountdownMutationBlocked)
+                            .help(viewModel.isCountdownMutationBlocked ? "Review your inactive time before starting another session." : "")
                             .contentShape(RoundedRectangle(cornerRadius: 18))
                         }
                     }
@@ -341,10 +345,10 @@ public struct InPlaceTimeInputView: View {
                             .overlay(Circle().stroke(model.canAdjustPlus5 ? activeColor.opacity(0.35) : Color.white.opacity(0.08), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
-                    .disabled(!model.canAdjustPlus5)
+                    .disabled(!model.canAdjustPlus5 || viewModel.isCountdownMutationBlocked)
                     .onHover { h in isPlusHovered = h }
                     .accessibilityLabel("Add 5 minutes")
-                    .help("Add 5 minutes (preserves seconds)")
+                    .help(viewModel.isCountdownMutationBlocked ? "Review your inactive time before starting another session." : "Add 5 minutes (preserves seconds)")
                 }
 
                 // Sublabels Row (Symmetrically aligned directly beneath the cards)
@@ -395,10 +399,12 @@ public struct InPlaceTimeInputView: View {
                                     }
                                 }
                             }
+                            .disabled(viewModel.isCountdownMutationBlocked)
+                            .help(viewModel.isCountdownMutationBlocked ? "Review your inactive time before starting another session." : (entry.isCustom ? "Custom duration: \(entry.title)" : "Set duration to \(entry.title)"))
                         }
 
                         // +15m Quick Boost (Seconds-Preserving, with dedicated '+' icon)
-                        let canPlus15 = model.canAdjustPlus15
+                        let canPlus15 = model.canAdjustPlus15 && !viewModel.isCountdownMutationBlocked
                         Button {
                             model.adjustMinutes(by: 15)
                         } label: {
@@ -419,7 +425,7 @@ public struct InPlaceTimeInputView: View {
                         .onHover { h in isPlus15Hovered = h }
                         .accessibilityLabel("Add 15 minutes")
                         .accessibilityHint(canPlus15 ? "Add 15 minutes to timer" : "Maximum timer limit reached")
-                        .help(canPlus15 ? "Add 15 minutes to timer (preserves seconds)" : "Cannot add 15 minutes: reaches maximum duration (360:59)")
+                        .help(viewModel.isCountdownMutationBlocked ? "Review your inactive time before starting another session." : (canPlus15 ? "Add 15 minutes to timer (preserves seconds)" : "Cannot add 15 minutes: reaches maximum duration (360:59)"))
                     }
                     .padding(.horizontal, 4)
                     .frame(maxWidth: .infinity, alignment: .center)

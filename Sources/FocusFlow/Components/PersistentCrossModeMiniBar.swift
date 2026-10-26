@@ -162,6 +162,14 @@ public struct PersistentCrossModeMiniBar: View {
 
             Spacer()
 
+            let isToggleBlocked: Bool = {
+                if type == .stopwatch {
+                    return viewModel.isCountdownMutationBlocked && !viewModel.isStopwatchRunning
+                } else {
+                    return viewModel.isCountdownMutationBlocked && !viewModel.isTimerRunning
+                }
+            }()
+
             // Play / Pause Toggle
             Button {
                 if type == .preservedSession {
@@ -186,12 +194,13 @@ public struct PersistentCrossModeMiniBar: View {
                     .overlay(Circle().stroke(Color.white.opacity(isPlayHovered ? 0.45 : 0.18), lineWidth: 1))
             }
             .buttonStyle(.plain)
+            .disabled(isToggleBlocked)
             .contentShape(Circle())
             .onHover { h in
                 isPlayHovered = h
                 if h { NSCursor.pointingHand.set() } else if !isBarHovered { NSCursor.arrow.set() }
             }
-            .help(isRunning ? "Pause" : "Resume")
+            .help(isToggleBlocked ? "Review your inactive time before starting another session." : (isRunning ? "Pause" : "Resume"))
 
             // Switch to full screen button
             Button(action: triggerSwitch) {
